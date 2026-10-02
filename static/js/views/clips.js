@@ -59,6 +59,8 @@ export async function render(root, ctx) {
           h('td', {}, h('input', { type: 'number', min: 0, step: 1, value: c.start_minute, style: { width: '70px' },
             onchange: e => patch(c, { start_minute: Number(e.target.value) }) })),
           h('td', {}, h('span', { className: `badge ${badge}` }, c.status),
+            c.status === 'klaar' && (c.analysis_version || 0) < 2
+              ? h('div', { className: 'badge err', title: 'Deze video is geanalyseerd met een oudere versie die de tijden van iPhone-video\'s verkeerd las. Klik op "Opnieuw".' }, 'opnieuw analyseren aanbevolen') : null,
             busy ? h('div', { className: 'progress', title: c.message }, h('div', { style: { width: `${Math.round(100 * c.progress)}%` } })) : null,
             h('div', { className: 'muted small' }, c.message || '')),
           h('td', {}, c.n_keyframes ? h('span', { className: 'badge ok' }, `${c.n_keyframes} sleutelframe(s)`)

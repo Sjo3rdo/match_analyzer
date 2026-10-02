@@ -172,10 +172,17 @@ export async function render(root, ctx) {
   function redraw() { drawFrame(); drawPitch(); drawPairs(); }
 
   async function loadFrame() {
+    // De server rondt af op het dichtstbijzijnde geanalyseerde frame en geeft de exacte tijd terug
+    const res = await fetch(`/api/clips/${clip.id}/frame?t=${t.toFixed(3)}`);
+    if (!res.ok) return toast('Frame kon niet geladen worden', true);
+    const ft = Number(res.headers.get('X-Frame-Time'));
+    if (!isNaN(ft)) { t = ft; slider.value = t; }
     timeLabel.textContent = `${fmtTime(t)} / ${fmtTime(clip.duration)}`;
     const im = new Image();
-    im.src = `/api/clips/${clip.id}/frame?t=${t.toFixed(2)}`;
+    const url = URL.createObjectURL(await res.blob());
+    im.src = url;
     await im.decode().catch(() => toast('Frame kon niet geladen worden', true));
+    URL.revokeObjectURL(url);
     img = im;
     frameCanvas.width = im.naturalWidth; frameCanvas.height = im.naturalHeight;
     predicted = clip.status === 'klaar' ? await api(`/clips/${clip.id}/predict?t=${t}`) : [];
@@ -202,6 +209,7 @@ export async function render(root, ctx) {
     if (pairs.length < 4) return toast('Minstens 4 punten nodig');
     const res = await api(`/clips/${clip.id}/keyframes`, { json: { id: editingId, t, points: pairs } });
     editingId = res.id;
+    t = res.t;
     toast(`Sleutelframe opgeslagen (afwijking ${res.error_m} m)`);
     await loadKeyframes();
     predicted = clip.status === 'klaar' ? await api(`/clips/${clip.id}/predict?t=${t}`) : [];

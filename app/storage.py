@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS clips (
     start_minute REAL DEFAULT 0,
     fps REAL, width INTEGER, height INTEGER, duration REAL,
     status TEXT DEFAULT 'nieuw',
+    analysis_version INTEGER DEFAULT 0,
     progress REAL DEFAULT 0,
     message TEXT
 );
@@ -107,6 +108,12 @@ class Store:
     def __init__(self, path: Path | None = None):
         self.conn = connect(path)
         self.conn.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        cols = {r["name"] for r in self.all("PRAGMA table_info(clips)")}
+        if "analysis_version" not in cols:
+            self.run("ALTER TABLE clips ADD COLUMN analysis_version INTEGER DEFAULT 0")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:

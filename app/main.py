@@ -206,15 +206,23 @@ def clip_video(clip_id: int, request: Request):
     return _range_response(preview if preview.exists() else Path(c["path"]), request)
 
 
+def _snap_time(clip_id: int, t: float) -> float:
+    """Tijd afronden op het dichtstbijzijnde geanalyseerde frame (als de clip geanalyseerd is),
+    zodat een sleutelframe precies op een frame van de camerabeweging valt."""
+    r = store.one("SELECT t FROM frames WHERE clip_id = ? ORDER BY ABS(t - ?) LIMIT 1", (clip_id, t))
+    return r["t"] if r else t
+
+
 @app.get("/api/clips/{clip_id}/frame")
 def clip_frame(clip_id: int, t: float = 0.0):
     c = _get("clips", clip_id)
     try:
-        frame = read_frame(Path(c["path"]), t)
+        frame, ft = read_frame(Path(c["path"]), _snap_time(clip_id, t))
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
-    return Response(buf.tobytes(), media_type="image/jpeg")
+    return Response(buf.tobytes(), media_type="image/jpeg",
+                    headers={"X-Frame-Time": f"{ft:.4f}", "Access-Control-Expose-Headers": "X-Frame-Time"})
 
 
 # --- kalibratie --------------------------------------------------------------------------
@@ -248,6 +256,7 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
         _, err = fit_homography([p["img"] for p in points], [p["pitch"] for p in points])
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    data["t"] = _snap_time(clip_id, float(data["t"]))
     if data.get("id"):
         store.run("UPDATE keyframes SET t = ?, points = ? WHERE id = ? AND clip_id = ?",
                   (data["t"], json.dumps(points), data["id"], clip_id))
@@ -256,7 +265,7 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
         kid = store.run("INSERT INTO keyframes (clip_id, t, points) VALUES (?,?,?)",
                         (clip_id, data["t"], json.dumps(points)))
     analytics.invalidate()
-    return {"id": kid, "error_m": round(err, 2)}
+    return {"id": kid, "t": data["t"], "error_m": round(err, 2)}
 
 
 @app.get("/api/clips/{clip_id}/predict")

@@ -37,7 +37,14 @@ def ffmpeg_exe() -> str:
         return "ffmpeg"
 
 
+# Versie van de analyse; clips die met een oudere versie zijn verwerkt, krijgen in de
+# interface het advies om opnieuw te analyseren.
+ANALYSIS_VERSION = 2
+
+
 def probe(path: Path) -> dict:
+    """Videogegevens. fps en duur komen van ffmpeg: OpenCV leest bij iPhone-video's
+    (variabele framerate) een verkeerde fps uit de container, bijv. 28,7 i.p.v. 30."""
     cap = cv2.VideoCapture(str(path))
     if not cap.isOpened():
         raise ValueError(f"Kan video niet openen: {path.name}")
@@ -46,6 +53,18 @@ def probe(path: Path) -> dict:
     info = {"fps": fps, "width": int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
             "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), "duration": n / fps if fps else 0}
     cap.release()
+    try:
+        import imageio_ffmpeg
+
+        gen = imageio_ffmpeg.read_frames(str(path))
+        meta = next(gen)
+        gen.close()
+        if meta.get("fps"):
+            info["fps"] = float(meta["fps"])
+        if meta.get("duration"):
+            info["duration"] = float(meta["duration"])
+    except Exception:  # noqa: BLE001  (dan maar de OpenCV-waarden)
+        pass
     return info
 
 
@@ -57,14 +76,31 @@ def make_preview(src: Path, dst: Path) -> None:
     subprocess.run(cmd, check=True)
 
 
-def read_frame(path: Path, t: float) -> np.ndarray:
+def read_frame(path: Path, t: float) -> tuple[np.ndarray, float]:
+    """Exact het frame op tijd t (s), plus de echte tijd van dat frame.
+
+    Direct springen met OpenCV komt bij HEVC een paar frames te vroeg uit. Daarom springen
+    we iets ervoor en lezen we vooruit tot het juiste frame, met dezelfde decoder als de
+    analyse (zodat beeld en analyse exact overeenkomen)."""
     cap = cv2.VideoCapture(str(path))
-    cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t) * 1000)
-    ok, frame = cap.read()
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, t - 1.0) * 1000)
+    best, best_t = None, None
+    for _ in range(int(3 * fps) + 10):
+        if not cap.grab():
+            break
+        ft = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
+        if best is not None and ft > t + 0.5 / fps:
+            break
+        ok, frame = cap.retrieve()
+        if ok:
+            best, best_t = frame, ft
+        if ft >= t - 0.5 / fps:
+            break
     cap.release()
-    if not ok:
+    if best is None:
         raise ValueError("Frame niet leesbaar")
-    return frame
+    return best, best_t
 
 
 class _TrackStats:
@@ -140,7 +176,7 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
         ok, frame = cap.read()
         if not ok:
             break
-        t = frame_no / fps
+        t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000  # echte tijdstempel (variabele framerate!)
         det = detector(frame)
         H = motion.step(frame, det.boxes)
         inter.append(H)
@@ -163,6 +199,7 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
 
     store.set_clip_status(clip_id, "analyse", 0.96, "Teams en rugnummers bepalen")
     _finish_tracks(store, clip_id, stats, out_dir)
+    store.run("UPDATE clips SET analysis_version = ? WHERE id = ?", (ANALYSIS_VERSION, clip_id))
     store.set_clip_status(clip_id, "klaar", 1.0, f"{idx} frames geanalyseerd")
 
 
