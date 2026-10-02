@@ -1,0 +1,2 @@
+# Optioneel: automatisch rugnummers lezen
+easyocr>=1.7
