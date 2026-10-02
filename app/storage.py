@@ -79,6 +79,19 @@ CREATE TABLE IF NOT EXISTS keyframes (
     t REAL NOT NULL,
     points TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS moments (
+    id INTEGER PRIMARY KEY,
+    match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    start REAL NOT NULL,
+    end REAL NOT NULL,
+    label TEXT DEFAULT 'Moment',
+    comment TEXT,
+    players TEXT DEFAULT '[]',
+    spotlight_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+    drawings TEXT DEFAULT '[]',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS markers (
     id INTEGER PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
@@ -114,6 +127,14 @@ class Store:
         cols = {r["name"] for r in self.all("PRAGMA table_info(clips)")}
         if "analysis_version" not in cols:
             self.run("ALTER TABLE clips ADD COLUMN analysis_version INTEGER DEFAULT 0")
+        # Oude 'markers' (één tijdstip) worden clips (begin + eind), zoals in de Veo-editor
+        with self.tx() as c:
+            for m in c.execute("SELECT * FROM markers").fetchall():
+                players = json.dumps([m["player_id"]] if m["player_id"] else [])
+                c.execute("INSERT INTO moments (match_id, clip_id, start, end, label, players, spotlight_player_id) "
+                          "VALUES (?,?,?,?,?,?,?)", (m["match_id"], m["clip_id"], max(0.0, m["t"] - 6), m["t"] + 4,
+                                                     m["label"], players, m["player_id"]))
+            c.execute("DELETE FROM markers")
 
     @contextmanager
     def tx(self) -> Iterator[sqlite3.Connection]:
@@ -158,6 +179,21 @@ class Store:
                 c.execute(f"DELETE FROM {table} WHERE clip_id = ?", (clip_id,))
 
     # --- kalibratie ------------------------------------------------------
+    def moment(self, moment_id: int) -> dict[str, Any] | None:
+        m = self.one("SELECT * FROM moments WHERE id = ?", (moment_id,))
+        if m:
+            m["players"] = json.loads(m["players"] or "[]")
+            m["drawings"] = json.loads(m["drawings"] or "[]")
+        return m
+
+    def moments(self, match_id: int) -> list[dict[str, Any]]:
+        rows = self.all("SELECT m.* FROM moments m JOIN clips c ON c.id = m.clip_id WHERE m.match_id = ? "
+                        "ORDER BY c.order_idx, c.id, m.start", (match_id,))
+        for m in rows:
+            m["players"] = json.loads(m["players"] or "[]")
+            m["drawings"] = json.loads(m["drawings"] or "[]")
+        return rows
+
     def keyframes(self, clip_id: int) -> list[dict[str, Any]]:
         rows = self.all("SELECT * FROM keyframes WHERE clip_id = ? ORDER BY t", (clip_id,))
         for r in rows:

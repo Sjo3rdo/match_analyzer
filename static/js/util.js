@@ -69,3 +69,56 @@ export function select(options, value, onchange, attrs = {}) {
     options.map(([v, label]) => h('option', { value: v, selected: String(v) === String(value ?? '') }, label)));
   return s;
 }
+
+export const MOMENT_LABELS = ['Goal', 'Kans', 'Schot', 'Redding', 'Assist', 'Duel', 'Opbouw', 'Pressing', 'Omschakeling', 'Standaardsituatie', 'Fout', 'Leermoment'];
+export function labelList() {
+  return h('datalist', { id: 'moment-labels' }, MOMENT_LABELS.map(l => h('option', { value: l })));
+}
+
+// Delen via de deelknop van de Mac (Safari): AirDrop, Berichten, Mail, WhatsApp, ...
+// Het bestand wordt eerst opgehaald; delen zelf moet daarna met een nieuwe klik (browsereis).
+export async function prepareShare(url, filename) {
+  const blob = await (await fetch(url)).blob();
+  return new File([blob], filename, { type: blob.type || 'video/mp4' });
+}
+export function canShareFiles(file) {
+  try { return !!(navigator.canShare && navigator.canShare({ files: [file] })); } catch { return false; }
+}
+export async function shareFile(file, title) {
+  try {
+    await navigator.share({ files: [file], title });
+  } catch (e) {
+    if (e.name !== 'AbortError') toast('Delen lukte niet: ' + e.message, true);
+  }
+}
+
+// Exportpaneel: maakt de video, en toont daarna Download / Deel / Toon in Finder
+export function exportPanel() {
+  const box = h('div');
+  async function run(matchId, body, title) {
+    box.replaceChildren(h('div', { className: 'muted' }, '⏳ Video maken... (een paar seconden per clip)'));
+    let r;
+    try { r = await api(`/matches/${matchId}/export`, { json: body }); }
+    catch { box.replaceChildren(h('span', { className: 'badge err' }, 'Exporteren mislukt')); return; }
+    const isZip = r.file.endsWith('.zip');
+    const shareBtn = h('button', { className: 'primary', disabled: true }, 'Delen voorbereiden...');
+    box.replaceChildren(
+      isZip ? null : h('video', { src: r.url, controls: true, playsInline: true, style: { width: '100%', borderRadius: '8px' } }),
+      h('div', { className: 'row', style: { marginTop: '8px' } },
+        shareBtn,
+        h('a', { className: 'btn', href: r.url, download: r.file }, '⬇️ Download'),
+        h('button', { onclick: () => api(`/exports/${r.file}/reveal`, { method: 'POST' }) }, 'Toon in Finder')),
+      h('div', { className: 'small muted' }, r.file));
+    try {
+      const file = await prepareShare(r.url, r.file);
+      if (canShareFiles(file)) {
+        shareBtn.disabled = false;
+        shareBtn.textContent = '📤 Deel (AirDrop, WhatsApp, Mail...)';
+        shareBtn.onclick = () => shareFile(file, title);
+      } else {
+        shareBtn.textContent = 'Delen kan niet in deze browser (gebruik Safari)';
+      }
+    } catch { shareBtn.textContent = 'Delen niet beschikbaar'; }
+  }
+  return { el: box, run };
+}

@@ -6,7 +6,7 @@ import * as calibrate from './views/calibrate.js';
 import * as players from './views/players.js';
 import * as video from './views/video.js';
 import * as stats from './views/stats.js';
-import * as highlights from './views/highlights.js';
+import * as moments from './views/moments.js';
 
 const TABS = [
   ['clips', '1. Video\'s', clips],
@@ -14,7 +14,7 @@ const TABS = [
   ['spelers', '3. Spelers', players],
   ['video', 'Video + minimap', video],
   ['statistieken', 'Statistieken', stats],
-  ['highlights', 'Highlights', highlights],
+  ['momenten', 'Clips & delen', moments],
 ];
 
 let cleanup = null;

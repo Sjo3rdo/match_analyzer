@@ -1,5 +1,5 @@
 // Video met spelersboxen + 2D-minimap (bovenaanzicht), momenten markeren en spelers aanklikken.
-import { api, h, toast, fmtTime, matchMinute, TEAM_COLORS, teamName, playerLabel } from '../util.js';
+import { api, h, toast, fmtTime, matchMinute, TEAM_COLORS, teamName, playerLabel, labelList } from '../util.js';
 import { PitchView } from '../pitch.js';
 
 export async function render(root, ctx) {
@@ -19,7 +19,7 @@ export async function render(root, ctx) {
   const mini = h('canvas');
   const side = h('div', { className: 'panel' });
   const eventsBox = h('div', { className: 'list' });
-  const label = h('input', { placeholder: 'Omschrijving (bijv. Goal, Kans, Redding)', style: { flex: 1 } });
+  const label = h('input', { placeholder: 'Label (bijv. Goal, Kans, Redding)', list: 'moment-labels', style: { flex: 1 } });
   const markerPlayer = h('select', {}, h('option', { value: '' }, '– speler (optioneel) –'),
     match.players.map(p => h('option', { value: p.id }, playerLabel(p))));
 
@@ -33,7 +33,8 @@ export async function render(root, ctx) {
         h('div', { className: 'video-wrap' }, video, overlay),
         h('div', { className: 'panel', style: { marginTop: '12px' } },
           h('div', { className: 'row' }, label, markerPlayer,
-            h('button', { className: 'primary', onclick: addMarker }, 'Markeer moment')))),
+            h('button', { className: 'primary', onclick: addMoment, title: 'Maakt een clip van 6 s vóór tot 4 s na dit moment' }, '✂️ Maak clip')),
+          labelList())),
       h('div', {},
         h('div', { className: 'panel' }, h('h3', {}, 'Minimap'), mini,
           h('div', { className: 'small muted', style: { marginTop: '6px' } },
@@ -159,25 +160,29 @@ export async function render(root, ctx) {
       match.players.length ? null : h('div', { className: 'small muted' }, 'Voeg eerst spelers toe bij "3. Spelers".'));
   }
 
-  async function addMarker() {
-    await api(`/matches/${match.id}/markers`, { json: { clip_id: clip.id, t: video.currentTime, label: label.value || 'Moment',
-      player_id: markerPlayer.value ? Number(markerPlayer.value) : null } });
+  async function addMoment() {
+    const t = video.currentTime, pid = markerPlayer.value ? Number(markerPlayer.value) : null;
+    const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: clip.id, start: Math.max(0, t - 6), end: t + 4,
+      label: label.value || 'Moment', players: pid ? [pid] : [], spotlight_player_id: pid } });
     label.value = '';
-    toast('Moment gemarkeerd');
+    toast('Clip gemaakt – bewerk of deel hem bij "Clips & delen"');
     loadEvents();
+    return m;
   }
 
   async function loadEvents() {
-    const [markers, stats] = await Promise.all([api(`/matches/${match.id}/markers`), api(`/matches/${match.id}/stats`)]);
+    const [moments, stats] = await Promise.all([api(`/matches/${match.id}/moments`), api(`/matches/${match.id}/stats`)]);
     const name = ent => playerLabel(playerById.get(ent)) || 'onbekend';
     const items = [
-      ...markers.filter(m => m.clip_id === clip.id).map(m => ({ t: m.t, text: `📌 ${m.label}${m.player_id ? ' – ' + name('p' + m.player_id) : ''}` })),
+      ...moments.filter(m => m.clip_id === clip.id).map(m => ({ t: m.start, text: `🎬 ${m.label}${m.players.length ? ' – ' + m.players.map(id => name('p' + id)).join(', ') : ''}`,
+        href: `#/match/${match.id}/momenten?moment=${m.id}` })),
       ...stats.events.filter(e => e.clip_id === clip.id && (e.kind !== 'sprint' || playerById.has(e.entity))).map(e => ({
         t: e.t, text: e.kind === 'sprint' ? `⚡ Sprint ${name(e.entity)} (${e.value} km/u)`
           : e.kind === 'pass' ? `➡️ Pass ${name(e.entity)} → ${name(e.to)}` : `✖️ Balverlies ${name(e.entity)}` })),
     ].sort((a, b) => a.t - b.t);
     eventsBox.replaceChildren(...(items.length ? items.map(it => h('div', { className: 'list-item', onclick: () => { video.currentTime = Math.max(0, it.t - 2); video.play(); } },
-      h('b', {}, matchMinute(clip, it.t)), h('span', { className: 'muted small' }, fmtTime(it.t)), h('span', {}, it.text)))
+      h('b', {}, matchMinute(clip, it.t)), h('span', { className: 'muted small' }, fmtTime(it.t)), h('span', { style: { flex: 1 } }, it.text),
+      it.href ? h('a', { href: it.href, onclick: e => e.stopPropagation() }, 'bewerk') : null))
       : [h('div', { className: 'muted small' }, 'Nog geen momenten.')]));
   }
 

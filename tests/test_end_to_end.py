@@ -118,8 +118,52 @@ def test_full_flow(env):
     vid = client.get(f"/api/clips/{clip['id']}/video", headers={"Range": "bytes=0-99"})
     assert vid.status_code == 206 and len(vid.content) == 100
 
-    client.post(f"/api/matches/{m['id']}/markers", json={"clip_id": clip["id"], "t": 2.0, "label": "Kans"})
-    r = client.post(f"/api/matches/{m['id']}/export", json={"name": "test", "items": [
-        {"clip_id": clip["id"], "start": 0, "end": 2}, {"clip_id": clip["id"], "start": 3, "end": 5}]})
+    # clip (moment) met spotlight en tekening, exporteren als losse mp4 en als reel/zip
+    mo = client.post(f"/api/matches/{m['id']}/moments", json={
+        "clip_id": clip["id"], "start": 1.0, "end": 3.0, "label": "Sprint", "players": [p["id"]],
+        "spotlight_player_id": p["id"],
+        "drawings": [{"t": 2.0, "duration": 1.5, "shapes": [
+            {"type": "arrow", "from": [0.2, 0.2], "to": [0.5, 0.5], "color": "#ff0000"},
+            {"type": "circle", "center": [0.5, 0.5], "radius": 0.05},
+            {"type": "free", "points": [[0.1, 0.1], [0.2, 0.15], [0.3, 0.1]]},
+            {"type": "text", "at": [0.6, 0.2], "text": "Goed gelopen!"}]}]}).json()
+    assert mo["players"] == [p["id"]] and len(mo["drawings"]) == 1
+    mo2 = client.post(f"/api/matches/{m['id']}/moments", json={"clip_id": clip["id"], "start": 4, "end": 5.5}).json()
+    assert client.patch(f"/api/moments/{mo2['id']}", json={"end": 4.1}).status_code == 400  # te kort
+    assert len(client.get(f"/api/matches/{m['id']}/moments").json()) == 2
+
+    r = client.post(f"/api/matches/{m['id']}/export", json={"name": "loper", "moment_ids": [mo["id"]]})
     assert r.status_code == 200, r.text
+    out = tmp / "exports" / r.json()["file"]
+    assert abs(_duration(out) - (2.0 + 1.5)) < 0.25  # clip + bevroren beeld
+    r = client.post(f"/api/matches/{m['id']}/export", json={"name": "reel", "moment_ids": [mo["id"], mo2["id"]]})
+    assert r.status_code == 200, r.text
+    assert abs(_duration(tmp / "exports" / r.json()["file"]) - (3.5 + 1.5)) < 0.4
+    r = client.post(f"/api/matches/{m['id']}/export", json={"name": "los", "moment_ids": [mo["id"], mo2["id"]], "mode": "zip"})
+    assert r.status_code == 200 and r.json()["file"].endswith(".zip")
     assert client.get(r.json()["url"]).status_code == 200
+
+
+def _duration(path):
+    cap = cv2.VideoCapture(str(path))
+    n, fps = cap.get(cv2.CAP_PROP_FRAME_COUNT), cap.get(cv2.CAP_PROP_FPS)
+    cap.release()
+    return n / fps
+
+
+def test_split_video(env):
+    main, client, tmp = env
+    video = tmp / "lang.mp4"
+    make_video(video)
+    m = client.post("/api/matches", json={"name": "Knip"}).json()
+    with video.open("rb") as f:
+        clip = client.post(f"/api/matches/{m['id']}/clips", files=[("files", ("lang.mp4", f, "video/mp4"))]).json()[0]
+    r = client.post(f"/api/clips/{clip['id']}/split", json={"delete_original": True, "segments": [
+        {"start": 0.5, "end": 2.5, "name": "1e helft", "period": 1, "start_minute": 0},
+        {"start": 3.0, "end": 5.5, "name": "2e helft", "period": 2, "start_minute": 45}]})
+    assert r.status_code == 200, r.text
+    parts = r.json()
+    assert [c["period"] for c in parts] == [1, 2]
+    assert abs(parts[0]["duration"] - 2.0) < 0.6 and abs(parts[1]["duration"] - 2.5) < 0.6
+    clips = client.get(f"/api/matches/{m['id']}").json()["clips"]
+    assert [c["filename"] for c in clips] == ["lang - 1e helft.mp4", "lang - 2e helft.mp4"]
