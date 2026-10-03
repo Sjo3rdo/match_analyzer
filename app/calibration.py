@@ -14,6 +14,7 @@ over het beeld legt.
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 import cv2
@@ -65,7 +66,30 @@ def calibration_residuals(K: np.ndarray, points: list[dict]) -> np.ndarray:
     return np.array(out)
 
 
-def fit_calibration(points: list[dict]) -> tuple[np.ndarray, float]:
+def fit_calibration(points: list[dict], camera: dict | None = None) -> tuple[np.ndarray, float]:
+    """Kalibratie; met `camera` (voorkennis over positie/hoogte) via het cameramodel."""
+    if camera is not None:
+        try:
+            K, _ = fit_camera(points, camera)
+            err = float(np.mean(calibration_residuals(K, points)))
+        except (ValueError, np.linalg.LinAlgError):
+            if calibration_dof(points) < 8:
+                raise
+            K, err = None, np.inf
+        if calibration_dof(points) >= 8:
+            # genoeg aangeklikt: kies wat het beste bij de klikken past
+            try:
+                K2, err2 = _fit_free(points)
+                if err2 < 0.5 * err:
+                    return K2, err2
+            except ValueError:
+                pass
+        if K is not None:
+            return K, err
+    return _fit_free(points)
+
+
+def _fit_free(points: list[dict]) -> tuple[np.ndarray, float]:
     """Homografie beeld -> veld uit punten én punten-op-een-lijn.
 
     points: [{"img": [x, y], "pitch": [X, Y]}]  (bekend veldpunt), of
@@ -253,3 +277,128 @@ class CameraModel:
         for H, w in hs:
             out += w * apply_h(H, pts)
         return out
+
+
+# --- cameramodel: als bekend is waar de camera ongeveer stond ---------------------------------
+#
+# Een homografie heeft 8 onbekenden. Een echte camera boven een plat veld heeft er 7: positie
+# (x, y), hoogte, draaien (yaw), kantelen (tilt), scheef houden (roll) en brandpuntsafstand
+# (zoom). Weten we positie en hoogte ongeveer, en is roll klein, dan blijven er praktisch
+# alleen draaien, kantelen en zoom over: dan is 1 punt + 1 lijn al genoeg.
+#
+# Coördinaten: X langs het veld, Y naar de onderste zijlijn, Z omlaag (rechtshandig), dus
+# een camera op 1,6 m hoogte staat op Z = -1,6.
+
+DEFAULT_HFOV_DEG = 64.0  # telefoon, hoofdlens (1x), video met stabilisatie
+
+
+def camera_homography(params: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """Veld -> beeld voor camera-parameters [x, y, h, yaw, tilt, roll, log_f]."""
+    cx, cy, h, yaw, tilt, roll, logf = params
+    W, Hh = size
+    f = math.exp(logf)
+    fwd = np.array([math.cos(yaw) * math.cos(tilt), math.sin(yaw) * math.cos(tilt), math.sin(tilt)])
+    down = np.array([0.0, 0.0, 1.0])
+    right = np.cross(down, fwd)
+    right /= np.linalg.norm(right) or 1.0
+    dn = np.cross(fwd, right)
+    cr, sr = math.cos(roll), math.sin(roll)
+    right, dn = cr * right + sr * dn, -sr * right + cr * dn
+    R = np.stack([right, dn, fwd])
+    C = np.array([cx, cy, -h])
+    Kc = np.array([[f, 0, W / 2], [0, f, Hh / 2], [0, 0, 1.0]])
+    H = Kc @ np.column_stack([R[:, 0], R[:, 1], -R @ C])
+    return H / H[2, 2] if abs(H[2, 2]) > 1e-12 else H
+
+
+def default_focal(width: int) -> float:
+    return (width / 2) / math.tan(math.radians(DEFAULT_HFOV_DEG / 2))
+
+
+def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma_px: float = 4.0) -> np.ndarray:
+    H = camera_homography(p, size)
+    Hinv_T = np.linalg.inv(H).T
+    r = []
+    for q in points:
+        x, y = q["img"]
+        if q.get("pitch") is not None:
+            X, Y = q["pitch"]
+            v = H @ np.array([X, Y, 1.0])
+            if v[2] <= 1e-6:  # achter de camera: zware straf
+                r += [50.0, 50.0]
+                continue
+            r += [(v[0] / v[2] - x) / sigma_px, (v[1] / v[2] - y) / sigma_px]
+        else:
+            l = Hinv_T @ _line_coeffs(q["line"])
+            n = math.hypot(l[0], l[1]) or 1.0
+            r.append((l[0] * x + l[1] * y + l[2]) / n / sigma_px)
+    sp = max(3.0, float(prior.get("sigma_pos", 5.0)))
+    r += [(p[0] - prior["x"]) / sp, (p[1] - prior["y"]) / sp, (p[2] - prior["h"]) / 0.5,
+          p[5] / math.radians(4), (p[6] - math.log(prior["f"])) / math.log(2.2)]
+    return np.array(r)
+
+
+def _lm(fun, p0: np.ndarray, iters: int = 60) -> np.ndarray:
+    """Levenberg-Marquardt met numerieke afgeleiden (klein probleem, 7 parameters)."""
+    p, r = p0.copy(), fun(p0)
+    lam = 1e-2
+    for _ in range(iters):
+        J = np.empty((len(r), len(p)))
+        for k in range(len(p)):
+            e = 1e-6 * max(1.0, abs(p[k]))
+            pk = p.copy()
+            pk[k] += e
+            J[:, k] = (fun(pk) - r) / e
+        A, g = J.T @ J, J.T @ r
+        improved = False
+        for _ in range(8):
+            try:
+                step = np.linalg.solve(A + lam * np.diag(np.diag(A) + 1e-9), -g)
+            except np.linalg.LinAlgError:
+                break
+            r_new = fun(p + step)
+            if np.all(np.isfinite(r_new)) and r_new @ r_new < r @ r:
+                p, r, lam, improved = p + step, r_new, max(lam / 3, 1e-7), True
+                break
+            lam *= 4
+        if not improved or np.linalg.norm(step) < 1e-9:
+            break
+    return p
+
+
+def fit_camera(points: list[dict], prior: dict) -> tuple[np.ndarray, dict]:
+    """Camera-fit met voorkennis. prior: {x, y, h, f, sigma_pos, width, height}.
+
+    Geeft (homografie beeld -> veld, cameraparameters)."""
+    size = (int(prior["width"]), int(prior["height"]))
+    data_dof = calibration_dof(points)
+    if data_dof < 3:
+        raise ValueError("Met de camerapositie is minder nodig, maar nog wel minstens 1 punt + 1 lijn "
+                         "(of 2 lijnen, of 2 punten)")
+    fun = lambda p: _cam_residuals(p, points, prior, size)  # noqa: E731
+    # Startwaarden: alle kijkrichtingen proberen, de beste verfijnen
+    starts = []
+    for yaw in np.radians(np.arange(0, 360, 10)):
+        for tilt in np.radians([2, 5, 10, 18, 30, 45]):
+            p0 = np.array([prior["x"], prior["y"], prior["h"], yaw, tilt, 0.0, math.log(prior["f"])])
+            starts.append((float(np.sum(fun(p0) ** 2)), p0))
+    starts.sort(key=lambda c: c[0])
+    fits = [_lm(fun, p0) for _, p0 in starts[:4]]
+    p = min(fits, key=lambda q: float(np.sum(fun(q) ** 2)))
+    H = camera_homography(p, size)
+    K = np.linalg.inv(H)
+    K /= K[2, 2]
+    cam = {"x": float(p[0]), "y": float(p[1]), "h": float(p[2]), "yaw_deg": math.degrees(p[3]) % 360,
+           "tilt_deg": math.degrees(p[4]), "roll_deg": math.degrees(p[5]),
+           "hfov_deg": math.degrees(2 * math.atan(size[0] / 2 / math.exp(p[6])))}
+    return K, cam
+
+
+def camera_prior(clip: dict) -> dict | None:
+    """Voorkennis over de camera uit de clipgegevens (positie, hoogte), of None."""
+    if clip.get("cam_x") is None or clip.get("cam_y") is None or not clip.get("width"):
+        return None
+    sigma = 3.0 if clip.get("cam_source") == "hand" else max(4.0, float(clip.get("gps_acc") or 8.0) + 3.0)
+    return {"x": float(clip["cam_x"]), "y": float(clip["cam_y"]), "h": float(clip.get("cam_h") or 1.6),
+            "f": default_focal(int(clip["width"])), "sigma_pos": sigma,
+            "width": int(clip["width"]), "height": int(clip["height"])}

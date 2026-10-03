@@ -1,5 +1,6 @@
 // Stap 2: het veld "vastpinnen" op het beeld. Klik een punt in het beeld en daarna het
-// bijbehorende punt op de veldtekening (of andersom). Minstens 4, liefst 6+ punten.
+// bijbehorende punt (of de lijn) op de veldtekening, of andersom. Weet de app waar je stond
+// (aangeklikt of via GPS), dan rekent hij met een cameramodel en is 1 punt + 1 lijn genoeg.
 import { api, h, fmtTime, toast } from '../util.js';
 import { PitchView, pitchPolylines } from '../pitch.js';
 import { apply, inv, fitCalibration, calibrationInfo, calibrationError } from '../homography.js';
@@ -15,6 +16,8 @@ export async function render(root, ctx) {
   let clip = clips.find(c => c.id === Number(ctx.params.get('clip'))) || clips[0];
   let t = 0, img = null, pairs = [], pendingImg = null, pendingPitch = null, editingId = null;
   let predicted = [], showPred = true, drag = null, keyframes = [];
+  let fit = { H: null, err: null, cam: null, msg: '' }, placingCam = false;
+  const hasCam = () => clip.cam_x != null && clip.cam_y != null;
 
   const frameCanvas = h('canvas');
   const pitchCanvas = h('canvas');
@@ -22,6 +25,7 @@ export async function render(root, ctx) {
   const timeLabel = h('span', { className: 'muted' });
   const errLabel = h('span');
   const pairList = h('div', { className: 'list' });
+  const camPanel = h('div', { className: 'panel' });
   const kfList = h('div');
   const clipSel = h('select', { onchange: e => { clip = clips.find(c => c.id === Number(e.target.value)); ctx.setParam('clip', clip.id); loadClip(); } },
     clips.map(c => h('option', { value: c.id, selected: c.id === clip.id }, c.filename)));
@@ -30,6 +34,7 @@ export async function render(root, ctx) {
 
   root.append(
     h('div', { className: 'hint' },
+      'Tip: stel eerst in waar je stond (📍 hieronder, of via GPS als je video dat heeft). Dan is 1 punt + 1 lijn al genoeg. ' +
       'Zo werkt het: 1) Kies met de schuif een moment. 2) Klik in het beeld op een herkenbaar punt (hoek strafschopgebied, ' +
       'strafschopstip, doelpaal, hoekvlag...) of op een plek ergens op een veldlijn. 3) Klik hetzelfde punt of dezelfde lijn aan ' +
       'in de veldtekening rechts (lijnen worden rood als je erop klikt). Een punt telt 2, een lijn telt mee met hoogstens 2 punten; ' +
@@ -45,6 +50,7 @@ export async function render(root, ctx) {
           'Sleep een punt om het te verschuiven. Rechtsklik op een punt verwijdert het.', predToggle)),
       h('div', {},
         h('div', { className: 'panel' }, h('h3', {}, 'Veld (klik op een punt of lijn)'), pitchCanvas),
+        camPanel,
         h('div', { className: 'panel' },
           h('div', { className: 'row', style: { justifyContent: 'space-between' } }, h('h3', {}, 'Punten in dit sleutelframe'), errLabel),
           pairList,
@@ -54,7 +60,7 @@ export async function render(root, ctx) {
             h('button', { onclick: () => { pairs = []; editingId = null; redraw(); } }, 'Leegmaken'))),
         h('div', { className: 'panel' }, h('h3', {}, 'Sleutelframes van deze video'), kfList))));
 
-  const pv = new PitchView(pitchCanvas);
+  const pv = new PitchView(pitchCanvas, { margin: 14 });  // ruimte om je eigen plek naast het veld aan te klikken
   requestAnimationFrame(() => { pv.resize(); drawPitch(); });
 
   function imgCoords(e) {
@@ -78,7 +84,7 @@ export async function render(root, ctx) {
   frameCanvas.addEventListener('mousemove', e => {
     if (drag === null) return;
     pairs[drag].img = imgCoords(e);
-    drawFrame();
+    drawFrame(); scheduleFit();
   });
   window.addEventListener('mouseup', onUp);
   function onUp() { if (drag !== null) { drag = null; redraw(); } }
@@ -88,9 +94,14 @@ export async function render(root, ctx) {
     const hit = pairs.findIndex(q => Math.hypot(q.img[0] - p[0], q.img[1] - p[1]) < tol);
     if (hit >= 0) { pairs.splice(hit, 1); redraw(); }
   });
-  pitchCanvas.addEventListener('click', e => {
+  pitchCanvas.addEventListener('click', async e => {
     const r = pitchCanvas.getBoundingClientRect();
     const [mx, my] = pv.toM(e.clientX - r.left, e.clientY - r.top);
+    if (placingCam) {
+      placingCam = false;
+      await setCamera({ x: Math.round(mx * 10) / 10, y: Math.round(my * 10) / 10, h: clip.cam_h || 1.6, source: 'hand' });
+      return;
+    }
     let best = null, bd = 2.5;
     for (const lm of pitchInfo.landmarks) {
       const d = Math.hypot(lm.x - mx, lm.y - my);
@@ -129,7 +140,72 @@ export async function render(root, ctx) {
     const G = fitCalibration(list);
     return G ? inv(G) : null;
   }
-  function currentH() { return toImageH(pairs); }
+
+  // Wat is nodig? Met camerapositie rekent de server met een cameramodel (1 punt + 1 lijn is genoeg)
+  function needInfo() {
+    const info = calibrationInfo(pairs);
+    if (!hasCam()) return info;
+    const ok = info.dof >= 3;
+    return { ...info, ok, hint: ok ? '' : `nog ${3 - info.dof} nodig (met je positie: 1 punt + 1 lijn is genoeg)` };
+  }
+
+  let fitTimer, fitSeq = 0;
+  function scheduleFit() {
+    clearTimeout(fitTimer);
+    if (!hasCam()) {
+      const info = calibrationInfo(pairs);
+      const G = info.ok ? fitCalibration(pairs) : null;
+      fit = { H: G ? inv(G) : null, err: G ? calibrationError(G, pairs) : null, cam: null, msg: info.hint };
+      drawFrame(); drawErr();
+      return;
+    }
+    fitTimer = setTimeout(async () => {
+      const seq = ++fitSeq, info = needInfo();
+      if (!info.ok) { fit = { H: null, err: null, cam: null, msg: info.hint }; drawFrame(); drawErr(); drawCamPanel(); return; }
+      const r = await api(`/clips/${clip.id}/calibrate-preview`, { json: { points: pairs } }).catch(() => null);
+      if (seq !== fitSeq) return;
+      fit = r && r.ok ? { H: r.H, err: r.error_m, cam: r.camera, msg: '' } : { H: null, err: null, cam: null, msg: r?.message || 'mislukt' };
+      drawFrame(); drawErr(); drawCamPanel(); drawPitch();
+    }, 150);
+  }
+
+  async function setCamera(data) {
+    const c = await api(`/clips/${clip.id}/camera`, { method: 'PATCH', json: data });
+    Object.assign(clip, c);
+    drawCamPanel(); drawPitch(); scheduleFit(); loadKeyframes();
+  }
+
+  function drawCamPanel() {
+    const heights = [[1.6, 'staand langs de lijn (1,6 m)'], [2.5, 'op een bankje/heuvel (2,5 m)'], [4, 'tribune (4 m)'], [6, 'hoge tribune (6 m)']];
+    const hNow = clip.cam_h || 1.6;
+    camPanel.replaceChildren(...[
+      h('h3', {}, '📍 Waar stond je bij het filmen?'),
+      h('div', { className: 'small', style: { marginBottom: '8px' } },
+        hasCam()
+          ? [`Op ${clip.cam_x.toFixed(0)} m langs het veld, ${clip.cam_y > 68 ? (clip.cam_y - 68).toFixed(0) + ' m buiten de zijlijn' : clip.cam_y < 0 ? (-clip.cam_y).toFixed(0) + ' m achter de verre zijlijn' : 'op het veld'}`,
+             clip.cam_source === 'gps' ? ` (via GPS${clip.gps_acc ? ', ±' + Math.max(5, Math.round(clip.gps_acc)) + ' m' : ''} – klik gerust zelf preciezer)` : ' (aangeklikt)',
+             fit.cam ? h('div', { className: 'muted' }, `Geschat uit je klikken: ${fit.cam.h} m hoog, kijkhoek ${fit.cam.hfov_deg}°`) : null]
+          : 'Nog niet ingesteld. Weet de app waar je stond, dan is 1 punt + 1 lijn al genoeg om te kalibreren.'),
+      h('div', { className: 'row' },
+        h('button', { className: placingCam ? 'primary' : '', onclick: () => { placingCam = !placingCam; drawCamPanel(); } },
+          placingCam ? 'Klik nu op de veldtekening…' : '📍 Klik waar je stond'),
+        h('select', { onchange: e => hasCam() ? setCamera({ h: Number(e.target.value) }) : (clip.cam_h = Number(e.target.value)) },
+          heights.map(([v, l]) => h('option', { value: v, selected: Math.abs(hNow - v) < 0.05 }, l)),
+          heights.some(([v]) => Math.abs(hNow - v) < 0.05) ? null : h('option', { value: hNow, selected: true }, `${hNow} m`)),
+        clip.gps_lat != null ? h('button', { title: 'Stuurt alleen de GPS-positie van deze video naar OpenStreetMap om het veld te vinden', onclick: async e => {
+          e.target.disabled = true; e.target.textContent = 'Zoeken...';
+          try {
+            const r = await api(`/clips/${clip.id}/camera/gps`, { method: 'POST' });
+            Object.assign(clip, r.clip);
+            toast(`Veld gevonden (${r.pitch_length} × ${r.pitch_width} m). Je positie staat op de tekening.`);
+            drawPitch(); scheduleFit(); loadKeyframes();
+          } finally { drawCamPanel(); }
+        } }, '📡 Zoek via GPS') : null,
+        hasCam() ? h('button', { onclick: () => setCamera({ x: null, y: null, source: null }) }, 'Wissen') : null),
+      clip.gps_lat != null && !hasCam() ? h('div', { className: 'small muted', style: { marginTop: '6px' } },
+        'Deze video bevat een GPS-positie. "Zoek via GPS" zoekt het veld op in OpenStreetMap (alleen de coördinaat wordt verstuurd).') : null,
+    ].filter(Boolean));
+  }
 
   function drawFrame() {
     const c = frameCanvas.getContext('2d');
@@ -153,8 +229,7 @@ export async function render(root, ctx) {
       const Hp = toImageH(predicted);
       if (Hp) drawLines(Hp, 'rgba(255,214,0,.85)', [8 * pxPerCss(), 6 * pxPerCss()]);
     }
-    const H = currentH();
-    if (H) drawLines(H, 'rgba(255,255,255,.9)', []);
+    if (fit.H) drawLines(fit.H, 'rgba(255,255,255,.9)', []);
     const r = 7 * pxPerCss();
     pairs.forEach((p, i) => {
       c.beginPath(); c.arc(p.img[0], p.img[1], r, 0, 2 * Math.PI);
@@ -183,6 +258,18 @@ export async function render(root, ctx) {
       if (n) pv.dot(lm.x, lm.y, '#ff2d55', 7, String(n));
       else pv.dot(lm.x, lm.y, pendingPitch?.name === lm.name ? '#ffd600' : 'rgba(255,255,255,.9)', 3.5);
     }
+    if (hasCam()) {  // jouw plek + kijkrichting (als die al bekend is)
+      const cx = fit.cam ? fit.cam.x : clip.cam_x, cy = fit.cam ? fit.cam.y : clip.cam_y;
+      if (fit.cam) {
+        const a = fit.cam.yaw_deg * Math.PI / 180, half = fit.cam.hfov_deg * Math.PI / 360;
+        c.save(); c.fillStyle = 'rgba(10,132,255,.18)'; c.beginPath(); c.moveTo(...pv.toPx(cx, cy));
+        c.lineTo(...pv.toPx(cx + 60 * Math.cos(a - half), cy + 60 * Math.sin(a - half)));
+        c.lineTo(...pv.toPx(cx + 60 * Math.cos(a + half), cy + 60 * Math.sin(a + half))); c.closePath(); c.fill(); c.restore();
+      }
+      pv.dot(cx, cy, '#0a84ff', 7);
+      c.save(); c.font = '600 12px sans-serif'; c.fillStyle = '#fff'; c.textAlign = 'center';
+      c.fillText('jij', ...pv.toPx(cx, cy + 4.5)); c.restore();
+    }
   }
 
   function drawPairs() {
@@ -191,15 +278,17 @@ export async function render(root, ctx) {
       h('button', { onclick: () => { pairs.splice(i, 1); redraw(); } }, '×'))));
     if (!pairs.length) pairList.append(h('div', { className: 'muted small' },
       pendingImg ? 'Klik nu het bijbehorende punt op het veld.' : pendingPitch ? `Klik nu ${pendingPitch.line ? 'een plek op ' : ''}"${pendingPitch.name}" in het beeld.` : 'Nog geen punten.'));
-    const info = calibrationInfo(pairs);
-    const G = info.ok ? fitCalibration(pairs) : null;
-    if (G) {
-      const err = calibrationError(G, pairs);
-      errLabel.replaceChildren(h('span', { className: `badge ${err < 1 ? 'ok' : 'err'}` }, `afwijking ${err.toFixed(2)} m`));
-    } else errLabel.replaceChildren(h('span', { className: 'muted small' }, `${Math.min(info.dof, 8)}/8 · ${info.hint || 'niet eenduidig'}`));
   }
 
-  function redraw() { drawFrame(); drawPitch(); drawPairs(); }
+  function drawErr() {
+    const info = needInfo(), need = hasCam() ? 3 : 8;
+    if (fit.H && fit.err != null) {
+      errLabel.replaceChildren(h('span', { className: `badge ${fit.err < 1 ? 'ok' : 'err'}` }, `afwijking ${fit.err.toFixed(2)} m`));
+    } else errLabel.replaceChildren(h('span', { className: 'muted small' },
+      `${Math.min(info.dof, need)}/${need} · ${fit.msg || info.hint || 'niet eenduidig'}`));
+  }
+
+  function redraw() { drawFrame(); drawPitch(); drawPairs(); scheduleFit(); }
 
   async function loadFrame() {
     // De server rondt af op het dichtstbijzijnde geanalyseerde frame en geeft de exacte tijd terug
@@ -236,7 +325,7 @@ export async function render(root, ctx) {
   }
 
   async function save() {
-    const info = calibrationInfo(pairs);
+    const info = needInfo();
     if (!info.ok) return toast(`Nog niet genoeg: ${info.hint}`);
     const res = await api(`/clips/${clip.id}/keyframes`, { json: { id: editingId, t, points: pairs } });
     editingId = res.id;
@@ -268,6 +357,7 @@ export async function render(root, ctx) {
   });
 
   async function loadClip() {
+    placingCam = false; drawCamPanel();
     slider.max = clip.duration || 0; t = 0; slider.value = 0; pairs = []; editingId = null;
     await loadKeyframes();
     if (keyframes.length) { const kf = keyframes[0]; t = kf.t; slider.value = t; pairs = kf.points.map(p => ({ ...p })); editingId = kf.id; }

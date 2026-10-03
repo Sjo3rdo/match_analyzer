@@ -11,12 +11,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 import cv2
+import numpy as np
 from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics, clips as clip_export, config, pitch, render
-from .calibration import fit_calibration
+from . import analytics, clips as clip_export, config, geo, pitch, render
+from .calibration import camera_prior, fit_calibration, fit_camera
 from .pipeline import Worker, probe, read_frame
 from .storage import Store, clip_dir
 
@@ -144,10 +145,21 @@ def upload_clips(match_id: int, files: list[UploadFile] = File(...)):
             store.run("DELETE FROM clips WHERE id = ?", (cid,))
             shutil.rmtree(dst.parent, ignore_errors=True)
             raise HTTPException(400, str(e)) from e
-        store.run("UPDATE clips SET path = ?, fps = ?, width = ?, height = ?, duration = ? WHERE id = ?",
-                  (str(dst), info["fps"], info["width"], info["height"], info["duration"], cid))
+        _store_probe(cid, dst, info)
         created.append(_get("clips", cid))
     return created
+
+
+def _store_probe(cid: int, path: Path, info: dict, inherit: dict | None = None) -> None:
+    """Videogegevens opslaan; bij knippen GPS en camerapositie van het origineel overnemen."""
+    extra = {k: info.get(k) for k in ("gps_lat", "gps_lon", "gps_acc", "device")}
+    if inherit:
+        for k in ("gps_lat", "gps_lon", "gps_acc", "device", "cam_x", "cam_y", "cam_h", "cam_source"):
+            if extra.get(k) is None:
+                extra[k] = inherit.get(k)
+    sets = ", ".join(f"{k} = ?" for k in extra)
+    store.run(f"UPDATE clips SET path = ?, fps = ?, width = ?, height = ?, duration = ?, {sets} WHERE id = ?",
+              (str(path), info["fps"], info["width"], info["height"], info["duration"], *extra.values(), cid))
 
 
 @app.patch("/api/clips/{clip_id}")
@@ -233,15 +245,16 @@ def clip_frame(clip_id: int, t: float = 0.0):
 @app.get("/api/clips/{clip_id}/keyframes")
 def get_keyframes(clip_id: int):
     out = []
+    prior = camera_prior(_get("clips", clip_id))
     for kf in store.keyframes(clip_id):
-        kf["error_m"] = _calib_error(kf["points"])
+        kf["error_m"] = _calib_error(kf["points"], prior)
         out.append(kf)
     return out
 
 
-def _calib_error(points: list[dict]) -> float | None:
+def _calib_error(points: list[dict], prior: dict | None = None) -> float | None:
     try:
-        return round(fit_calibration(points)[1], 2)
+        return round(fit_calibration(points, camera=prior)[1], 2)
     except ValueError:
         return None
 
@@ -249,10 +262,10 @@ def _calib_error(points: list[dict]) -> float | None:
 @app.post("/api/clips/{clip_id}/keyframes")
 def save_keyframe(clip_id: int, data: dict = Body(...)):
     """data: {t, points: [{name, img: [x, y], pitch: [x, y]}], id?}"""
-    _get("clips", clip_id)
+    clip = _get("clips", clip_id)
     points = data.get("points") or []
     try:
-        _, err = fit_calibration(points)
+        _, err = fit_calibration(points, camera=camera_prior(clip))
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     data["t"] = _snap_time(clip_id, float(data["t"]))
@@ -265,6 +278,63 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
                         (clip_id, data["t"], json.dumps(points)))
     analytics.invalidate()
     return {"id": kid, "t": data["t"], "error_m": round(err, 2)}
+
+
+@app.post("/api/clips/{clip_id}/calibrate-preview")
+def calibrate_preview(clip_id: int, data: dict = Body(...)):
+    """Live voorbeeld tijdens het klikken (met cameramodel): veld -> beeld, fout en camera."""
+    clip = _get("clips", clip_id)
+    points = data.get("points") or []
+    prior = camera_prior(clip)
+    try:
+        K, err = fit_calibration(points, camera=prior)
+    except (ValueError, np.linalg.LinAlgError) as e:
+        return {"ok": False, "message": str(e)}
+    cam = None
+    if prior is not None:
+        try:
+            cam = {k: round(v, 1) for k, v in fit_camera(points, prior)[1].items()}
+        except ValueError:
+            pass
+    H = np.linalg.inv(K)
+    return {"ok": True, "H": (H / H[2, 2]).tolist(), "error_m": round(err, 2), "camera": cam}
+
+
+@app.patch("/api/clips/{clip_id}/camera")
+def set_camera(clip_id: int, data: dict = Body(...)):
+    """Waar stond de camera? data: {x, y, h, source: 'hand'|'gps'} (x/y null = wissen)."""
+    _get("clips", clip_id)
+    fields = {}
+    for k in ("x", "y", "h"):
+        if k in data:
+            fields[f"cam_{k}"] = None if data[k] is None else float(data[k])
+    if "source" in data:
+        fields["cam_source"] = data["source"]
+    if fields:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        store.run(f"UPDATE clips SET {sets} WHERE id = ?", (*fields.values(), clip_id))
+        analytics.invalidate()
+    return _get("clips", clip_id)
+
+
+@app.post("/api/clips/{clip_id}/camera/gps")
+def camera_from_gps(clip_id: int):
+    """Zoek het voetbalveld bij de GPS-positie van de video (OpenStreetMap) en zet de camera daar."""
+    c = _get("clips", clip_id)
+    if c.get("gps_lat") is None:
+        raise HTTPException(400, "Deze video bevat geen GPS-positie")
+    try:
+        polys = geo.query_pitches(c["gps_lat"], c["gps_lon"])
+    except Exception as e:  # noqa: BLE001  (geen internet, server druk, ...)
+        raise HTTPException(502, f"OpenStreetMap niet bereikbaar ({e}). Klik je positie dan zelf aan.") from e
+    try:
+        pos = geo.camera_on_pitch(c["gps_lat"], c["gps_lon"], polys)
+    except ValueError as e:
+        raise HTTPException(404, f"{e}. Klik je positie zelf aan op de veldtekening.") from e
+    store.run("UPDATE clips SET cam_x = ?, cam_y = ?, cam_h = COALESCE(cam_h, 1.6), cam_source = 'gps' WHERE id = ?",
+              (pos["x"], pos["y"], clip_id))
+    analytics.invalidate()
+    return {**pos, "clip": _get("clips", clip_id)}
 
 
 @app.get("/api/clips/{clip_id}/predict")
@@ -462,8 +532,7 @@ def split_clip(clip_id: int, data: dict = Body(...)):
             store.run("DELETE FROM clips WHERE id = ?", (cid,))
             shutil.rmtree(dst.parent, ignore_errors=True)
             raise HTTPException(400, str(e)) from e
-        store.run("UPDATE clips SET path = ?, fps = ?, width = ?, height = ?, duration = ? WHERE id = ?",
-                  (str(dst), info["fps"], info["width"], info["height"], info["duration"], cid))
+        _store_probe(cid, dst, info, inherit=c)
         created.append(_get("clips", cid))
     if data.get("delete_original"):
         delete_clip(clip_id)
