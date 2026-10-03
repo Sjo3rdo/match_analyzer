@@ -151,3 +151,19 @@ def test_propose_refuses_without_lines():
     grass = cv2.add(grass, rng.integers(0, 30, (H, W, 3), dtype=np.uint8))
     prior = {"x": 52.5, "y": 85.0, "h": 6.0, "f": default_focal(W), "sigma_pos": 8.0, "width": W, "height": H}
     assert ac.propose(grass, prior) is None
+
+
+def test_detect_lines_sunny_tinted_line_but_not_the_boards():
+    """Zonnig gras: een verre lijn is licht geelgroen in plaats van wit (telt wel), en achter het
+    veld staat een rij witte reclameborden met bomen erboven (telt niet)."""
+    rng = np.random.default_rng(5)
+    img = np.zeros((1080, 1920, 3), np.uint8)
+    img[:400] = (60, 90, 50)  # bomen (donkergroen)
+    img[400:424] = (235, 235, 235)  # reclameborden
+    img[424:] = (70, 170, 120)  # gras in de zon (BGR: geelgroen)
+    noise = cv2.resize(rng.integers(0, 25, (540, 960), dtype=np.uint8), (1920, 1080))
+    img = cv2.add(img, cv2.merge([noise, noise, noise]))
+    cv2.line(img, (0, 840), (1919, 760), (165, 215, 190), 3)  # verre lijn: dun, lichter en grijzer dan het gras
+    m = ac.detect_lines(img)
+    assert m[370:430].sum() / 255 > 500  # de lijn (werkschaal: halve resolutie)
+    assert m[195:216].sum() / 255 < 50  # de borden

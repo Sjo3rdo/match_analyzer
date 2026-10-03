@@ -63,6 +63,12 @@ export async function render(root, ctx) {
     return moments.filter(m => (!filterPlayer || m.players.includes(Number(filterPlayer)) || m.spotlight_player_id === Number(filterPlayer))
       && (!filterLabel || (m.label || '').toLowerCase().includes(filterLabel)));
   }
+  // Minuut in de wedstrijd, en bij meerdere video's ook welke video en waar daarin
+  function where(c, t) {
+    if (clipById.size < 2) return [h('b', {}, matchMinute(c, t))];
+    const name = (c.filename || '').replace(/\.[^.]+$/, '');
+    return [h('b', {}, matchMinute(c, t)), h('span', { className: 'muted small' }, `${name} ${fmtTime(t)}`)];
+  }
   function names(ids) { return ids.map(id => playerLabel(playerById.get(id))).filter(Boolean).join(', '); }
   function drawList() {
     const v = visible();
@@ -71,7 +77,7 @@ export async function render(root, ctx) {
       return h('div', { className: `list-item ${current?.id === m.id ? 'selected' : ''}`, onclick: () => select(m) },
         h('input', { type: 'checkbox', checked: selected.has(m.id), onclick: e => e.stopPropagation(),
           onchange: e => { e.target.checked ? selected.add(m.id) : selected.delete(m.id); } }),
-        h('b', {}, matchMinute(c, m.start)),
+        ...where(c, m.start),
         h('span', { style: { flex: 1 } }, m.label || 'Moment', ' ', h('span', { className: 'muted small' }, names(m.players))),
         m.spotlight_player_id ? h('span', { title: 'Spotlight' }, '🔦') : null,
         m.drawings.length ? h('span', { title: 'Tekeningen' }, `✏️${m.drawings.length}`) : null,
@@ -94,7 +100,7 @@ export async function render(root, ctx) {
       && (e.kind !== 'sprint' || String(e.entity).startsWith('p'))).slice(0, 80);
     const label = ent => (String(ent || '').startsWith('p') ? playerLabel(playerById.get(Number(ent.slice(1)))) : '') || 'onbekend';
     suggestBox.replaceChildren(...(ev.length ? ev.map(e => h('div', { className: 'list-item' },
-      h('b', {}, matchMinute(clipById.get(e.clip_id), e.t)), h('span', {}, KIND[e.kind] || e.kind),
+      ...where(clipById.get(e.clip_id), e.t), h('span', {}, KIND[e.kind] || e.kind),
       e.kind === 'gejuich' || e.kind === 'fluitsignaal'
         ? h('span', { style: { flex: 1 }, className: 'small muted' }, e.kind === 'gejuich' ? `uit het geluid, sterkte ${Math.round(e.score)}` : 'uit het geluid')
         : h('span', { style: { flex: 1 }, className: 'small' }, label(e.entity), e.to ? ` → ${label(e.to)}` : '', e.value ? ` (${e.value} km/u)` : ''),

@@ -172,5 +172,10 @@ def assign_teams(colors: np.ndarray, n_frames: np.ndarray, exclude: np.ndarray |
     # Wie stilstond telde niet mee voor de teamkleuren, maar kan best een speler zijn (een keeper,
     # een verdediger die even wacht): die hoort bij een team als zijn shirt er sprekend op lijkt.
     d = np.linalg.norm((colors * _W)[:, None, :] - team_c[None], axis=2)
-    limit = np.where(use, JOIN, 0.25) * sep
-    return np.where(d.min(axis=1) < limit, np.argmin(d, axis=1), TEAM_OTHER).astype(int)
+    near, far = d.min(axis=1), d.max(axis=1)
+    limit = np.where(use, JOIN, 0.35) * sep
+    # Iets verder van het teamgemiddelde (fel zonlicht, ver weg) maar overduidelijk niet het andere
+    # team: hoort er ook bij. (Een scheidsrechter in het zwart zit dichter bij het donkerste team,
+    # maar niet drie keer zo dicht als bij het andere.)
+    clear = (near < 0.45 * sep) & (far > 3.0 * near)
+    return np.where((near < limit) | clear, np.argmin(d, axis=1), TEAM_OTHER).astype(int)

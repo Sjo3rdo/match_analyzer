@@ -72,3 +72,13 @@ def test_teams_aligned_between_videos(tmp_path):
         assign_clip_teams(store, b, keep_manual=False)
         got = {r["track_id"] % 2: r["team"] for r in store.all("SELECT track_id, team FROM tracks WHERE clip_id = ?", (b,))}
         assert got[1] == red_team and got[0] == 1 - red_team
+
+
+def test_bright_shirt_far_from_mean_but_clearly_one_team():
+    from app.teams import hex_to_lab
+    yellow = [hex_to_lab(c) for c in ("#e0c678", "#eacf7f", "#eccf75", "#ecd385", "#d5bc71")]
+    green = [hex_to_lab(c) for c in ("#3e7967", "#659c82", "#538872", "#628c78", "#73ae8e")]
+    colors = np.array(yellow + green + [hex_to_lab("#f7d564"), hex_to_lab("#c9545b")])
+    labels = assign_teams(colors, np.full(len(colors), 100))
+    assert labels[-2] == labels[0]  # fel geel in de zon: toch het gele team
+    assert labels[-1] == TEAM_OTHER  # rode scheidsrechter blijft overig

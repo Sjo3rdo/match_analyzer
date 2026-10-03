@@ -254,7 +254,7 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
 
     def worker_post():
         idx = 0
-        started = time.time()
+        started = last_report = time.time()
         try:
             while True:
                 item = q_dets.get()
@@ -276,6 +276,8 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
                 counter["frame_no"] = frame_no
                 if idx % 50 == 0:
                     flush()
+                if idx == 1 or idx % 50 == 0 or time.time() - last_report > 3:
+                    last_report = time.time()
                     frac = min(1.0, frame_no / total)
                     eta = (time.time() - started) / frac * (1 - frac) if frac > 0.02 else None
                     store.set_clip_status(clip_id, "analyse", 0.05 + 0.9 * frac,

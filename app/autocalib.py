@@ -99,9 +99,21 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
     th = cv2.morphologyEx(lab[..., 0].astype(np.uint8), cv2.MORPH_TOPHAT,
                           cv2.getStructuringElement(cv2.MORPH_RECT, (15, 15))).astype(np.int16)
     # 2. wit: weinig kleur (grassprieten in de zon zijn licht maar groen/geel)
+    #    Een dunne of wat versleten lijn in de zon is niet helemaal wit maar licht geelgroen: dan telt
+    #    hij ook, als hij duidelijk minder kleur heeft dan het gras eromheen (verf maakt het gras
+    #    "grijzer"; een zonnig grassprietje wordt juist lichter in dezelfde groene kleur).
     chroma = np.sqrt(A.astype(np.float32) ** 2 + B.astype(np.float32) ** 2)
     local = cv2.blur(lab[..., 0].astype(np.uint8), (25, 25)).astype(np.int16)
-    mask = (th > 22) & (chroma < 22) & (L > local + 15)
+    bg_a = cv2.blur(A.astype(np.float32), (25, 25))
+    bg_b = cv2.blur(B.astype(np.float32), (25, 25))
+    bg_c = np.sqrt(bg_a ** 2 + bg_b ** 2)
+    to_grey = -((A - bg_a) * bg_a + (B - bg_b) * bg_b) / np.maximum(bg_c, 1.0)  # > 0: minder kleur
+    white = (chroma < 22) | ((chroma < 40) & (to_grey >= 3.0) & (chroma <= 0.9 * bg_c))
+    # Op korrelig kunstgras in de zon is de grond zelf vol lichte, kleurloze puntjes; dan moet een
+    # lijn duidelijk feller zijn dan wat daar gewoon is. (Mediaan: de lijn zelf telt niet mee. Alleen
+    # kleurloze puntjes: op echt gras zijn de lichte sprieten groen en houden we de lage drempel.)
+    texture = cv2.medianBlur(np.clip(th * white, 0, 255).astype(np.uint8), 31).astype(np.float32)
+    mask = (th > np.maximum(22, 2.2 * texture)) & white & (L > local + 15)
     # 3. op gras: een veldlijn is geschilderd op het gras, dus rondom moet vooral gras liggen.
     #    Zo vallen een tegelpad, een wit hek, reclameborden en lucht tussen bomen af.
     #    (We kijken naar de pixels rond de lijn die zelf geen lijn zijn, zodat ook een brede lijn
@@ -138,7 +150,74 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
         peeled = cv2.morphologyEx(rest, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
         keep2, _ = _line_components(peeled, max_ratio=1.6)
         keep = keep | keep2
-    return keep
+    keep = _grass_both_sides(keep, lab)
+    # Droge, lichte plekken in het gras hebben dezelfde kleur als een lijn in de zon, maar zijn vlekken.
+    return _thin_if_tinted(keep, chroma < 22)
+
+
+def _thin_if_tinted(mask: np.ndarray, pure_white: np.ndarray, max_thick: float = 2.0) -> np.ndarray:
+    """Stukken die vooral uit getinte pixels bestaan (licht, maar niet echt wit) alleen houden als
+    ze dun zijn (hooguit max_thick pixels) of een lange, rechte streep over een groot deel van het
+    beeld vormen (de lijn vlak voor je in fel zonlicht)."""
+    n, lab_cc, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n < 2:
+        return mask
+    area = np.bincount(lab_cc.ravel(), minlength=n)
+    white = np.bincount(lab_cc.ravel(), weights=pure_white.ravel().astype(float), minlength=n)
+    skel = np.bincount(lab_cc[centerlines(mask) > 0], minlength=n)
+    extent = np.hypot(stats[:, cv2.CC_STAT_WIDTH], stats[:, cv2.CC_STAT_HEIGHT])
+    long_straight = (extent >= 0.3 * mask.shape[1]) & (skel <= 1.6 * extent)  # rafelige rand geeft zijtakjes
+    keep = (white >= 0.5 * area) | (area <= max_thick * np.maximum(skel, 1)) | long_straight
+    keep[0] = False
+    return np.where(keep[lab_cc], 255, 0).astype(np.uint8)
+
+
+def _shift(a: np.ndarray, dy: int, dx: int) -> np.ndarray:
+    """Waarde van (y - dy, x - dx) op plek (y, x); buiten beeld 0."""
+    out = np.zeros_like(a)
+    h, w = a.shape[:2]
+    out[max(dy, 0):h + min(dy, 0), max(dx, 0):w + min(dx, 0)] = a[max(-dy, 0):h - max(dy, 0), max(-dx, 0):w - max(dx, 0)]
+    return out
+
+
+def _grass_both_sides(mask: np.ndarray, lab: np.ndarray, offset: int = 8) -> np.ndarray:
+    """Alleen stukken met aan beide kanten hetzelfde gras.
+
+    Een geschilderde lijn ligt midden in het gras: aan weerskanten (dwars op de lijn) is de kleur
+    vrijwel gelijk. Hooguit is het gras erachter wat lichter, want verder weg. De rij reclameborden
+    langs de overkant heeft onder zich gras en boven zich iets wat veel donkerder is (bomen, hek) of
+    een andere tint heeft (lucht, de bovenrand van het bord), ook als dat toevallig ook groen is.
+    We vergelijken de gemiddelde kleur (Lab) van de omgeving aan weerskanten, zonder de lijnpixels
+    zelf; per stuk telt de mediaan."""
+    n, lab_cc, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    if n < 2:
+        return mask
+    labf = lab.astype(np.float32)
+    nl = (mask == 0).astype(np.float32)
+    o = offset
+
+    def side(kw, kh):
+        den = np.maximum(cv2.blur(nl, (kw, kh)), 1e-3)
+        return np.stack([cv2.blur(labf[..., i] * nl, (kw, kh)) / den for i in range(3)], -1)
+
+    v, hz = side(25, 2 * o - 1), side(2 * o - 1, 25)
+    d_v = _shift(v, o, 0) - _shift(v, -o, 0)  # boven min onder
+    d_h = _shift(hz, 0, o) - _shift(hz, 0, -o)  # links min rechts
+    # dwars op het stuk kijken: bij een liggend stuk boven/onder, bij een staand stuk links/rechts
+    flat = stats[:, cv2.CC_STAT_WIDTH] >= stats[:, cv2.CC_STAT_HEIGHT]
+    d = np.where(flat[lab_cc][..., None], d_v, d_h)
+    on = lab_cc > 0
+    labels, vals = lab_cc[on], d[on]
+    order = np.argsort(labels, kind="stable")
+    labels, vals = labels[order], vals[order]
+    bounds = np.flatnonzero(np.diff(labels)) + 1
+    keep = np.zeros(n, bool)
+    for grp_l, grp_v in zip(np.split(labels, bounds), np.split(vals, bounds)):
+        k = grp_l[0]
+        dl, da, db = np.median(grp_v, axis=0)
+        same_tint = math.hypot(da, db) < 12  # (OpenCV-schaal: 0..255)
+        keep[k] = same_tint and (dl > -15 if flat[k] else abs(dl) < 30)
+    return np.where(keep[lab_cc], 255, 0).astype(np.uint8)
 
 
 def _line_components(mask: np.ndarray, max_ratio: float | None = None) -> tuple[np.ndarray, np.ndarray]:

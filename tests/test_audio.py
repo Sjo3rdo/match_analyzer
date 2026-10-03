@@ -35,3 +35,24 @@ def test_quiet_recording_has_no_events():
     rng = np.random.default_rng(1)
     x = (0.02 * rng.normal(size=60 * audio.SR)).astype(np.float32)
     assert audio.find_events(x) == []
+
+
+def _burst(x, start, dur, rng, gain=0.25):
+    sr = audio.SR
+    a, b = int(start * sr), int((start + dur) * sr)
+    burst = rng.normal(size=b - a)
+    spec = np.fft.rfft(burst)
+    f = np.fft.rfftfreq(len(burst), 1 / sr)
+    spec[(f < 300) | (f > 4000)] = 0
+    y = np.fft.irfft(spec, n=len(burst))
+    x[a:b] += gain * y / np.std(y)
+
+
+def test_short_shout_is_not_cheering_and_one_per_half_minute():
+    rng = np.random.default_rng(2)
+    x = (0.02 * rng.normal(size=90 * audio.SR)).astype(np.float32)
+    _burst(x, 10, 0.8, rng)  # een losse roep
+    _burst(x, 40, 3.0, rng, gain=0.2)  # gejuich in twee golven vlak na elkaar
+    _burst(x, 46, 3.0, rng, gain=0.3)
+    cheers = [e for e in audio.find_events(x) if e["kind"] == "gejuich"]
+    assert len(cheers) == 1 and 45.5 <= cheers[0]["t"] <= 46.5, cheers  # alleen de sterkste golf

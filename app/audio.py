@@ -2,7 +2,7 @@
 
 Zoals Veo hoogtepunten voorstelt, luisteren we hier naar de video:
 - Gejuich: het wordt ineens een stuk luider dan wat in die fase van de wedstrijd normaal is, en
-  dat houdt even aan (minstens een seconde). We meten alleen het stemgebied (300 - 4000 Hz), zodat
+  dat houdt even aan (minstens anderhalve seconde; een losse roep van een speler is korter). We meten alleen het stemgebied (300 - 4000 Hz), zodat
   windgeruis in de microfoon van de telefoon niet als gejuich telt. Het moment zelf (de kans of
   de goal) zit meestal net vóór het gejuich; een clip begint daarom een stuk eerder.
 - Fluitsignaal: een fluit is een heldere, hoge toon (ongeveer 2 - 4,5 kHz). In dat gebied staat dan
@@ -21,7 +21,7 @@ import numpy as np
 SR = 16000
 HOP = SR // 10  # 0,1 s per stap
 NFFT = 2048
-VERSION = 1
+VERSION = 2
 
 
 def extract_audio(path: Path, ffmpeg: str) -> np.ndarray | None:
@@ -107,7 +107,7 @@ def find_events(x: np.ndarray) -> list[dict]:
     # een joelende groep (ook hoge tonen) in plaats van wind in de microfoon of één zware stem vlakbij
     for a, b in _groups(excess > 8.0):
         dur = (b - a + 1) / 10
-        if dur < 1.0 or tonal[a:b + 1].mean() > 0.5:
+        if dur < 1.5 or tonal[a:b + 1].mean() > 0.5:  # korter: één roep ("hier!"), geen gejuich
             continue
         if np.mean(f["bright"][a:b + 1]) < 0.12 or np.mean(f["low"][a:b + 1]) > 0.6:
             continue
@@ -120,7 +120,17 @@ def find_events(x: np.ndarray) -> list[dict]:
             continue
         events.append({"kind": "fluitsignaal", "t": round(a / 10, 1), "t_end": round((b + 1) / 10, 1),
                        "score": round(float(np.mean(w_peak[a:b + 1]) / 10 * min(dur, 2.0)), 1)})
-    return sorted(events, key=lambda e: e["t"])
+    return sorted(_strongest_per_window(events), key=lambda e: e["t"])
+
+
+def _strongest_per_window(events: list[dict], window: float = 30.0) -> list[dict]:
+    """Per soort hooguit één moment per halve minuut: het sterkste. Bij een hele wedstrijd blijft
+    de lijst zo te overzien, en een doelpunt geeft vaak een paar golven gejuich vlak na elkaar."""
+    kept: list[dict] = []
+    for e in sorted(events, key=lambda e: -e["score"]):
+        if not any(k["kind"] == e["kind"] and abs(k["t"] - e["t"]) < window for k in kept):
+            kept.append(e)
+    return kept
 
 
 def clip_events(clip: dict, out_dir: Path, ffmpeg: str) -> list[dict]:

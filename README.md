@@ -5,7 +5,8 @@ individuele speler, in de stijl van Veo. Het verschil met Veo is dat je hier gew
 telefoonvideo's gebruikt die je achteraf uploadt, gefilmd vanaf de zijlijn of vanaf een hoger punt
 en gewoon uit de hand.
 
-Alles draait op je eigen laptop. Er gaat geen video naar internet.
+Alles draait op je eigen laptop. Er gaat geen video naar internet, en ook geen gebruiksgegevens:
+de anonieme statistieken die de detectiesoftware (Ultralytics) normaal verstuurt, staan uit.
 
 ## Wat het doet
 
@@ -192,8 +193,10 @@ een vaste 180°-camera.
 - **Teams en publiek.** In fel zonlicht lijkt een donkerblauw shirt soms grijs; zo'n speler kan bij
   'overig' terechtkomen. Toeschouwers die bewegen (bijvoorbeeld langs de lijn lopen) worden pas
   na de kalibratie herkend, omdat ze dan buiten het veld staan.
-- **Geluid.** Gejuich en fluitsignalen zijn suggesties. Wind in de microfoon of iemand die vlak
-  naast je praat, telt de app niet als gejuich, maar controleer het altijd even.
+- **Geluid.** Gejuich en fluitsignalen zijn suggesties. Wind in de microfoon, iemand die vlak
+  naast je praat of een losse roep van een speler ("hier!") telt de app niet als gejuich, en per
+  halve minuut krijg je hooguit één suggestie van elke soort. Controleer het altijd even: een
+  langgerekte roep kan soms als fluitsignaal binnenkomen.
 - **Spelers buiten beeld.** Wie buiten beeld is, wordt niet gemeten. Het aantal minuten laat zien
   hoe lang iemand in beeld was.
 

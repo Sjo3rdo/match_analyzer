@@ -21,6 +21,17 @@ def best_device() -> str:
     return "cpu"
 
 
+def _no_telemetry() -> None:
+    """Ultralytics stuurt standaard anonieme gebruiksgegevens naar Google Analytics. Alles blijft hier
+    op je eigen computer, dus dat zetten we uit (alleen voor deze app, je instellingen blijven gelijk)."""
+    try:
+        from ultralytics.utils import events
+
+        events.events.enabled = False
+    except Exception:  # noqa: BLE001  (andere versie van Ultralytics)
+        pass
+
+
 @dataclass
 class FrameDetections:
     boxes: np.ndarray  # (n, 4) xyxy personen
@@ -43,6 +54,7 @@ class Detector:
 
         from ultralytics import YOLO
 
+        _no_telemetry()
         path = Path(model_name)
         if not path.is_absolute() and not path.exists():
             config.MODELS_DIR.mkdir(parents=True, exist_ok=True)

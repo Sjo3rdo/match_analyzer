@@ -84,7 +84,7 @@ def test_spectators_filtered():
 
 def test_people_cut_off_at_bottom_filtered():
     d = _people_clip(False)
-    d.boxes[d.track == 2] = [800, 900, 900, 1080]
+    d.boxes[d.track == 2] = [800, 900, 900, 1074]  # zo eindigt een kader van YOLO aan de rand (net boven 1080)
     d.boxes[d.track == 2, 0] += np.arange(100) * 5  # beweegt wel, maar voeten buiten beeld
     d.boxes[d.track == 2, 2] += np.arange(100) * 5
     assert analytics._valid_tracks(d) == {1}

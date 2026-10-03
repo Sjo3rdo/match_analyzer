@@ -255,7 +255,7 @@ def _valid_tracks(d: ClipData, min_frames: int = 10, min_on_pitch: float = 0.6) 
     for tid, rows in groups.items():
         if len(rows) < min_frames:
             continue
-        if H_img and (d.boxes[rows, 3] >= H_img - 3).mean() > 0.5:
+        if H_img and (d.boxes[rows, 3] >= 0.99 * H_img).mean() > 0.5:  # kaders aan de rand eindigen net erboven
             continue
         frac = still.get(tid, 0.0)
         st = frac >= (0.85 if d.calibrated else 0.6)
