@@ -190,7 +190,7 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
         from .detection import get_detector
 
         store.set_clip_status(clip_id, "analyse", 0.02, "Model laden")
-        detector = get_detector()
+        detector = get_detector(clip.get("analysis_mode") or "nauwkeurig")
 
     cap = cv2.VideoCapture(str(src))
     fps = clip["fps"] or cap.get(cv2.CAP_PROP_FPS) or 30.0
@@ -210,38 +210,122 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
             c.executemany("INSERT INTO ball VALUES (?,?,?,?,?)", ball_rows)
         frame_rows.clear(), det_rows.clear(), ball_rows.clear()
 
-    frame_no, idx = 0, 0
-    started = time.time()
-    while True:
-        if frame_no % stride:
-            if not cap.grab():
+    # Een lopende band met drie werkers die tegelijk bezig zijn:
+    # 1. de lezer pakt de video uit (processor),
+    # 2. de detector zoekt spelers en bal, een paar beelden tegelijk (grafische chip),
+    # 3. de verwerker meet de camerabeweging, shirtkleuren en volgt de spelers (processor).
+    # Zo wacht de grafische chip niet op het uitpakken en andersom.
+    DONE = object()
+    q_frames: queue.Queue = queue.Queue(maxsize=4)
+    q_dets: queue.Queue = queue.Queue(maxsize=4)
+    errors: list[BaseException] = []
+    stop = threading.Event()
+    counter = {"frame_no": 0}
+
+    def put(q, item) -> bool:
+        while not stop.is_set():
+            try:
+                q.put(item, timeout=0.2)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def reader():
+        try:
+            frame_no = 0
+            while not stop.is_set():
+                if frame_no % stride:
+                    if not cap.grab():
+                        break
+                    frame_no += 1
+                    continue
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000  # echte tijdstempel (variabele framerate!)
+                frame_no += 1
+                if not put(q_frames, (frame, t, frame_no)):
+                    break
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+        finally:
+            put(q_frames, DONE)
+
+    def worker_post():
+        idx = 0
+        started = time.time()
+        try:
+            while True:
+                item = q_dets.get()
+                if item is DONE:
+                    break
+                frame, t, frame_no, det = item
+                H = motion.step(frame, det.boxes)
+                inter.append(H)
+                colors = [teams.shirt_color(frame, b) for b in det.boxes]
+                color_of = {np.asarray(b, np.float64).tobytes(): c for b, c in zip(det.boxes, colors)}
+                tracked = tracker.update(det.boxes, det.scores, H if idx else None, colors)
+                frame_rows.append((clip_id, idx, t))
+                for tid, box, score in tracked:
+                    det_rows.append((clip_id, idx, tid, *map(float, box), score))
+                    stats[tid].add(t, frame, box, color_of.get(np.asarray(box, np.float64).tobytes()), idx)
+                if det.ball:
+                    ball_rows.append((clip_id, idx, *map(float, det.ball)))
+                idx += 1
+                counter["frame_no"] = frame_no
+                if idx % 50 == 0:
+                    flush()
+                    frac = min(1.0, frame_no / total)
+                    eta = (time.time() - started) / frac * (1 - frac) if frac > 0.02 else None
+                    store.set_clip_status(clip_id, "analyse", 0.05 + 0.9 * frac,
+                                          f"Frame {frame_no} van {total}" + (f" · {_eta(eta)}" if eta is not None else ""))
+        except BaseException as e:  # noqa: BLE001
+            errors.append(e)
+            stop.set()
+            while True:  # de band leeg laten lopen, zodat de andere werkers niet vastlopen
+                try:
+                    if q_dets.get(timeout=1) is DONE:
+                        break
+                except queue.Empty:
+                    break
+        counter["idx"] = idx
+
+    batch_size = getattr(detector, "batch_size", 1)
+    detect_many = getattr(detector, "detect_batch", None)
+    threads = [threading.Thread(target=reader, daemon=True), threading.Thread(target=worker_post, daemon=True)]
+    for th in threads:
+        th.start()
+    try:
+        ended = False
+        while not ended and not stop.is_set():
+            batch = []
+            while len(batch) < batch_size:
+                item = q_frames.get()
+                if item is DONE:
+                    ended = True
+                    break
+                batch.append(item)
+            if not batch:
                 break
-            frame_no += 1
-            continue
-        ok, frame = cap.read()
-        if not ok:
-            break
-        t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000  # echte tijdstempel (variabele framerate!)
-        det = detector(frame)
-        H = motion.step(frame, det.boxes)
-        inter.append(H)
-        colors = [teams.shirt_color(frame, b) for b in det.boxes]
-        color_of = {np.asarray(b, np.float64).tobytes(): c for b, c in zip(det.boxes, colors)}
-        tracked = tracker.update(det.boxes, det.scores, H if idx else None, colors)
-        frame_rows.append((clip_id, idx, t))
-        for tid, box, score in tracked:
-            det_rows.append((clip_id, idx, tid, *map(float, box), score))
-            stats[tid].add(t, frame, box, color_of.get(np.asarray(box, np.float64).tobytes()), idx)
-        if det.ball:
-            ball_rows.append((clip_id, idx, *map(float, det.ball)))
-        idx += 1
-        frame_no += 1
-        if idx % 50 == 0:
-            flush()
-            frac = min(1.0, frame_no / total)
-            eta = (time.time() - started) / frac * (1 - frac) if frac > 0.02 else None
-            store.set_clip_status(clip_id, "analyse", 0.05 + 0.9 * frac,
-                                  f"Frame {frame_no} van {total}" + (f" · {_eta(eta)}" if eta is not None else ""))
+            dets = detect_many([b[0] for b in batch]) if detect_many and len(batch) > 1 else [detector(b[0]) for b in batch]
+            for (frame, t, frame_no), det in zip(batch, dets):
+                if not put(q_dets, (frame, t, frame_no, det)):
+                    break
+    except BaseException as e:  # noqa: BLE001
+        errors.append(e)
+        stop.set()
+    finally:
+        try:  # einde van de band melden aan de verwerker
+            q_dets.put(DONE, timeout=60)
+        except queue.Full:
+            stop.set()
+        for th in threads:
+            th.join(timeout=60)
+    if errors:
+        cap.release()
+        raise errors[0]
+    idx = counter.get("idx", 0)
     cap.release()
     flush()
     np.save(out_dir / "motion.npy", np.array(inter) if inter else np.zeros((0, 3, 3)))
@@ -323,12 +407,14 @@ def assign_clip_teams(store: Store, clip_id: int, keep_manual: bool = True) -> d
         lab = np.array([teams.hex_to_lab(r["color"]) for r in have])
         w = np.array([r["n_frames"] or 1 for r in have], float)
         new = teams.assign_teams(lab, w, exclude=np.array([r["track_id"] in still for r in have]))
-        ref = _reference_team_colors(store, clip["match_id"], exclude_clip=clip_id)
+        ref, from_clips = _reference_team_colors(store, clip["match_id"], exclude_clip=clip_id)
         mine = teams.team_centers(lab, w, new)
         if all(c is not None for c in ref) and all(c is not None for c in mine):
             same = teams.color_distance(mine[0], ref[0]) + teams.color_distance(mine[1], ref[1])
             cross = teams.color_distance(mine[0], ref[1]) + teams.color_distance(mine[1], ref[0])
-            if cross < same:
+            # Andere video's van deze wedstrijd: zelfde shirts, dus gewoon het beste kiezen. Opgeslagen
+            # teamkleuren (vorige wedstrijd) alleen bij een duidelijk verschil: het kan een uittenue zijn.
+            if cross < (same if from_clips else 0.7 * same):
                 new = np.where(new == 0, 1, np.where(new == 1, 0, new))
                 swapped = True
         labels = {r["track_id"]: int(v) for r, v in zip(have, new)}
@@ -342,8 +428,9 @@ def assign_clip_teams(store: Store, clip_id: int, keep_manual: bool = True) -> d
     return {"swapped": swapped, "stationary": len(still)}
 
 
-def _reference_team_colors(store: Store, match_id: int, exclude_clip: int) -> list[np.ndarray | None]:
-    """Kleur van team 0 en 1 volgens de andere video's van de wedstrijd (of de opgeslagen teamkleuren)."""
+def _reference_team_colors(store: Store, match_id: int, exclude_clip: int) -> tuple[list, bool]:
+    """Kleur van team 0 en 1 volgens de andere video's van de wedstrijd (True), of anders de
+    opgeslagen teamkleuren van de wedstrijd (False)."""
     rows = store.all(
         "SELECT t.color, t.n_frames, COALESCE(p.team, t.team) AS team FROM tracks t "
         "JOIN clips c ON c.id = t.clip_id LEFT JOIN players p ON p.id = t.player_id "
@@ -354,10 +441,10 @@ def _reference_team_colors(store: Store, match_id: int, exclude_clip: int) -> li
         sel = [(c, w) for c, w in sel if c is not None]
         if sel:
             out[team] = np.average([c for c, _ in sel], axis=0, weights=[w for _, w in sel])
-    if out[0] is None or out[1] is None:  # nog geen andere video: dan de opgeslagen teamkleuren
-        m = store.one("SELECT * FROM matches WHERE id = ?", (match_id,)) or {}
-        out = [teams.hex_to_lab(m.get("team0_color")), teams.hex_to_lab(m.get("team1_color"))]
-    return out
+    if out[0] is not None and out[1] is not None:
+        return out, True
+    m = store.one("SELECT * FROM matches WHERE id = ?", (match_id,)) or {}  # dan de opgeslagen teamkleuren
+    return [teams.hex_to_lab(m.get("team0_color")), teams.hex_to_lab(m.get("team1_color"))], False
 
 
 class Worker:

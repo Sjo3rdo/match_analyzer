@@ -24,7 +24,7 @@ from . import config, pitch
 from .calibration import CameraModel, Keyframe, apply_h, camera_prior, fit_keyframe
 from .storage import Store, clip_dir
 from .teams import TEAM_OTHER
-from .tracking import stationary_ids
+from .tracking import still_fraction
 
 # Twee lagen cache, zoals een kast met twee planken:
 # - onder de zware spullen (detecties ingelezen en naar het veld geprojecteerd). Die veranderen
@@ -86,7 +86,7 @@ class ClipData:
     valid_tracks: set[int] = field(default_factory=set)
     groups: dict[int, np.ndarray] | None = None  # track -> rijnummers (op volgorde van tijd)
     geom: pitch.Geometry = pitch.DEFAULT
-    stationary: set[int] = field(default_factory=set)
+    stationary: dict[int, float] = field(default_factory=dict)  # track -> deel van de tijd stil
 
     def rows_of(self, tid: int) -> np.ndarray:
         if self.groups is None:
@@ -225,12 +225,12 @@ def clean_ball(t: np.ndarray, xy: np.ndarray, geom: pitch.Geometry, margin: floa
     return xy
 
 
-def stationary_tracks(d: ClipData) -> set[int]:
-    """Tracks van mensen die stilstaan ten opzichte van de achtergrond (zie tracking.stationary_ids)."""
+def stationary_tracks(d: ClipData) -> dict[int, float]:
+    """Per track welk deel van de tijd hij stilstaat t.o.v. de achtergrond (zie tracking.still_fraction)."""
     if d.camera is None or len(d.camera.A) == 0 or len(d.track) == 0:
-        return set()
+        return {}
     feet = np.stack([(d.boxes[:, 0] + d.boxes[:, 2]) / 2, d.boxes[:, 3]], 1)
-    return stationary_ids(d.t, d.idx, d.track, feet, d.boxes[:, 3] - d.boxes[:, 1], d.camera.A)
+    return still_fraction(d.t, d.idx, d.track, feet, d.boxes[:, 3] - d.boxes[:, 1], d.camera.A)
 
 
 def _valid_tracks(d: ClipData, min_frames: int = 10, min_on_pitch: float = 0.6) -> set[int]:
@@ -247,6 +247,9 @@ def _valid_tracks(d: ClipData, min_frames: int = 10, min_on_pitch: float = 0.6) 
         return valid
     H_img = float(d.clip.get("height") or 0)
     still = d.stationary if d.stationary else stationary_tracks(d)
+    # Zonder kalibratie weten we niet waar het veld is: wie meestal stilstaat is waarschijnlijk publiek.
+    # Met kalibratie geldt het alleen langs de zijlijn, en strenger (een buitenspeler die daar
+    # wacht, moet blijven meetellen).
     W = d.geom.width
     groups = d.groups if d.groups is not None else group_rows(d.track)
     for tid, rows in groups.items():
@@ -254,7 +257,8 @@ def _valid_tracks(d: ClipData, min_frames: int = 10, min_on_pitch: float = 0.6) 
             continue
         if H_img and (d.boxes[rows, 3] >= H_img - 3).mean() > 0.5:
             continue
-        st = tid in still
+        frac = still.get(tid, 0.0)
+        st = frac >= (0.85 if d.calibrated else 0.6)
         if d.calibrated:
             x, y = d.xy[rows, 0], d.xy[rows, 1]
             ok = (x >= -1.5) & (x <= d.geom.length + 1.5) & (y >= -1.5) & (y <= W + 1.5)

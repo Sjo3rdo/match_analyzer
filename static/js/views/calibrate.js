@@ -12,11 +12,11 @@ export async function render(root, ctx) {
     root.append(h('div', { className: 'panel empty' }, 'Upload eerst een video.'));
     return;
   }
-  const pitchInfo = await api('/pitch');
+  const pitchInfo = await api(`/pitch?match_id=${match.id}`);
   let clip = clips.find(c => c.id === Number(ctx.params.get('clip'))) || clips[0];
   let t = 0, img = null, pairs = [], pendingImg = null, pendingPitch = null, editingId = null;
   let predicted = [], showPred = true, drag = null, keyframes = [];
-  let fit = { H: null, err: null, cam: null, msg: '' }, placingCam = false;
+  let fit = { H: null, err: null, cam: null, msg: '' }, placingCam = false, osmSize = null;
   let frameT = null;            // tijd van het beeld dat nu getoond wordt
   let proposal = null;          // automatisch voorstel dat nog bevestigd moet worden
   let view = { s: 1, ox: 0, oy: 0 }, pan = null;  // inzoomen op het beeld
@@ -250,7 +250,7 @@ export async function render(root, ctx) {
       h('h3', {}, '📍 Waar stond je bij het filmen?'),
       h('div', { className: 'small', style: { marginBottom: '8px' } },
         hasCam()
-          ? [`Op ${clip.cam_x.toFixed(0)} m langs het veld, ${clip.cam_y > 68 ? (clip.cam_y - 68).toFixed(0) + ' m buiten de zijlijn' : clip.cam_y < 0 ? (-clip.cam_y).toFixed(0) + ' m achter de verre zijlijn' : 'op het veld'}`,
+          ? [`Op ${clip.cam_x.toFixed(0)} m langs het veld, ${clip.cam_y > pitchInfo.width ? (clip.cam_y - pitchInfo.width).toFixed(0) + ' m buiten de zijlijn' : clip.cam_y < 0 ? (-clip.cam_y).toFixed(0) + ' m achter de verre zijlijn' : 'op het veld'}`,
              clip.cam_source === 'gps' ? ` (via GPS${clip.gps_acc ? ', ±' + Math.max(5, Math.round(clip.gps_acc)) + ' m' : ''} – klik gerust zelf preciezer)` : ' (aangeklikt)',
              fit.cam ? h('div', { className: 'muted' }, `Geschat uit je klikken: ${fit.cam.h} m hoog, kijkhoek ${fit.cam.hfov_deg}°`) : null]
           : 'Nog niet ingesteld. Weet de app waar je stond, dan is 1 punt + 1 lijn al genoeg om te kalibreren.'),
@@ -266,6 +266,8 @@ export async function render(root, ctx) {
             const r = await api(`/clips/${clip.id}/camera/gps`, { method: 'POST' });
             Object.assign(clip, r.clip);
             toast(`Veld gevonden (${r.pitch_length} × ${r.pitch_width} m). Je positie staat op de tekening.`);
+            osmSize = (Math.abs(r.pitch_length - pitchInfo.length) > 1 || Math.abs(r.pitch_width - pitchInfo.width) > 1)
+              ? [r.pitch_length, r.pitch_width] : null;
             drawPitch(); scheduleFit(); await loadKeyframes();
             proposeIfEmpty();
           } finally { drawCamPanel(); }
@@ -273,7 +275,31 @@ export async function render(root, ctx) {
         hasCam() ? h('button', { onclick: () => setCamera({ x: null, y: null, source: null }) }, 'Wissen') : null),
       clip.gps_lat != null && !hasCam() ? h('div', { className: 'small muted', style: { marginTop: '6px' } },
         'Deze video bevat een GPS-positie. "Zoek via GPS" zoekt het veld op in OpenStreetMap (alleen de coördinaat wordt verstuurd).') : null,
+      osmSize ? h('div', { className: 'hint', style: { marginTop: '8px' } },
+        `Volgens OpenStreetMap is dit veld ${osmSize[0]} × ${osmSize[1]} m (de app rekent nu met ${pitchInfo.length} × ${pitchInfo.width} m). `,
+        h('button', { className: 'primary', onclick: async () => {
+          await api(`/clips/${clip.id}/camera/gps`, { json: { adopt_size: true } });
+          toast('Veldmaten overgenomen'); ctx.reload();
+        } }, 'Overnemen')) : null,
+      sizeRow(),
     ].filter(Boolean));
+  }
+
+  // Veldmaten: amateurvelden zijn vaak kleiner dan 105 x 68 m
+  function sizeRow() {
+    const len = h('input', { type: 'number', min: 40, max: 130, step: 0.5, value: pitchInfo.length, style: { width: '72px' } });
+    const wid = h('input', { type: 'number', min: 25, max: 100, step: 0.5, value: pitchInfo.width, style: { width: '64px' } });
+    return h('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--border)' } },
+      h('div', { className: 'row small' }, h('b', {}, 'Veldmaten'), len, '×', wid, 'm',
+        h('button', { onclick: async () => {
+          if (Number(len.value) === pitchInfo.length && Number(wid.value) === pitchInfo.width) return;
+          if (!confirm('Veldmaten wijzigen? Je kalibratiepunten schuiven mee; het automatisch bijstellen begint opnieuw.')) return;
+          await api(`/matches/${match.id}`, { method: 'PATCH', json: { pitch_length: Number(len.value), pitch_width: Number(wid.value) } });
+          toast('Veldmaten opgeslagen'); ctx.reload();
+        } }, 'Opslaan')),
+      h('div', { className: 'small muted', style: { marginTop: '4px' } },
+        'Standaard 105 × 68 m. Amateurvelden zijn vaak kleiner (bijv. 100 × 64); met de echte maten kloppen afstanden en posities beter. ',
+        'Het strafschopgebied en de middencirkel zijn altijd even groot.'));
   }
 
   function drawFrame() {

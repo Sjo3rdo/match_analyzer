@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
@@ -38,9 +39,9 @@ MAX_ZOOM_STEP = 0.02
 MIN_SPREAD = 0.08  # lijnrichtingen: 0 = alles evenwijdig, 1 = alle kanten op
 
 
-def pitch_samples(step: float = 0.5, with_tangents: bool = False):
+def pitch_samples(step: float = 0.5, with_tangents: bool = False, geom: pitch.Geometry = pitch.DEFAULT):
     """Punten op alle veldlijnen (meters)."""
-    L, W, c = pitch.LENGTH, pitch.WIDTH, pitch.HALF_W
+    L, W, c = geom.length, geom.width, geom.half_w
     segs = [((0, 0), (L, 0)), ((0, W), (L, W)), ((0, 0), (0, W)), ((L, 0), (L, W)), ((L / 2, 0), (L / 2, W))]
     for x0, s in ((0.0, 1), (L, -1)):
         for d, half in ((16.5, 20.16), (5.5, 9.16)):
@@ -64,8 +65,25 @@ def pitch_samples(step: float = 0.5, with_tangents: bool = False):
     return np.vstack(pts)
 
 
-SAMPLES, TANGENTS = pitch_samples(with_tangents=True)
-DENSE = pitch_samples(step=0.1)  # om de modellijnen als plaatje te tekenen
+class _Model:
+    """Veldlijnen als punten, per veldmaat één keer uitgerekend."""
+
+    def __init__(self, geom: pitch.Geometry):
+        self.geom = geom
+        self.samples, self.tangents = pitch_samples(with_tangents=True, geom=geom)
+        self.dense = pitch_samples(step=0.1, geom=geom)  # om de modellijnen als plaatje te tekenen
+        self.coarse = pitch_samples(step=1.0, geom=geom)
+        self.c2 = pitch_samples(step=2.0, geom=geom)
+        self._field_dt = None
+
+
+@lru_cache(maxsize=8)
+def model(geom: pitch.Geometry = pitch.DEFAULT) -> _Model:
+    return _Model(geom)
+
+
+SAMPLES, TANGENTS = model().samples, model().tangents
+DENSE = model().dense
 
 
 def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.ndarray | None = None) -> np.ndarray:
@@ -141,11 +159,12 @@ def centerlines(mask: np.ndarray) -> np.ndarray:
     return skel * 255
 
 
-def pitch_roi(H_work: np.ndarray, size: tuple[int, int], margin: float = 4.0) -> np.ndarray:
+def pitch_roi(H_work: np.ndarray, size: tuple[int, int], margin: float = 4.0,
+              geom: pitch.Geometry = pitch.DEFAULT) -> np.ndarray:
     """Masker van het (voorspelde) veld plus marge, in werkschaal."""
     W, Hh = size
-    poly = np.array([[-margin, -margin], [pitch.LENGTH + margin, -margin], [pitch.LENGTH + margin, pitch.WIDTH + margin],
-                     [-margin, pitch.WIDTH + margin]], float)
+    L, Wp = geom.length, geom.width
+    poly = np.array([[-margin, -margin], [L + margin, -margin], [L + margin, Wp + margin], [-margin, Wp + margin]], float)
     # dicht bemonsteren zodat het stuk achter de camera netjes wordt afgekapt
     edge = np.vstack([a + np.linspace(0, 1, 60)[:, None] * (b - a) for a, b in zip(poly, np.roll(poly, -1, 0))])
     hom = np.hstack([edge, np.ones((len(edge), 1))]) @ H_work.T
@@ -215,11 +234,12 @@ def _line_width_px(H: np.ndarray, pts: np.ndarray, width_m: float = 0.12) -> np.
     return np.minimum(dx, dy)
 
 
-def camera_from_h(H: np.ndarray, cam: dict, size: tuple[int, int], p0: np.ndarray) -> np.ndarray:
+def camera_from_h(H: np.ndarray, cam: dict, size: tuple[int, int], p0: np.ndarray,
+                  geom: pitch.Geometry = pitch.DEFAULT) -> np.ndarray:
     """Kijkrichting [yaw, tilt, roll, log_f] die bij homografie H past, met vaste camerapositie."""
     from .calibration import _lm, camera_homography
 
-    xs, ys = np.meshgrid(np.linspace(-5, pitch.LENGTH + 5, 23), np.linspace(-5, pitch.WIDTH + 5, 15))
+    xs, ys = np.meshgrid(np.linspace(-5, geom.length + 5, 23), np.linspace(-5, geom.width + 5, 15))
     world = np.stack([xs.ravel(), ys.ravel()], 1)
     hom = np.hstack([world, np.ones((len(world), 1))]) @ H.T
     ok = hom[:, 2] > 1e-6
@@ -238,7 +258,8 @@ def camera_from_h(H: np.ndarray, cam: dict, size: tuple[int, int], p0: np.ndarra
 
 
 def refine(frame: np.ndarray, H_pred: np.ndarray, boxes: np.ndarray | None, f_full: float,
-           debug: dict | None = None, camera: dict | None = None) -> tuple[np.ndarray, dict] | None:
+           debug: dict | None = None, camera: dict | None = None,
+           geom: pitch.Geometry = pitch.DEFAULT) -> tuple[np.ndarray, dict] | None:
     """Stel H (veld -> beeld, volle resolutie) bij op de lijnen in dit beeld. None = niet betrouwbaar.
 
     Zonder `camera`: een kleine extra draaiing + zoom bovenop de voorspelling (relatief).
@@ -254,7 +275,9 @@ def refine(frame: np.ndarray, H_pred: np.ndarray, boxes: np.ndarray | None, f_fu
     Hw = S @ H_pred
     size = (WORK_WIDTH, int(round(frame.shape[0] * s)))
     Wd, Hd = size
-    lines = detect_lines(frame, boxes, roi=pitch_roi(Hw, size))
+    mdl = model(geom)
+    SAMPLES, TANGENTS, DENSE = mdl.samples, mdl.tangents, mdl.dense
+    lines = detect_lines(frame, boxes, roi=pitch_roi(Hw, size, geom=geom))
     if lines.sum() / 255 < 150:
         return None
     lines = centerlines(lines)
@@ -284,7 +307,7 @@ def refine(frame: np.ndarray, H_pred: np.ndarray, boxes: np.ndarray | None, f_fu
 
         def H_of(p):
             return S @ camera_homography(np.array([*fixed, *p]), full)
-        x0 = camera_from_h(H_pred, camera, full, camera["q0"])
+        x0 = camera_from_h(H_pred, camera, full, camera["q0"], geom)
         # trek scheefstand en zoom naar die van het handmatige sleutelframe, richting naar de voorspelling
         center = np.array([x0[0], x0[1], camera["roll"], camera["log_f"]])
         sig = np.array([math.radians(1.5), math.radians(1.5), math.radians(1.0), 0.02])
@@ -366,9 +389,9 @@ def refine(frame: np.ndarray, H_pred: np.ndarray, boxes: np.ndarray | None, f_fu
     return normalize_h(H_new), info
 
 
-def keyframe_points(H: np.ndarray, size: tuple[int, int]) -> list[dict]:
+def keyframe_points(H: np.ndarray, size: tuple[int, int], geom: pitch.Geometry = pitch.DEFAULT) -> list[dict]:
     """Een raster van veldpunten dat in beeld ligt, als sleutelframe-punten (beeld <-> veld)."""
-    xs, ys = np.meshgrid(np.linspace(0, pitch.LENGTH, 15), np.linspace(0, pitch.WIDTH, 9))
+    xs, ys = np.meshgrid(np.linspace(0, geom.length, 15), np.linspace(0, geom.width, 9))
     world = np.stack([xs.ravel(), ys.ravel()], 1)
     hom = np.hstack([world, np.ones((len(world), 1))]) @ H.T
     ok = hom[:, 2] > 1e-6
@@ -427,6 +450,7 @@ def run_autocalib(store, clip_id: int, every_s: float = 1.0, progress=None) -> d
     from .storage import clip_dir
 
     clip = store.one("SELECT * FROM clips WHERE id = ?", (clip_id,))
+    geom = pitch.of_match(store.one("SELECT * FROM matches WHERE id = ?", (clip["match_id"],)))
     frames = store.all("SELECT idx, t FROM frames WHERE clip_id = ? ORDER BY idx", (clip_id,))
     if not frames:
         raise ValueError("Analyseer de video eerst")
@@ -495,11 +519,11 @@ def run_autocalib(store, clip_id: int, every_s: float = 1.0, progress=None) -> d
             q0 = params_of[near] if near is not None else np.array([0.0, 0.2, cam_mode["roll"], cam_mode["log_f"]])
             camera = {**cam_mode, "q0": q0}
         res = refine(frame, normalize_h(H_pred), np.array(boxes_of.get(i, [])).reshape(-1, 4), f_full,
-                     camera=camera)
+                     camera=camera, geom=geom)
         if res is None:
             return False
         H_new, info = res
-        pts = keyframe_points(H_new, size)
+        pts = keyframe_points(H_new, size, geom)
         if len(pts) < 4:
             return False
         accepted[i] = np.linalg.inv(H_new)
@@ -545,9 +569,6 @@ def run_autocalib(store, clip_id: int, every_s: float = 1.0, progress=None) -> d
 # op echte witte lijnen vallen. De richting waarbij het best klopt is het voorstel. Daarna
 # schuiven we nog een beetje met plek, zoom en scheefstand tot het precies past.
 
-SAMPLES_COARSE = pitch_samples(step=1.0)
-
-
 def _view_gain(H_work: np.ndarray, dt: np.ndarray, size: tuple[int, int], tau: float,
                samples: np.ndarray = SAMPLES) -> tuple[float, int, float]:
     """Hoe goed de zichtbare modellijnen op gevonden lijnen vallen: (winst, aantal zichtbaar, deel raak).
@@ -571,12 +592,14 @@ def _view_gain(H_work: np.ndarray, dt: np.ndarray, size: tuple[int, int], tau: f
     return gain, n, float((d < 2.5).mean())
 
 
-def _precision(H_work: np.ndarray, det_xy: np.ndarray, size: tuple[int, int], px: float = 3.0) -> float:
+def _precision(H_work: np.ndarray, det_xy: np.ndarray, size: tuple[int, int], px: float = 3.0,
+               geom: pitch.Geometry = pitch.DEFAULT) -> float:
     """Deel van de gevonden lijnpixels binnen het veld dat op een modellijn valt."""
     Wd, Hd = size
     if not len(det_xy):
         return 0.0
-    roi = pitch_roi(H_work, size, margin=3.0)
+    DENSE = model(geom).dense
+    roi = pitch_roi(H_work, size, margin=3.0, geom=geom)
     inside = roi[det_xy[:, 1], det_xy[:, 0]] > 0
     if inside.sum() < 30:
         return 0.0
@@ -584,9 +607,9 @@ def _precision(H_work: np.ndarray, det_xy: np.ndarray, size: tuple[int, int], px
     fr = hom[:, 2] > 1e-6
     q = hom[fr, :2] / hom[fr, 2:3]
     q = q[(q[:, 0] >= 0) & (q[:, 0] < Wd) & (q[:, 1] >= 0) & (q[:, 1] < Hd)].astype(np.int32)
-    model = np.zeros((Hd, Wd), np.uint8)
-    model[q[:, 1], q[:, 0]] = 255
-    dm = cv2.distanceTransform(255 - cv2.dilate(model, np.ones((3, 3), np.uint8)), cv2.DIST_L2, 3)
+    canvas = np.zeros((Hd, Wd), np.uint8)
+    canvas[q[:, 1], q[:, 0]] = 255
+    dm = cv2.distanceTransform(255 - cv2.dilate(canvas, np.ones((3, 3), np.uint8)), cv2.DIST_L2, 3)
     pts = det_xy[inside]
     return float((dm[pts[:, 1], pts[:, 0]] < px).mean())
 
@@ -616,16 +639,15 @@ def _batch_homographies(P: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     return Hs / np.abs(Hs[:, 2:3, 2:3])
 
 
-SAMPLES_C2 = pitch_samples(step=2.0)
-
-
 def _coarse_scores(P: np.ndarray, full: tuple[int, int], s: float, dt: np.ndarray, size: tuple[int, int],
-                   det: np.ndarray, tau_px: float = 25.0, tau_m: float = 1.5, keep: float = 0.15) -> np.ndarray:
+                   det: np.ndarray, tau_px: float = 25.0, tau_m: float = 1.5, keep: float = 0.15,
+                   geom: pitch.Geometry = pitch.DEFAULT) -> np.ndarray:
     """Grove score voor veel camerastanden tegelijk: (modellijnen op gevonden lijnen) x (deel van
     de gevonden lijnen dat het model verklaart). Het tweede deel alleen voor de beste `keep`."""
     Wd, Hd = size
     Hs = (_batch_homographies(P, full) * np.array([s, s, 1.0])[None, :, None])
-    X = np.vstack([SAMPLES_C2.T, np.ones(len(SAMPLES_C2))]).astype(np.float32)
+    c2 = model(geom).c2
+    X = np.vstack([c2.T, np.ones(len(c2))]).astype(np.float32)
     Hf = Hs.astype(np.float32)
     hh = Hf @ X  # (M, 3, N)
     z = hh[:, 2]
@@ -652,33 +674,33 @@ def _coarse_scores(P: np.ndarray, full: tuple[int, int], s: float, dt: np.ndarra
     if len(top) > keep * len(P):
         top = top[np.argsort(-gain[top])[:max(1, int(keep * len(P)))]]
     if len(top):
-        out[top] = gain[top] * np.maximum(_batch_explained(Hs[top], det, tau_m), 0.0)
+        out[top] = gain[top] * np.maximum(_batch_explained(Hs[top], det, tau_m, geom), 0.0)
     return out
 
 
 _FIELD_RES, _FIELD_MARGIN = 0.1, 12.0
-_field_dt: np.ndarray | None = None
 
 
-def _field_distance() -> np.ndarray:
+def _field_distance(geom: pitch.Geometry = pitch.DEFAULT) -> np.ndarray:
     """Bovenaanzicht: per 10 cm de afstand (m) tot de dichtstbijzijnde veldlijn."""
-    global _field_dt
-    if _field_dt is None:
-        w = int((pitch.LENGTH + 2 * _FIELD_MARGIN) / _FIELD_RES)
-        h = int((pitch.WIDTH + 2 * _FIELD_MARGIN) / _FIELD_RES)
+    m = model(geom)
+    if m._field_dt is None:
+        w = int((geom.length + 2 * _FIELD_MARGIN) / _FIELD_RES)
+        h = int((geom.width + 2 * _FIELD_MARGIN) / _FIELD_RES)
         img = np.full((h, w), 255, np.uint8)
-        q = ((DENSE + _FIELD_MARGIN) / _FIELD_RES).astype(int)
+        q = ((m.dense + _FIELD_MARGIN) / _FIELD_RES).astype(int)
         img[np.clip(q[:, 1], 0, h - 1), np.clip(q[:, 0], 0, w - 1)] = 0
-        _field_dt = cv2.distanceTransform(img, cv2.DIST_L2, 3) * _FIELD_RES
-    return _field_dt
+        m._field_dt = cv2.distanceTransform(img, cv2.DIST_L2, 3) * _FIELD_RES
+    return m._field_dt
 
 
-def _batch_explained(Hs_work: np.ndarray, det: np.ndarray, tau_m: float) -> np.ndarray:
+def _batch_explained(Hs_work: np.ndarray, det: np.ndarray, tau_m: float,
+                     geom: pitch.Geometry = pitch.DEFAULT) -> np.ndarray:
     """Hoeveel van de gevonden lijnpixels door het veldmodel verklaard worden, per camerastand.
 
     Elk gevonden pixel wordt teruggeprojecteerd op het veld; ligt het op een veldlijn dan +1,
     ver ernaast -0,3. Zo verliest een stand die maar een paar lijnen 'gebruikt'."""
-    fd = _field_distance()
+    fd = _field_distance(geom)
     fh, fw = fd.shape
     Ginv = np.linalg.inv(Hs_work)  # beeld -> veld
     X = np.vstack([det.T, np.ones(len(det))])
@@ -696,7 +718,7 @@ def _batch_explained(Hs_work: np.ndarray, det: np.ndarray, tau_m: float) -> np.n
 
 
 def propose(frame: np.ndarray, prior: dict, boxes: np.ndarray | None = None,
-            debug: dict | None = None) -> tuple[np.ndarray, dict] | None:
+            debug: dict | None = None, geom: pitch.Geometry = pitch.DEFAULT) -> tuple[np.ndarray, dict] | None:
     """Zoek de kalibratie (veld -> beeld, volle resolutie) bij een bekende camerapositie.
 
     prior: camera_prior(clip). None als er geen overtuigende plek gevonden wordt."""
@@ -729,13 +751,15 @@ def propose(frame: np.ndarray, prior: dict, boxes: np.ndarray | None = None,
     tilts = np.radians([1.5, 3, 5, 7.5, 10, 13, 17, 22, 28, 35])
     pstep = max(1.0, sp / 4)
     offs = np.arange(-1.5 * sp, 1.5 * sp + 1e-6, pstep)
-    corners = np.array([[0, 0], [pitch.LENGTH, 0], [pitch.LENGTH, pitch.WIDTH], [0, pitch.WIDTH], [pitch.LENGTH / 2, pitch.WIDTH / 2]])
+    L, Wp = geom.length, geom.width
+    samples = model(geom).samples
+    corners = np.array([[0, 0], [L, 0], [L, Wp], [0, Wp], [L / 2, Wp / 2]])
     pool = []
     for dx in offs:
         for dy in offs:
             px, py = cx + dx, cy + dy
             ang = np.degrees(np.arctan2(corners[:, 1] - py, corners[:, 0] - px))
-            if 0 <= px <= pitch.LENGTH and 0 <= py <= pitch.WIDTH:
+            if 0 <= px <= L and 0 <= py <= Wp:
                 yaws = np.arange(0, 360, 2.0)
             else:  # kijkrichtingen tussen de uiterste hoekpunten (plus wat marge)
                 rel = (ang - ang[4] + 180) % 360 - 180
@@ -743,7 +767,7 @@ def propose(frame: np.ndarray, prior: dict, boxes: np.ndarray | None = None,
             Y, T, F = np.meshgrid(np.radians(yaws), tilts, log_fs, indexing="ij")
             P = np.stack([np.full(Y.size, px), np.full(Y.size, py), np.full(Y.size, ch), Y.ravel(), T.ravel(),
                           np.zeros(Y.size), F.ravel()], 1)
-            sc = _coarse_scores(P, full, s, dt, size, det_c)
+            sc = _coarse_scores(P, full, s, dt, size, det_c, geom=geom)
             for i in np.argsort(-sc)[:3]:
                 if sc[i] > 0:
                     pool.append((float(sc[i]), P[i]))
@@ -763,8 +787,8 @@ def propose(frame: np.ndarray, prior: dict, boxes: np.ndarray | None = None,
             return 1e6
         p = np.array([cx + q[0], cy + q[1], ch, *q[2:]])
         Hw = H_work(p)
-        g, n, _ = _view_gain(Hw, dt, size, tau)
-        e = float(_batch_explained(Hw[None], det_sub, tau_m=tau / 16.0)[0])
+        g, n, _ = _view_gain(Hw, dt, size, tau, samples)
+        e = float(_batch_explained(Hw[None], det_sub, tau_m=tau / 16.0, geom=geom)[0])
         pri = (q[0] / sp) ** 2 + (q[1] / sp) ** 2 + (q[4] / math.radians(4)) ** 2 + ((q[5] - lf0) / 0.5) ** 2
         return -max(g, 0.0) / 100.0 * max(e, 0.0) + 0.02 * pri
 
@@ -784,13 +808,13 @@ def propose(frame: np.ndarray, prior: dict, boxes: np.ndarray | None = None,
             q = _nelder_mead(lambda v: objective(v, tau), q, np.array(st), iters=120)
         p_new = np.array([cx + q[0], cy + q[1], ch, *q[2:]])
         Hw = H_work(p_new)
-        gain, n, hit = _view_gain(Hw, dt, size, 3.0)
-        prec = _precision(Hw, det_xy, size)
+        gain, n, hit = _view_gain(Hw, dt, size, 3.0, samples)
+        prec = _precision(Hw, det_xy, size, geom=geom)
         results.append({"p": p_new, "hit": hit, "precision": prec, "n": n, "gain": gain, "score": gain * prec ** 6})
     best = max(results, key=lambda r: r["score"])
     # Twijfel: een wezenlijk andere camerastand past bijna even goed (bijv. alleen de zijlijn in beeld)
     Hb = camera_homography(best["p"], full)
-    xs, ys = np.meshgrid(np.linspace(0, pitch.LENGTH, 15), np.linspace(0, pitch.WIDTH, 9))
+    xs, ys = np.meshgrid(np.linspace(0, L, 15), np.linspace(0, Wp, 9))
     grid_w = np.stack([xs.ravel(), ys.ravel()], 1)
     gb = apply_h(Hb, grid_w)
     in_view = np.isfinite(gb).all(1) & (gb[:, 0] >= 0) & (gb[:, 0] <= full[0]) & (gb[:, 1] >= 0) & (gb[:, 1] <= full[1])

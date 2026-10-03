@@ -1,5 +1,6 @@
 // Router: #/ (wedstrijden) en #/match/<id>/<tab>[?clip=<id>]
 import { api, h, TEAM_COLORS } from './util.js';
+import { setPitchSize } from './pitch.js';
 import * as matches from './views/matches.js';
 import * as clips from './views/clips.js';
 import * as calibrate from './views/calibrate.js';
@@ -73,6 +74,7 @@ async function route() {
     tabs.append(h('a', { href: `#/match/${matchId}/${key}`, className: key === tab ? 'active' : '' }, label));
   }
   const match = await api(`/matches/${matchId}`);
+  setPitchSize(match.pitch_length, match.pitch_width);
   // Teamkleuren in de interface = gemiddelde shirtkleur uit de video (indien bekend)
   TEAM_COLORS.splice(0, 2, ...match.team_colors.map((c, i) => c || DEFAULT_COLORS[i]));
   const stepBar = h('div', { className: 'stepbar' });

@@ -34,7 +34,7 @@ export async function render(root, ctx) {
   const heatTitle = h('h3', {}, 'Heatmap');
   root.append(tablePanel, h('div', { className: 'grid-cols' },
     h('div', { className: 'panel' }, heatTitle, heatCanvas, h('div', { className: 'small muted', style: { marginTop: '6px' } },
-      'Klik op een speler in de tabel. Speelrichting zoals gefilmd; teams wisselen in de rust van kant.')),
+      'Klik op een speler in de tabel. Video\'s met "Richting ⇄ omdraaien" (standaard de 2e helft) zijn gespiegeld, zodat beide helften dezelfde kant op spelen.')),
     h('div', { className: 'panel' }, h('h3', {}, 'Teamvorm (gemiddelde posities)'), shapeCanvas)),
   h('div', { className: 'panel' }, h('div', { className: 'row' }, h('h3', {}, 'Passnetwerk'),
     h('select', { onchange: e => { networkTeam = Number(e.target.value); drawNetwork(); } },

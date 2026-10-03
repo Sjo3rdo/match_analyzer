@@ -14,8 +14,17 @@ export async function render(root, ctx) {
       'meerdere tracks (het volgen breekt af bij botsingen of als de camera wegdraait). Koppel hieronder tracks aan spelers. ' +
       'Snelste manier: voer rugnummers in en klik "Automatisch koppelen" (werkt als rugnummers leesbaar waren), ' +
       'en koppel de rest hier of door in "Video + minimap" op een speler te klikken.'),
-    h('div', { className: 'panel' }, h('h2', {}, 'Selectie'), rosterPanel),
+    h('div', { className: 'panel' },
+      h('div', { className: 'row', style: { justifyContent: 'space-between' } }, h('h2', {}, 'Selectie'),
+        h('button', { title: 'Als de app de teams andersom heeft genoemd (bijv. jouw team staat bij "Uit")', onclick: async () => {
+          if (!clips.length) return toast('Nog geen geanalyseerde video\'s');
+          await api(`/clips/${clips[0].id}/swap-teams`, { json: { all: true } });
+          toast(`${teamName(match, 0)} en ${teamName(match, 1)} omgewisseld in alle video's`); drawTracks();
+        } }, '⇄ Teams omwisselen')),
+      rosterPanel),
     trackPanel);
+  const squads = await api('/squads').catch(() => []);
+  const otherMatches = (await api('/matches').catch(() => [])).filter(m => m.id !== match.id);
 
   function drawRoster() {
     rosterPanel.replaceChildren(...[0, 1].map(team => {
@@ -29,8 +38,35 @@ export async function render(root, ctx) {
         setTimeout(() => rosterPanel.querySelectorAll('input')[team * 2]?.focus());
       };
       name.addEventListener('keydown', e => e.key === 'Enter' && add());
+      const nameInput = h('input', { value: teamName(match, team), style: { fontWeight: 600, width: '200px' },
+        title: 'Naam van het team', onchange: async e => {
+          const v = e.target.value.trim() || (team ? 'Uit' : 'Thuis');
+          await api(`/matches/${match.id}`, { method: 'PATCH', json: { [`team${team}_name`]: v } });
+          match[`team${team}_name`] = v; drawTracks();
+        } });
+      const loader = h('select', { onchange: async e => {
+        const v = e.target.value; e.target.value = '';
+        if (!v) return;
+        const [kind, id, fromTeam] = v.split(':');
+        const r = await api(`/matches/${match.id}/load-squad`, { json: kind === 's'
+          ? { team, squad_id: Number(id) } : { team, from_match: Number(id), from_team: Number(fromTeam) } });
+        Object.assign(match, r.match); players = r.match.players;
+        toast(`${r.added} speler(s) overgenomen`); drawRoster(); drawTracks();
+      } },
+        h('option', { value: '' }, '📋 Selectie overnemen…'),
+        squads.length ? h('optgroup', { label: 'Vaste selecties' },
+          squads.map(q => h('option', { value: `s:${q.id}` }, `${q.name} (${q.players.length} spelers)`))) : null,
+        otherMatches.length ? h('optgroup', { label: 'Eerdere wedstrijden' },
+          otherMatches.flatMap(m => [0, 1].map(t => h('option', { value: `m:${m.id}:${t}` }, `${m.name} – ${m[`team${t}_name`]}`)))) : null);
       return h('div', {},
-        h('h3', {}, h('span', { className: 'dot', style: { background: TEAM_COLORS[team] } }), teamName(match, team)),
+        h('div', { className: 'row', style: { marginBottom: '6px' } },
+          h('span', { className: 'dot', style: { background: TEAM_COLORS[team] } }), nameInput),
+        h('div', { className: 'row small', style: { marginBottom: '8px' } }, loader,
+          h('button', { title: 'Bewaar deze spelers onder de teamnaam, om ze bij een volgende wedstrijd over te nemen', onclick: async () => {
+            const sq = await api(`/matches/${match.id}/save-squad`, { json: { team } });
+            if (!squads.some(q => q.id === sq.id)) squads.push(sq);
+            toast(`Selectie "${sq.name}" bewaard (${sq.players.length} spelers)`);
+          } }, '💾 Bewaar als vaste selectie')),
         h('table', {}, players.filter(p => p.team === team).map(p => h('tr', {},
           h('td', { style: { width: '60px' } }, h('input', { value: p.number || '', style: { width: '56px' },
             onchange: e => api(`/players/${p.id}`, { method: 'PATCH', json: { number: e.target.value || null } }) })),
@@ -59,7 +95,14 @@ export async function render(root, ctx) {
         const r = await api(`/matches/${match.id}/auto-assign`, { json: {} });
         toast(`${r.assigned} track(s) automatisch gekoppeld via rugnummer`); drawTracks();
       } }, 'Automatisch koppelen (rugnummer)'),
-      h('span', { className: 'muted small' }, `${shown.length} van ${tracks.length} tracks`)));
+      h('span', { className: 'muted small' }, `${shown.length} van ${tracks.length} tracks`),
+      h('span', { style: { flex: 1 } }),
+      h('button', { className: 'small', title: 'Alleen in deze video de teams omwisselen (als de app ze hier andersom heeft dan in de andere video\'s)', onclick: async () => {
+        await api(`/clips/${clipId}/swap-teams`, { json: {} }); toast('Teams omgewisseld in deze video'); drawTracks();
+      } }, '⇄ Alleen deze video'),
+      h('button', { className: 'small', title: 'Teams opnieuw automatisch bepalen op shirtkleur (wat je zelf hebt aangepast blijft staan)', onclick: async () => {
+        await api(`/clips/${clipId}/reassign-teams`, { method: 'POST' }); toast('Teams opnieuw ingedeeld'); drawTracks();
+      } }, '↻ Opnieuw indelen')));
     trackPanel.append(h('div', { className: 'cards' }, shown.slice(0, limit).map(t => card(t, clip))));
     if (shown.length > limit) trackPanel.append(h('div', { style: { marginTop: '10px' } },
       h('button', { onclick: () => { limit += 48; drawTracks(); } }, 'Meer tonen')));

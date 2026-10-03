@@ -82,10 +82,12 @@ def get_version():
 # --- veld --------------------------------------------------------------------------------
 
 @app.get("/api/pitch")
-def get_pitch():
-    return {"length": pitch.LENGTH, "width": pitch.WIDTH,
-            "landmarks": [{"name": k, "x": v[0], "y": v[1]} for k, v in pitch.LANDMARKS.items()],
-            "lines": [{"name": k, "from": list(a), "to": list(b)} for k, (a, b) in pitch.LINES.items()]}
+def get_pitch(match_id: int | None = None):
+    """Veldmodel (punten en lijnen) met de veldmaten van de wedstrijd (standaard 105 x 68)."""
+    g = pitch.of_match(store.one("SELECT * FROM matches WHERE id = ?", (match_id,)) if match_id else None)
+    return {"length": g.length, "width": g.width,
+            "landmarks": [{"name": k, "x": v[0], "y": v[1]} for k, v in g.landmarks.items()],
+            "lines": [{"name": k, "from": list(a), "to": list(b)} for k, (a, b) in g.lines.items()]}
 
 
 # --- wedstrijden -------------------------------------------------------------------------
@@ -103,7 +105,103 @@ def create_match(data: dict = Body(...)):
     mid = store.run("INSERT INTO matches (name, date, team0_name, team1_name) VALUES (?,?,?,?)",
                     (data["name"], data.get("date"), data.get("team0_name") or "Thuis",
                      data.get("team1_name") or "Uit"))
+    # Vaste selectie overnemen: expliciet gekozen, of een opgeslagen team met dezelfde naam
+    for team in (0, 1):
+        sq = data.get(f"team{team}_squad")
+        if not sq and data.get(f"team{team}_name"):
+            row = store.one("SELECT id FROM squads WHERE lower(name) = lower(?) ORDER BY id DESC LIMIT 1",
+                            (data[f"team{team}_name"].strip(),))
+            sq = row and row["id"]
+        if sq:
+            _load_squad(mid, team, int(sq))
     return _get("matches", mid)
+
+
+# --- vaste selecties (teams die je bij elke wedstrijd weer gebruikt) -----------------------
+
+def _squad(squad_id: int) -> dict:
+    sq = _get("squads", squad_id)
+    sq["players"] = store.all("SELECT name, number FROM squad_players WHERE squad_id = ? "
+                              "ORDER BY CAST(number AS INTEGER), name", (squad_id,))
+    return sq
+
+
+@app.get("/api/squads")
+def list_squads():
+    return [_squad(r["id"]) for r in store.all("SELECT id FROM squads ORDER BY lower(name)")]
+
+
+@app.delete("/api/squads/{squad_id}")
+def delete_squad(squad_id: int):
+    store.run("DELETE FROM squads WHERE id = ?", (squad_id,))
+    return {"ok": True}
+
+
+@app.post("/api/matches/{match_id}/save-squad")
+def save_squad(match_id: int, data: dict = Body(...)):
+    """De selectie van team 0 of 1 bewaren als vaste selectie (zelfde naam = bijwerken)."""
+    m = _get("matches", match_id)
+    team = int(data.get("team", 0))
+    name = (data.get("name") or m[f"team{team}_name"] or "").strip()
+    if not name:
+        raise HTTPException(400, "Geef het team een naam")
+    players = store.all("SELECT name, number FROM players WHERE match_id = ? AND team = ?", (match_id, team))
+    color = _team_colors(match_id)[team] or m.get(f"team{team}_color")
+    row = store.one("SELECT id FROM squads WHERE lower(name) = lower(?)", (name,))
+    with store.tx() as c:
+        if row:
+            sid = row["id"]
+            c.execute("UPDATE squads SET name = ?, color = COALESCE(?, color) WHERE id = ?", (name, color, sid))
+            c.execute("DELETE FROM squad_players WHERE squad_id = ?", (sid,))
+        else:
+            sid = c.execute("INSERT INTO squads (name, color) VALUES (?, ?)", (name, color)).lastrowid
+        c.executemany("INSERT INTO squad_players (squad_id, name, number) VALUES (?,?,?)",
+                      [(sid, p["name"], p["number"]) for p in players])
+    store.run(f"UPDATE matches SET team{team}_squad = ? WHERE id = ?", (sid, match_id))
+    return _squad(sid)
+
+
+@app.post("/api/matches/{match_id}/load-squad")
+def load_squad(match_id: int, data: dict = Body(...)):
+    """Spelers van een vaste selectie (of van een eerdere wedstrijd) overnemen in team 0 of 1."""
+    _get("matches", match_id)
+    team = int(data.get("team", 0))
+    if data.get("from_match"):
+        src = _get("matches", int(data["from_match"]))
+        src_team = int(data.get("from_team", team))
+        players = store.all("SELECT name, number FROM players WHERE match_id = ? AND team = ?", (src["id"], src_team))
+        n = _add_players(match_id, team, players)
+        store.run(f"UPDATE matches SET team{team}_name = ? WHERE id = ?", (src[f"team{src_team}_name"], match_id))
+    else:
+        n = _load_squad(match_id, team, int(data["squad_id"]))
+    analytics.invalidate(geometry=False)
+    return {"added": n, "match": get_match(match_id)}
+
+
+def _load_squad(match_id: int, team: int, squad_id: int) -> int:
+    sq = _squad(squad_id)
+    n = _add_players(match_id, team, sq["players"])
+    store.run(f"UPDATE matches SET team{team}_name = ?, team{team}_squad = ?, "
+              f"team{team}_color = COALESCE(team{team}_color, ?) WHERE id = ?", (sq["name"], squad_id, sq["color"], match_id))
+    return n
+
+
+def _add_players(match_id: int, team: int, players: list[dict]) -> int:
+    """Spelers toevoegen die er nog niet zijn (zelfde naam of rugnummer in dit team = al aanwezig)."""
+    have = store.all("SELECT name, number FROM players WHERE match_id = ? AND team = ?", (match_id, team))
+    names = {(p["name"] or "").strip().lower() for p in have}
+    numbers = {str(p["number"]).strip() for p in have if p["number"]}
+    n = 0
+    for p in players:
+        nm, nr = (p["name"] or "").strip(), (str(p["number"]).strip() if p.get("number") else None)
+        if not nm or nm.lower() in names or (nr and nr in numbers):
+            continue
+        store.run("INSERT INTO players (match_id, name, number, team) VALUES (?,?,?,?)", (match_id, nm, nr, team))
+        names.add(nm.lower())
+        if nr:
+            numbers.add(nr)
+        n += 1
+    return n
 
 
 @app.get("/api/matches/{match_id}")
@@ -140,7 +238,42 @@ def _team_colors(match_id: int) -> list[str | None]:
 
 @app.patch("/api/matches/{match_id}")
 def update_match(match_id: int, data: dict = Body(...)):
-    return _update("matches", match_id, data, {"name", "date", "team0_name", "team1_name"})
+    if "pitch_length" in data or "pitch_width" in data:
+        set_pitch_size(match_id, data.get("pitch_length"), data.get("pitch_width"))
+    return _update("matches", match_id, data, {"name", "date", "team0_name", "team1_name", "team0_color", "team1_color"})
+
+
+def set_pitch_size(match_id: int, length: float | None, width: float | None) -> pitch.Geometry:
+    """Veldmaten wijzigen. Kalibratiepunten (op naam) en camerapositie schuiven mee; de automatisch
+    bijgestelde sleutelframes worden opnieuw gemaakt."""
+    m = _get("matches", match_id)
+    old = pitch.of_match(m)
+    try:
+        new = pitch.geometry(float(length) if length else None, float(width) if width else None)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, "Ongeldige veldmaten") from e
+    if not (40 <= new.length <= 130 and 25 <= new.width <= 100 and new.length > new.width):
+        raise HTTPException(400, "Veldmaten kloppen niet: lengte 40-130 m, breedte 25-100 m, lengte groter dan breedte")
+    if new == old:
+        return new
+    store.run("UPDATE matches SET pitch_length = ?, pitch_width = ? WHERE id = ?", (new.length, new.width, match_id))
+    for c in store.all("SELECT * FROM clips WHERE match_id = ?", (match_id,)):
+        for kf in store.keyframes(c["id"]):
+            if kf.get("auto"):
+                store.run("DELETE FROM keyframes WHERE id = ?", (kf["id"],))
+            else:
+                store.run("UPDATE keyframes SET points = ? WHERE id = ?",
+                          (json.dumps(pitch.remap_points(kf["points"], new)), kf["id"]))
+        if c.get("cam_x") is not None and c.get("cam_y") is not None:
+            x = c["cam_x"] * new.length / old.length
+            y = c["cam_y"]
+            y = new.width + (y - old.width) if y > old.width else (y if y < 0 else y * new.width / old.width)
+            store.run("UPDATE clips SET cam_x = ?, cam_y = ? WHERE id = ?", (round(x, 1), round(y, 1), c["id"]))
+    analytics.invalidate()
+    for c in store.all("SELECT * FROM clips WHERE match_id = ?", (match_id,)):
+        if store.one("SELECT 1 AS x FROM keyframes WHERE clip_id = ? AND auto = 0", (c["id"],)):
+            _start_autocalib(c)
+    return new
 
 
 @app.delete("/api/matches/{match_id}")
@@ -190,7 +323,9 @@ def _store_probe(cid: int, path: Path, info: dict, inherit: dict | None = None) 
 
 @app.patch("/api/clips/{clip_id}")
 def update_clip(clip_id: int, data: dict = Body(...)):
-    return _update("clips", clip_id, data, {"order_idx", "period", "start_minute"})
+    if "flip" in data and data["flip"] is not None:
+        data = {**data, "flip": 1 if data["flip"] else 0}
+    return _update("clips", clip_id, data, {"order_idx", "period", "start_minute", "flip"})
 
 
 @app.delete("/api/clips/{clip_id}")
@@ -204,10 +339,13 @@ def delete_clip(clip_id: int):
 
 
 @app.post("/api/clips/{clip_id}/process")
-def process(clip_id: int):
+def process(clip_id: int, data: dict = Body(default={})):
+    """Analyse starten. data.mode: 'nauwkeurig' (standaard) of 'snel'."""
     c = _get("clips", clip_id)
     if c["status"] in ("wachtrij", "preview", "analyse"):
         raise HTTPException(409, "Clip wordt al verwerkt")
+    if data.get("mode") in ("nauwkeurig", "snel"):
+        store.run("UPDATE clips SET analysis_mode = ? WHERE id = ?", (data["mode"], clip_id))
     analytics.invalidate()
     worker.submit(clip_id)
     return _get("clips", clip_id)
@@ -350,8 +488,10 @@ def set_camera(clip_id: int, data: dict = Body(...)):
 
 
 @app.post("/api/clips/{clip_id}/camera/gps")
-def camera_from_gps(clip_id: int):
-    """Zoek het voetbalveld bij de GPS-positie van de video (OpenStreetMap) en zet de camera daar."""
+def camera_from_gps(clip_id: int, data: dict = Body(default={})):
+    """Zoek het voetbalveld bij de GPS-positie van de video (OpenStreetMap) en zet de camera daar.
+
+    data.adopt_size: ook de veldmaten uit OpenStreetMap overnemen voor deze wedstrijd."""
     c = _get("clips", clip_id)
     if c.get("gps_lat") is None:
         raise HTTPException(400, "Deze video bevat geen GPS-positie")
@@ -359,14 +499,19 @@ def camera_from_gps(clip_id: int):
         polys = geo.query_pitches(c["gps_lat"], c["gps_lon"])
     except Exception as e:  # noqa: BLE001  (geen internet, server druk, ...)
         raise HTTPException(502, f"OpenStreetMap niet bereikbaar ({e}). Klik je positie dan zelf aan.") from e
+    match = _get("matches", c["match_id"])
     try:
-        pos = geo.camera_on_pitch(c["gps_lat"], c["gps_lon"], polys)
+        pos = geo.camera_on_pitch(c["gps_lat"], c["gps_lon"], polys, pitch.of_match(match))
+        if data.get("adopt_size"):
+            g = set_pitch_size(c["match_id"], pos["pitch_length"], pos["pitch_width"])
+            pos = geo.camera_on_pitch(c["gps_lat"], c["gps_lon"], polys, g)
     except ValueError as e:
         raise HTTPException(404, f"{e}. Klik je positie zelf aan op de veldtekening.") from e
     store.run("UPDATE clips SET cam_x = ?, cam_y = ?, cam_h = COALESCE(cam_h, 1.6), cam_source = 'gps' WHERE id = ?",
               (pos["x"], pos["y"], clip_id))
     analytics.invalidate(clip_id=clip_id)
-    return {**pos, "clip": _get("clips", clip_id)}
+    g = pitch.of_match(_get("matches", c["match_id"]))
+    return {**pos, "clip": _get("clips", clip_id), "match_pitch": {"length": g.length, "width": g.width}}
 
 
 @app.get("/api/clips/{clip_id}/propose")
@@ -388,7 +533,8 @@ def propose_calibration(clip_id: int, t: float = 0.0):
     if fr:
         rows = store.all("SELECT x1, y1, x2, y2 FROM detections WHERE clip_id = ? AND idx = ?", (clip_id, fr["idx"]))
         boxes = np.array([[r["x1"], r["y1"], r["x2"], r["y2"]] for r in rows]).reshape(-1, 4)
-    res = propose(frame, prior, boxes)
+    geom = pitch.of_match(_get("matches", clip["match_id"]))
+    res = propose(frame, prior, boxes, geom=geom)
     if res is None:
         return {"ok": False, "t": ft, "message": "Geen overtuigend voorstel gevonden in dit beeld. Kies een moment met meer "
                                                   "veldlijnen in beeld, of klik zelf 1 punt + 1 lijn aan."}
@@ -397,13 +543,14 @@ def propose_calibration(clip_id: int, t: float = 0.0):
     to_img = analytics.h_to_image(H)
     # veldpunten in beeld, plus die net buiten beeld (die tellen gewoon mee en maken de kalibratie
     # stevig), plus punten op de lijnen die in beeld zijn
-    points = _spread(analytics.image_landmarks(to_img, W, Hh, line_points=False, margin=0.02), 8)
+    points = _spread(analytics.image_landmarks(to_img, W, Hh, line_points=False, margin=0.02, geom=geom), 8)
     if len(points) < 6:
         names = {p["name"] for p in points}
-        extra = [p for p in analytics.image_landmarks(to_img, W, Hh, line_points=False, margin=0.6) if p["name"] not in names]
+        extra = [p for p in analytics.image_landmarks(to_img, W, Hh, line_points=False, margin=0.6, geom=geom)
+                 if p["name"] not in names]
         points += _spread(extra, 6 - len(points))
     if len(points) < 4:
-        points += [p for p in analytics.image_landmarks(to_img, W, Hh, margin=0.0) if p.get("line")][:6]
+        points += [p for p in analytics.image_landmarks(to_img, W, Hh, margin=0.0, geom=geom) if p.get("line")][:6]
     return {"ok": True, "t": ft, "points": points, "H": normalize_h(H).tolist(), "info": info}
 
 
