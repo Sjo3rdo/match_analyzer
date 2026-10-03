@@ -80,16 +80,12 @@ textarea { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px soli
   font-size: 11px; padding: 2px 4px; overflow: hidden; white-space: nowrap; }
 .timeline .head { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--danger); }
 
-/* stappenbalk: waar ben je en wat is de volgende stap */
-.stepbar { display: flex; align-items: center; gap: 16px; flex-wrap: wrap; justify-content: space-between;
-  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 10px 14px; margin: -6px 0 16px; }
-.steps { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
-.step { display: flex; align-items: center; gap: 6px; padding: 4px 10px 4px 4px; border-radius: 999px;
-  color: var(--muted); text-decoration: none; border: 1px solid transparent; }
-.step .num { width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
-  background: var(--border); color: var(--text); font-size: 12px; font-weight: 600; }
-.step.done .num { background: var(--accent); color: #fff; }
-.step.next { color: var(--text); font-weight: 600; }
-.step.next .num { background: #ffd600; color: #18201c; }
-.step.here { border-color: var(--accent); }
+/* stappen in de tabbladen: ✓ = klaar, geel = volgende stap */
+#tabs a { display: inline-flex; align-items: center; gap: 6px; }
+.tabmark { width: 20px; height: 20px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center;
+  background: var(--border); color: var(--text); font-size: 11px; font-weight: 600; }
+.tabmark.done { background: var(--accent); color: #fff; }
+.tabmark.next { background: #ffd600; color: #18201c; }
+#tabs a.next { color: var(--text); font-weight: 600; }
+#tabs a.active .tabmark.done { background: #fff; color: var(--accent); }
 .frame-wrap canvas { touch-action: none; }

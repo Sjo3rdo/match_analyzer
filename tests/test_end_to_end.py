@@ -297,3 +297,115 @@ def test_link_assistant_suggests_continuation(env):
     sug = client.get(f"/api/players/{pa['id']}/suggestions?clip_id={cid}").json()
     assert sug and sug[0]["track_id"] == 2, sug
     assert all(s["track_id"] != 1 for s in sug)
+
+
+def _synthetic_clip(st, mid, tracks, n=60):
+    """Een geanalyseerde video zonder echte beelden: tracks = {tid: (functie t -> (x, y) voeten, kleur)}."""
+    from app.storage import clip_dir
+    cid = st.run("INSERT INTO clips (match_id, filename, path, width, height, status) VALUES (?, 'v', '', 1280, 720, 'klaar')", (mid,))
+    np.save(clip_dir(cid) / "motion.npy", np.tile(np.eye(3), (n, 1, 1)))
+    rows = []
+    with st.tx() as c:
+        for i in range(n):
+            c.execute("INSERT INTO frames VALUES (?,?,?)", (cid, i, i / 10))
+            for tid, (f, _) in tracks.items():
+                x, y = f(i / 10)
+                rows.append((cid, i, tid, x - 8, y - 40, x + 8, y, 0.9))
+        c.executemany("INSERT INTO detections VALUES (?,?,?,?,?,?,?,?)", rows)
+        for tid, (_, col) in tracks.items():
+            c.execute("INSERT INTO tracks (clip_id, track_id, n_frames, t_start, t_end, team, team_auto, color) "
+                      "VALUES (?,?,?,0,?,0,0,?)", (cid, tid, n, (n - 1) / 10, col))
+    return cid
+
+
+def test_spectator_removed_with_similar_ones(env):
+    """Een toeschouwer aanwijzen: hij telt niet meer mee, en de buurman op dezelfde plek met dezelfde
+    jas wordt voorgesteld om mee weg te halen; een speler met dezelfde kleur die rondloopt niet."""
+    main, client, tmp = env
+    mid = client.post("/api/matches", json={"name": "Publiek"}).json()["id"]
+    cid = _synthetic_clip(main.store, mid, {
+        1: (lambda t: (300, 650), "#303040"),          # toeschouwer, staat stil
+        2: (lambda t: (320, 652), "#323242"),          # buurman, staat stil, zelfde jas
+        3: (lambda t: (300 + 60 * t, 400), "#303040"),  # speler in donker shirt, loopt
+        4: (lambda t: (900, 650), "#d03030"),          # iemand anders, ander shirt
+    })
+    # zonder kalibratie zou de app stilstaanders al weglaten; maak ze "geldig" om het aanwijzen te testen
+    from app import analytics
+    orig = analytics._valid_tracks
+    analytics._valid_tracks = lambda d, **k: set(d.tracks) or {1, 2, 3, 4}
+    try:
+        analytics.invalidate()
+        r = client.patch(f"/api/clips/{cid}/tracks/1", json={"team": 3}).json()
+        assert [s["track_id"] for s in r["similar"]] == [2], r["similar"]
+        tracks = {t["track_id"]: t for t in client.get(f"/api/clips/{cid}/tracks").json()}
+        assert not tracks[1]["valid"] and tracks[2]["valid"]
+        client.post("/api/tracks/spectators", json={"items": r["similar"]})
+        tracks = {t["track_id"]: t for t in client.get(f"/api/clips/{cid}/tracks").json()}
+        assert not tracks[2]["valid"] and tracks[3]["valid"] and tracks[2]["team"] == 3
+        client.post("/api/tracks/spectators", json={"items": r["similar"], "undo": True})
+        assert {t["track_id"]: t for t in client.get(f"/api/clips/{cid}/tracks").json()}[2]["valid"]
+    finally:
+        analytics._valid_tracks = orig
+
+
+def test_corrections_teach_team_colors(env):
+    """Zelf een paar tracks indelen: 'Opnieuw indelen' gebruikt die als voorbeeld, en de kleuren
+    gaan mee naar de vaste selectie."""
+    main, client, tmp = env
+    mid = client.post("/api/matches", json={"name": "Leren", "team0_name": "Wit"}).json()["id"]
+    cols = {1: "#e8e8e8", 2: "#e0e0e4", 3: "#2a3a8a", 4: "#24348a", 5: "#dcdce0", 6: "#30409a"}
+    cid = _synthetic_clip(main.store, mid, {tid: (lambda t, k=tid: (100 * k + 40 * t, 300 + 10 * k), c) for tid, c in cols.items()})
+    sq = client.post(f"/api/matches/{mid}/save-squad", json={"team": 0}).json()
+    # de gebruiker zet wit in team 0 en blauw in team 1 (de automatische indeling had alles in 0)
+    client.patch(f"/api/clips/{cid}/tracks/1", json={"team": 0})
+    main.store.run("UPDATE tracks SET team_auto = 1 WHERE clip_id = ? AND track_id = 1", (cid,))  # = handmatig
+    client.patch(f"/api/clips/{cid}/tracks/3", json={"team": 1})
+    client.post(f"/api/clips/{cid}/reassign-teams")
+    t = {r["track_id"]: r["team"] for r in client.get(f"/api/clips/{cid}/tracks").json()}
+    assert t[1] == t[2] == t[5] == 0 and t[3] == t[4] == t[6] == 1, t
+    sq2 = next(s for s in client.get("/api/squads").json() if s["id"] == sq["id"])
+    assert sq2["color"] and int(sq2["color"][1:3], 16) > 180  # wit-achtig geleerd
+
+
+def test_venue_and_camera_position_remembered(env):
+    main, client, tmp = env
+    st = main.store
+    m1 = client.post("/api/matches", json={"name": "Thuis 1"}).json()["id"]
+    c1 = st.run("INSERT INTO clips (match_id, filename, path, width, height, gps_lat, gps_lon) "
+                "VALUES (?, 'a', '', 1920, 1080, 53.2493, 6.3917)", (m1,))
+    client.patch(f"/api/matches/{m1}", json={"pitch_length": 100, "pitch_width": 64})
+    # tweede video vanaf dezelfde plek: positie zelf aangeklikt in de eerste, overgenomen in de tweede
+    c2 = st.run("INSERT INTO clips (match_id, filename, path, width, height, gps_lat, gps_lon) "
+                "VALUES (?, 'b', '', 1920, 1080, 53.24932, 6.39172)", (m1,))
+    client.patch(f"/api/clips/{c1}/camera", json={"x": 40, "y": 70, "h": 1.6, "source": "hand"})
+    c2d = next(c for c in client.get(f"/api/matches/{m1}").json()["clips"] if c["id"] == c2)
+    assert c2d["cam_x"] == 40 and c2d["cam_source"] == "kopie"
+    # volgende wedstrijd op hetzelfde veld: veldmaten worden overgenomen bij het uploaden
+    m2 = client.post("/api/matches", json={"name": "Thuis 2"}).json()["id"]
+    c3 = st.run("INSERT INTO clips (match_id, filename, path, width, height, gps_lat, gps_lon) "
+                "VALUES (?, 'c', '', 1920, 1080, 53.2494, 6.3919)", (m2,))
+    learned = main._learn_for_new_clip(m2, c3)
+    assert learned and client.get(f"/api/matches/{m2}").json()["pitch_length"] == 100
+    m3 = client.post("/api/matches", json={"name": "Uit"}).json()["id"]
+    c4 = st.run("INSERT INTO clips (match_id, filename, path, width, height, gps_lat, gps_lon) "
+                "VALUES (?, 'd', '', 1920, 1080, 52.0, 5.0)", (m3,))
+    assert main._learn_for_new_clip(m3, c4) == []
+
+
+def test_manual_ball_and_gap_filling(env):
+    main, client, tmp = env
+    mid = client.post("/api/matches", json={"name": "Bal"}).json()["id"]
+    cid = _synthetic_clip(main.store, mid, {1: (lambda t: (200, 400), "#d03030")}, n=30)
+    with main.store.tx() as c:  # bal gevonden in beeld 0-4 en 9-12, ertussen niet
+        for i in list(range(0, 5)) + list(range(9, 13)):
+            c.execute("INSERT INTO ball VALUES (?,?,?,?,?)", (cid, i, 100 + 10 * i, 300, 0.5))
+    corners = [(0, 0), (105, 0), (105, 68), (0, 68)]
+    pts = [{"name": str(k), "img": [100 + k[0] * 10, 100 + k[1] * 8], "pitch": list(k)} for k in corners]
+    assert client.post(f"/api/clips/{cid}/keyframes", json={"t": 0, "points": pts}).status_code == 200
+    b = client.get(f"/api/clips/{cid}/ball").json()
+    kinds = {round(x["t"], 1): x["kind"] for x in b}
+    assert kinds[0.6] == "geschat" and kinds[0.0] == "gevonden"
+    client.post(f"/api/clips/{cid}/ball", json={"t": 2.0, "x": 500, "y": 350})
+    client.post(f"/api/clips/{cid}/ball", json={"t": 0.2, "x": None, "y": None})  # daar was geen bal
+    b = {round(x["t"], 1): x for x in client.get(f"/api/clips/{cid}/ball").json()}
+    assert b[2.0]["kind"] == "hand" and b[2.0]["x"] == 500 and 0.2 not in b

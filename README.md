@@ -37,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.6 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.7 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. De browser haalt de interface na een update altijd vers op. Kwam je van een
 versie zonder versienummer rechtsboven, druk dan één keer op ⌥⌘R in Safari om de oude, bewaarde
 pagina weg te gooien (anders zie je bijv. geen deelknop of krijg je "Method Not Allowed").
@@ -55,9 +55,10 @@ Alle gegevens (video's, analyses, exports) staan in de map `data/`.
 Zie het als een puzzel in drie lagen: eerst *zien* (wie staat waar in beeld), dan *plaatsen*
 (waar is dat op het echte veld) en dan *benoemen* (wie is dat).
 
-Bovenaan elke wedstrijd staat een stappenbalk: **Video's → Kalibratie → Spelers → Bekijken**. Een
-groen vinkje betekent klaar, het gele bolletje is de volgende stap, en de knop **Volgende stap →**
-brengt je erheen.
+Bovenaan staan de tabbladen. De eerste drie zijn de stappen die je doorloopt: **Video's →
+Kalibratie → Spelers**. Een groen vinkje betekent klaar en het gele bolletje is de volgende stap
+(houd de muis erop om te zien wat er nog moet). Daarna bekijk je het resultaat bij **Video +
+minimap**, **Statistieken** en **Clips & delen**.
 
 1. **Video's.** Maak een wedstrijd aan en upload je video's. Dat mogen er meerdere zijn,
    bijvoorbeeld per helft of als de telefoon tussendoor stopte. Geef bij elke video de helft en
@@ -84,6 +85,17 @@ brengt je erheen.
      doellijn, en daarna op die lijn in de veldtekening (hij kleurt rood). Een punt telt 2, een lijn
      telt mee met hoogstens 2 punten, en je hebt er samen 8 nodig, bijvoorbeeld 1 punt en 3 lijnen.
      Let op: precies 2 punten en 2 lijnen ligt wiskundig niet vast; voeg dan nog iets toe.
+   - **Uit de lijst kiezen.** Onder de veldtekening staat een lijst met alle punten en lijnen. Zie je
+     alleen een zijlijn en verder geen vast punt (geen hoekvlag, geen middenlijn)? Kies dan
+     **Zijlijn onder** (de kant waar jij staat als je onderaan de tekening staat) en klik er in het
+     beeld een paar plekken op aan, verspreid over de lijn. Samen met je positie en één ander punt of
+     lijn ligt het veld dan vast.
+   - **Het doel.** Klik je in de veldtekening bij een doel, dan kies je wat je in het beeld aanklikt:
+     de **voet** van een paal (waar hij de grond raakt), de **bovenkant** van een paal (waar de lat
+     begint, 2,44 m hoog) of een plek **op de lat**. De bovenkant en de lat hangen in de lucht en
+     vertellen de app hoe ver weg het doel is en hoeveel je hebt ingezoomd. Ze tellen mee zodra de app
+     weet waar je stond (zie hieronder). Na het klikken tekent de app het doel in het beeld, zodat je
+     ziet of het klopt.
    - **Vertel de app waar je stond.** Klik bij **📍 Waar stond je bij het filmen?** op de veldtekening
      waar je ongeveer stond, en kies je hoogte (staand, heuvel of tribune). Dan rekent de app met een
      cameramodel en is **1 punt + 1 lijn** al genoeg, bijvoorbeeld een doelpaal en de zijlijn voor je.
@@ -128,12 +140,21 @@ brengt je erheen.
    mogelijk weggefilterd: wie meestal op dezelfde plek staat (gemeten tegen de achtergrond, dus
    los van het zwenken), of wiens voeten buiten beeld vallen, telt niet als speler. Na de
    kalibratie valt ook iedereen buiten het veld af. Voer de selectie in, met rugnummers.
+   - **Toeschouwer weghalen.** Staat er toch iemand van het publiek tussen? Klik op 🚫 op zijn
+     kaartje (of kies **Toeschouwer** bij het team, ook in **Video + minimap**). Hij telt dan nergens
+     meer mee. De app zoekt meteen naar personen met dezelfde soort kleding op dezelfde plek, ook in
+     je andere video's van deze wedstrijd, en vraagt of die ook weg mogen. Vergist? Zet het team
+     terug, of vink "alleen op het veld" uit om ze terug te vinden.
    - **Selectie overnemen.** Klik bij een team op **💾 Bewaar als vaste selectie**. Bij een volgende
      wedstrijd kies je die teamnaam bij het aanmaken (of bij **📋 Selectie overnemen**), en staan de
      spelers er meteen in. Je kunt ook de selectie van een eerdere wedstrijd overnemen.
    - **Teams omwisselen.** De app weet niet welke shirtkleur jouw team is. Staat jouw team bij
      "Uit"? Klik dan op **⇄ Teams omwisselen**. Video's van dezelfde wedstrijd houdt de app zelf
      gelijk.
+   - **De app leert van je correcties.** Zet je bij een paar spelers zelf het goede team, klik dan
+     op **↻ Opnieuw indelen**: de app gebruikt jouw keuzes als voorbeeld voor de rest van de video.
+     De teamkleuren die zo ontstaan, onthoudt de app bij de wedstrijd en bij je vaste selectie, zodat
+     een volgende video of wedstrijd met hetzelfde tenue meteen goed begint.
    - **Koppel-assistent.** Koppel je een track aan een speler, dan stelt de app de tracks voor die
      waarschijnlijk ook van hem zijn: ze zijn niet tegelijk in beeld, beginnen ongeveer waar het
      vorige stuk ophield en hebben hetzelfde shirt. Zie het als een spoor in de sneeuw dat steeds
@@ -142,6 +163,12 @@ brengt je erheen.
      ook zelf. Klik op **Automatisch koppelen** om
    tracks met een leesbaar rugnummer te koppelen. De rest koppel je via de kaartjes of door in
    **Video + minimap** te pauzeren en op een speler te klikken.
+
+   **De bal.** In **Video + minimap** zie je een cirkel om de bal: wit = gevonden, geel gestippeld =
+   geschat (de bal was even niet te zien en de app trekt een lijn tussen ervoor en erna), groen = door
+   jou aangewezen. Mist de app de bal op een belangrijk moment? Pauzeer, klik **⚽ Bal aanwijzen** en
+   klik op de bal. Ziet de app iets anders aan voor de bal, klik dan **🚫 Geen bal hier**. Jouw
+   aanwijzingen gaan altijd voor en worden gebruikt voor balbezit en passes.
 
 4. **Bekijken.** Bij **Statistieken** zie je de team- en spelerscijfers, heatmaps, de teamvorm
    en het passnetwerk, en kun je alles als CSV exporteren.
@@ -163,10 +190,24 @@ brengt je erheen.
    Met **Exporteer** maak je een mp4 (1080p). Daarna kun je op **Deel** klikken voor AirDrop,
    WhatsApp, Berichten of Mail; dat werkt in Safari. Of je downloadt het bestand.
 
-**Een lange video knippen.** Klik bij **1. Video's** op **Knippen**. Klik **Begin deel** bij de
+**Een lange video knippen.** Klik bij **Video's** op **Knippen**. Klik **Begin deel** bij de
 aftrap en **Einde deel** bij het eindsignaal, en doe hetzelfde voor de tweede helft. Alles daartussen
 (warming-up, rust) valt weg. Het knippen is binnen seconden klaar en kost geen kwaliteit. Een deel kan
 wel tot ongeveer 1 seconde eerder beginnen dan je koos.
+
+## Wat de app onthoudt
+
+Zoals een trainer die een veld al kent, hoef je sommige dingen maar één keer in te stellen:
+
+- **Veldmaten per veld.** Stel je de veldmaten in, dan onthoudt de app ze bij de GPS-plek van je
+  video's. Film je later weer op dat veld, dan staan de maten er bij het uploaden meteen goed in.
+- **Je plek per video.** Klik je in één video aan waar je stond, dan krijgen andere video's van
+  dezelfde wedstrijd die vanaf (bijna) dezelfde GPS-plek zijn gefilmd die plek ook. Klik hem gerust
+  preciezer aan.
+- **Teamkleuren en toeschouwers.** Zie **De app leert van je correcties** en **Toeschouwer
+  weghalen** hierboven.
+
+Alles blijft op je eigen laptop.
 
 ## Tips voor het filmen
 
@@ -186,8 +227,12 @@ een vaste 180°-camera.
 
 - **Afstand en snelheid.** Hoe dichter bij de camera, hoe beter. Aan de verre kant kan een fout
   van 1 tot 2 m per positie ontstaan. De app strijkt posities glad en negeert onmogelijke sprongen.
-- **Bal.** Een kleine, snelle bal is vaak niet te zien. Balbezit en passes zijn daarom een
-  *schatting*.
+- **Bal.** Een kleine, snelle bal is vaak niet te zien. De app volgt hem daarom als een vogelaar:
+  is hij even weg, dan zoomt de app in op de plek waar hij heen ging (uitsnede op volle resolutie),
+  en is hij lang weg, dan zoekt de app af en toe het hele beeld in stukken af. Korte gaten (tot
+  1 s) vult de app op. Dat maakt de analyse wat langzamer. Balbezit en passes blijven een
+  *schatting*; wijs de bal zelf aan op momenten die ertoe doen. Video's die met een eerdere versie
+  zijn geanalyseerd, hebben dit pas na **Opnieuw** analyseren.
 - **Rugnummers.** Vanaf de zijlijn zijn die vaak onleesbaar. Gebruik ze daarom als suggestie en
   controleer de koppelingen.
 - **Teams en publiek.** In fel zonlicht lijkt een donkerblauw shirt soms grijs; zo'n speler kan bij

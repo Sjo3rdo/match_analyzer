@@ -9,7 +9,7 @@ const KIND = { sprint: '⚡ Sprint', pass: '➡️ Pass', balverlies: '✖️ Ba
 export async function render(root, ctx) {
   const { match } = ctx;
   if (!match.clips.length) {
-    root.append(h('div', { className: 'panel empty' }, 'Upload eerst een video bij "1. Video\'s".'));
+    root.append(h('div', { className: 'panel empty' }, 'Upload eerst een video bij "Video\'s".'));
     return;
   }
   const clipById = new Map(match.clips.map(c => [c.id, c]));
@@ -204,7 +204,7 @@ export async function render(root, ctx) {
           h('option', { value: '' }, 'geen'), match.players.map(p => h('option', { value: p.id, selected: m.spotlight_player_id === p.id }, playerLabel(p))))),
         c.status !== 'klaar' ? h('span', { className: 'small muted' }, '(spotlight werkt na analyse en koppelen)') : null),
       match.players.length ? h('div', { style: { marginTop: '8px' } }, h('div', { className: 'small muted' }, 'Spelers in deze clip:'), chips)
-        : h('div', { className: 'small muted', style: { marginTop: '8px' } }, 'Voeg spelers toe bij "3. Spelers" om ze te taggen.'),
+        : h('div', { className: 'small muted', style: { marginTop: '8px' } }, 'Voeg spelers toe bij "Spelers" om ze te taggen.'),
       h('textarea', { placeholder: 'Opmerking (bijv. "let op de loopactie van de spits")', rows: 2, style: { width: '100%', marginTop: '8px' },
         oninput: e => save({ comment: e.target.value }) }, m.comment || ''),
       h('div', { style: { marginTop: '8px' } }, h('div', { className: 'small muted' }, 'Tekeningen (beeld bevriest in de export):'),

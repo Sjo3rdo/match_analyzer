@@ -9,10 +9,12 @@ import * as video from './views/video.js';
 import * as stats from './views/stats.js';
 import * as moments from './views/moments.js';
 
+// Tabbladen; de eerste drie zijn de stappen die je doorloopt (met een ✓ als ze klaar zijn en een
+// geel bolletje bij de volgende stap), de rest is om te bekijken.
 const TABS = [
-  ['clips', '1. Video\'s', clips],
-  ['kalibratie', '2. Kalibratie', calibrate],
-  ['spelers', '3. Spelers', players],
+  ['clips', 'Video\'s', clips],
+  ['kalibratie', 'Kalibratie', calibrate],
+  ['spelers', 'Spelers', players],
   ['video', 'Video + minimap', video],
   ['statistieken', 'Statistieken', stats],
   ['momenten', 'Clips & delen', moments],
@@ -26,30 +28,25 @@ function steps(match) {
   const videos = clips.length > 0 && analyzed.length === clips.length;
   const calib = analyzed.length > 0 && analyzed.every(c => (c.n_manual_keyframes ?? c.n_keyframes) > 0);
   const players = match.players.length > 0 && match.n_assigned > 0;
-  return [
-    { key: 'clips', label: 'Video\'s', done: videos,
-      todo: !clips.length ? 'Upload je video\'s' : busy ? 'Even wachten: de analyse loopt' : 'Klik op "Analyseer" bij elke video' },
-    { key: 'kalibratie', label: 'Kalibratie', done: calib, todo: 'Leg het veld op het beeld' },
-    { key: 'spelers', label: 'Spelers', done: players, todo: 'Voer de selectie in en koppel spelers' },
-    { key: 'statistieken', label: 'Bekijken', done: false, todo: 'Bekijk statistieken, video en clips' },
-  ];
+  return {
+    clips: { done: videos, todo: !clips.length ? 'Upload je video\'s' : busy ? 'Even wachten: de analyse loopt' : 'Klik op "Analyseer" bij elke video' },
+    kalibratie: { done: calib, todo: 'Leg het veld op het beeld' },
+    spelers: { done: players, todo: 'Voer de selectie in en koppel spelers' },
+  };
 }
 
-function renderSteps(el, match, tab) {
-  const list = steps(match);
-  const next = list.find(s => !s.done) || list[list.length - 1];
-  const viewTabs = ['statistieken', 'video', 'momenten'];
-  const here = viewTabs.includes(tab) ? 'statistieken' : tab;
-  el.replaceChildren(
-    h('div', { className: 'steps' }, list.flatMap((s, i) => [
-      i ? h('span', { className: 'muted' }, '›') : null,
-      h('a', {
-        href: `#/match/${match.id}/${s.key}`,
-        className: `step ${s.done ? 'done' : ''} ${s.key === here ? 'here' : ''} ${s === next ? 'next' : ''}`,
-      }, h('span', { className: 'num' }, s.done ? '✓' : i + 1), s.label)]).filter(Boolean)),
-    next.key !== here
-      ? h('a', { className: 'btn primary', href: `#/match/${match.id}/${next.key}` }, `Volgende stap: ${next.label.toLowerCase()} →`)
-      : h('span', { className: 'muted small' }, next.done ? '' : `Nu: ${next.todo}`));
+function renderTabs(el, match, tab) {
+  const st = steps(match);
+  const next = ['clips', 'kalibratie', 'spelers'].find(k => !st[k].done);
+  el.replaceChildren(...TABS.map(([key, label], i) => {
+    const s = st[key];
+    const mark = !s ? null : s.done ? h('span', { className: 'tabmark done' }, '✓')
+      : h('span', { className: `tabmark ${key === next ? 'next' : ''}` }, i + 1);
+    return h('a', {
+      href: `#/match/${match.id}/${key}`, className: `${key === tab ? 'active' : ''} ${key === next ? 'next' : ''}`,
+      title: s ? (s.done ? 'Klaar' : key === next ? `Volgende stap: ${s.todo}` : s.todo) : '',
+    }, mark, label);
+  }));
 }
 
 let cleanup = null;
@@ -70,19 +67,15 @@ async function route() {
   }
   const matchId = Number(parts[1]);
   const tab = parts[2] || 'clips';
-  for (const [key, label] of TABS) {
-    tabs.append(h('a', { href: `#/match/${matchId}/${key}`, className: key === tab ? 'active' : '' }, label));
-  }
   const match = await api(`/matches/${matchId}`);
   setPitchSize(match.pitch_length, match.pitch_width);
   // Teamkleuren in de interface = gemiddelde shirtkleur uit de video (indien bekend)
   TEAM_COLORS.splice(0, 2, ...match.team_colors.map((c, i) => c || DEFAULT_COLORS[i]));
-  const stepBar = h('div', { className: 'stepbar' });
-  renderSteps(stepBar, match, tab);
+  renderTabs(tabs, match, tab);
   const ctx = {
     match, params,
     reload: () => route(),
-    async refreshSteps() { renderSteps(stepBar, await api(`/matches/${matchId}`), tab); },
+    async refreshSteps() { renderTabs(tabs, await api(`/matches/${matchId}`), tab); },
     setParam(k, v) {
       const p = new URLSearchParams(params); p.set(k, v);
       history.replaceState(null, '', `#/match/${matchId}/${tab}?${p}`);
@@ -90,7 +83,7 @@ async function route() {
   };
   const mod = (TABS.find(t => t[0] === tab) || TABS[0])[2];
   view.append(h('h1', {}, match.name, ' ', h('span', { className: 'muted small' },
-    `${match.team0_name} – ${match.team1_name}${match.date ? ' · ' + match.date : ''}`)), stepBar);
+    `${match.team0_name} – ${match.team1_name}${match.date ? ' · ' + match.date : ''}`)));
   cleanup = await mod.render(view, ctx);
 }
 

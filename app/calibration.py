@@ -40,23 +40,31 @@ def _line_coeffs(seg) -> np.ndarray:
     return l / (np.hypot(l[0], l[1]) or 1.0)
 
 
-def calibration_dof(points: list[dict]) -> int:
-    """Hoeveel 'informatie' de kalibratie heeft: een punt telt 2, elke lijn hoogstens 2."""
+def on_ground(points: list[dict]) -> list[dict]:
+    """Alleen de punten en lijnen op de grond. Punten in de lucht (bovenkant van een doelpaal,
+    de lat) hebben "pitch3"/"line3" met een hoogte erbij; die kan alleen het cameramodel gebruiken."""
+    return [p for p in points if p.get("pitch") is not None or p.get("line")]
+
+
+def calibration_dof(points: list[dict], elevated: bool = False) -> int:
+    """Hoeveel 'informatie' de kalibratie heeft: een punt telt 2, elke lijn hoogstens 2.
+    elevated: ook punten en lijnen in de lucht meetellen (alleen met het cameramodel)."""
     per_line: dict[str, int] = {}
     n = 0
     for p in points:
-        if "pitch" in p and p["pitch"] is not None:
+        if p.get("pitch") is not None or (elevated and p.get("pitch3") is not None):
             n += 2
-        elif p.get("line"):
-            key = str(p["line"])
+        elif p.get("line") or (elevated and p.get("line3")):
+            key = str(p.get("line") or p.get("line3"))
             per_line[key] = min(2, per_line.get(key, 0) + 1)
     return n + sum(per_line.values())
 
 
 def calibration_residuals(K: np.ndarray, points: list[dict]) -> np.ndarray:
-    """Fout per kalibratiepunt in meters (punt: afstand tot het veldpunt, lijnpunt: tot de lijn)."""
+    """Fout per kalibratiepunt in meters (punt: afstand tot het veldpunt, lijnpunt: tot de lijn).
+    Alleen punten op de grond (een homografie kent geen hoogte)."""
     out = []
-    for p in points:
+    for p in on_ground(points):
         q = apply_h(K, np.asarray(p["img"], float))[0]
         if "pitch" in p and p["pitch"] is not None:
             out.append(np.linalg.norm(q - np.asarray(p["pitch"], float)))
@@ -79,7 +87,8 @@ def fit_calibration(points: list[dict], camera: dict | None = None) -> tuple[np.
     if camera is not None:
         try:
             K, _ = fit_camera(points, camera)
-            err = float(np.mean(calibration_residuals(K, points)))
+            r = calibration_residuals(K, points)
+            err = float(np.mean(r)) if len(r) else 0.0
         except (ValueError, np.linalg.LinAlgError):
             if calibration_dof(points) < 8:
                 raise
@@ -94,6 +103,9 @@ def fit_calibration(points: list[dict], camera: dict | None = None) -> tuple[np.
                 pass
         if K is not None:
             return K, err
+    if calibration_dof(points) < 8 <= calibration_dof(points, elevated=True):
+        raise ValueError("Punten in de lucht (bovenkant van een doelpaal, de lat) tellen pas mee als de app weet "
+                         "waar je stond: stel je positie in (📍 of GPS), of klik nog punten op de grond aan")
     return _fit_free(points)
 
 
@@ -105,6 +117,7 @@ def _fit_free(points: list[dict], refine: bool = True) -> tuple[np.ndarray, floa
     Een punt levert twee vergelijkingen, een punt-op-lijn één (l^T K x = 0). Samen lineair
     oplossen (genormaliseerd), daarna verfijnen op de echte fout in meters.
     """
+    points = on_ground(points)
     if calibration_dof(points) < 8:
         raise ValueError("Te weinig informatie: gebruik minstens 4 punten, of combineer punten "
                          "met lijnen (elke lijn telt mee met hoogstens 2 punten)")
@@ -356,6 +369,22 @@ DEFAULT_HFOV_DEG = 64.0  # telefoon, hoofdlens (1x), video met stabilisatie
 
 def camera_homography(params: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     """Veld -> beeld voor camera-parameters [x, y, h, yaw, tilt, roll, log_f]."""
+    P = camera_projection(params, size)
+    return normalize_h(P[:, [0, 1, 3]])
+
+
+def project_3d(P: np.ndarray, pts: np.ndarray) -> np.ndarray:
+    """Punten [X, Y, hoogte] (meters) naar beeldpixels; NaN als ze achter de camera liggen."""
+    pts = np.asarray(pts, float).reshape(-1, 3)
+    hom = np.column_stack([pts[:, 0], pts[:, 1], -pts[:, 2], np.ones(len(pts))]) @ P.T  # Z wijst omlaag
+    out = hom[:, :2] / np.where(np.abs(hom[:, 2:3]) > 1e-9, hom[:, 2:3], np.nan)
+    out[hom[:, 2] <= 1e-6] = np.nan
+    return out
+
+
+def camera_projection(params: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """3x4 projectiematrix (veld in 3D -> beeld) voor camera-parameters [x, y, h, yaw, tilt, roll, log_f].
+    Een punt op hoogte z heeft Z = -z."""
     cx, cy, h, yaw, tilt, roll, logf = params
     W, Hh = size
     f = math.exp(logf)
@@ -369,8 +398,9 @@ def camera_homography(params: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     R = np.stack([right, dn, fwd])
     C = np.array([cx, cy, -h])
     Kc = np.array([[f, 0, W / 2], [0, f, Hh / 2], [0, 0, 1.0]])
-    H = Kc @ np.column_stack([R[:, 0], R[:, 1], -R @ C])
-    return normalize_h(H)
+    P = Kc @ np.column_stack([R, -R @ C])
+    d = abs(P[2, 3]) if abs(P[2, 3]) > 1e-12 else (np.linalg.norm(P) or 1.0)
+    return P / d
 
 
 def default_focal(width: int) -> float:
@@ -378,12 +408,26 @@ def default_focal(width: int) -> float:
 
 
 def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma_px: float = 4.0) -> np.ndarray:
-    H = camera_homography(p, size)
+    P = camera_projection(p, size)
+    H = normalize_h(P[:, [0, 1, 3]])
     Hinv_T = np.linalg.inv(H).T
     r = []
     for q in points:
         x, y = q["img"]
-        if q.get("pitch") is not None:
+        if q.get("pitch3") is not None:  # punt in de lucht (bovenkant van een doelpaal)
+            v = project_3d(P, q["pitch3"])[0]
+            if not np.isfinite(v).all():
+                r += [50.0, 50.0]
+                continue
+            r += [(v[0] - x) / sigma_px, (v[1] - y) / sigma_px]
+        elif q.get("line3"):  # ergens op een lijn in de lucht (de lat)
+            a, b = project_3d(P, q["line3"])
+            if not (np.isfinite(a).all() and np.isfinite(b).all()):
+                r.append(50.0)
+                continue
+            l = _line_coeffs((a, b))
+            r.append((l[0] * x + l[1] * y + l[2]) / sigma_px)
+        elif q.get("pitch") is not None:
             X, Y = q["pitch"]
             v = H @ np.array([X, Y, 1.0])
             if v[2] <= 1e-6:  # achter de camera: zware straf
@@ -433,7 +477,7 @@ def fit_camera(points: list[dict], prior: dict) -> tuple[np.ndarray, dict]:
 
     Geeft (homografie beeld -> veld, cameraparameters)."""
     size = (int(prior["width"]), int(prior["height"]))
-    data_dof = calibration_dof(points)
+    data_dof = calibration_dof(points, elevated=True)
     if data_dof < 3:
         raise ValueError("Met de camerapositie is minder nodig, maar nog wel minstens 1 punt + 1 lijn "
                          "(of 2 lijnen, of 2 punten)")
@@ -448,7 +492,8 @@ def fit_camera(points: list[dict], prior: dict) -> tuple[np.ndarray, dict]:
     fits = [_lm(fun, p0) for _, p0 in starts[:4]]
     p = min(fits, key=lambda q: float(np.sum(fun(q) ** 2)))
     H = camera_homography(p, size)
-    K = orient_by_points(normalize_h(np.linalg.inv(H)), [p["img"] for p in points])
+    ground = on_ground(points) or points
+    K = orient_by_points(normalize_h(np.linalg.inv(H)), [p["img"] for p in ground])
     cam = {"params": [float(v) for v in p],
            "x": float(p[0]), "y": float(p[1]), "h": float(p[2]), "yaw_deg": math.degrees(p[3]) % 360,
            "tilt_deg": math.degrees(p[4]), "roll_deg": math.degrees(p[5]),

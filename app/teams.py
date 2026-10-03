@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 
 TEAM_OTHER = 2
+TEAM_SPECTATOR = 3  # door de gebruiker aangewezen als toeschouwer: telt nergens mee
 TEAM_UNKNOWN = -1
 
 
@@ -117,7 +118,8 @@ def team_centers(colors: np.ndarray, weights: np.ndarray, labels: np.ndarray) ->
     return out
 
 
-def assign_teams(colors: np.ndarray, n_frames: np.ndarray, exclude: np.ndarray | None = None) -> np.ndarray:
+def assign_teams(colors: np.ndarray, n_frames: np.ndarray, exclude: np.ndarray | None = None,
+                 anchors: np.ndarray | None = None) -> np.ndarray:
     """Teamlabel per track: 0, 1 of TEAM_OTHER.
 
     1. Toeschouwers (`exclude`, bijv. wie stilstaat) doen niet mee: anders vormen donkere jassen
@@ -128,6 +130,10 @@ def assign_teams(colors: np.ndarray, n_frames: np.ndarray, exclude: np.ndarray |
        tinten van hetzelfde groene shirt zijn geen twee teams).
     4. Elke track gaat naar het team waar zijn kleur het dichtst bij ligt, als die duidelijk
        genoeg lijkt; anders 'overig' (scheidsrechter, keeper, publiek).
+
+    anchors: per track het team dat de gebruiker zelf heeft gekozen (0/1), of -1. Heeft de
+    gebruiker in beide teams iemand ingedeeld, dan zijn dat de teamkleuren (leren van correcties)
+    in plaats van wat k-means vindt.
     """
     colors = np.asarray(colors, dtype=np.float64).reshape(-1, 3)
     n = len(colors)
@@ -141,6 +147,11 @@ def assign_teams(colors: np.ndarray, n_frames: np.ndarray, exclude: np.ndarray |
     w = np.asarray(n_frames, dtype=np.float64)[use]
     w = np.where(w > 0, w, 1.0)
     x = colors[use] * _W
+    anc = np.full(n, -1) if anchors is None else np.asarray(anchors, int)
+    if all(np.any(anc == t) for t in (0, 1)):
+        aw = np.where(np.asarray(n_frames, float) > 0, np.asarray(n_frames, float), 1.0)
+        team_c = np.array([np.average(colors[anc == t] * _W, axis=0, weights=aw[anc == t]) for t in (0, 1)])
+        return _assign_to(colors, use, team_c, x, w, anc)
     k = min(6, len(x))
     best = None
     for seed in range(10):  # meerdere starts: k-means kan in een slecht lokaal optimum belanden
@@ -159,12 +170,18 @@ def assign_teams(colors: np.ndarray, n_frames: np.ndarray, exclude: np.ndarray |
     team_c = c[list(pair)]
     if size[pair[1]] > size[pair[0]]:  # team 0 = de grootste groep
         team_c = team_c[::-1]
+    return _assign_to(colors, use, team_c, x, w, anc)
+
+
+def _assign_to(colors, use, team_c, x, w, anc) -> np.ndarray:
+    """Teamcentra verfijnen en elke track bij het dichtstbijzijnde team indelen (of 'overig')."""
     # De centra zijn nu die van twee (deel)groepen; verfijn ze met alle tracks die er duidelijk
     # bij horen, zodat een team dat in zon en schaduw is gesplitst één gemiddelde kleur krijgt.
     for _ in range(2):
         sep = np.linalg.norm(team_c[0] - team_c[1])
         d = np.linalg.norm(x[:, None, :] - team_c[None], axis=2)
         lab = np.where(d.min(axis=1) < JOIN * sep, np.argmin(d, axis=1), -1)
+        lab = np.where(anc[use] >= 0, anc[use], lab)  # wat de gebruiker koos telt altijd mee
         new_c = [np.average(x[lab == t], axis=0, weights=w[lab == t]) if np.any(lab == t) else team_c[t]
                  for t in (0, 1)]
         team_c = np.array(new_c)

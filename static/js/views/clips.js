@@ -20,7 +20,8 @@ export async function render(root, ctx) {
     xhr.upload.onprogress = e => { status.textContent = `Uploaden... ${Math.round(100 * e.loaded / e.total)}%`; };
     xhr.onload = () => {
       if (xhr.status >= 400) { toast(JSON.parse(xhr.responseText).detail || 'Upload mislukt', true); status.textContent = ''; return; }
-      toast('Geüpload'); ctx.reload();
+      const learned = [...new Set(JSON.parse(xhr.responseText).flatMap(c => c.learned || []))];
+      toast(learned.length ? `Geüpload. ${learned.join('. ')}.` : 'Geüpload'); ctx.reload();
     };
     xhr.send(fd);
   };
@@ -67,7 +68,9 @@ export async function render(root, ctx) {
               onchange: e => { c.flip = e.target.checked ? 1 : 0; patch(c, { flip: c.flip }); } }), ' omdraaien')),
           h('td', {}, h('span', { className: `badge ${badge}` }, c.status),
             c.status === 'klaar' && (c.analysis_version || 0) < 2
-              ? h('div', { className: 'badge err', title: 'Deze video is geanalyseerd met een oudere versie die de tijden van iPhone-video\'s verkeerd las. Klik op "Opnieuw".' }, 'opnieuw analyseren aanbevolen') : null,
+              ? h('div', { className: 'badge err', title: 'Deze video is geanalyseerd met een oudere versie die de tijden van iPhone-video\'s verkeerd las. Klik op "Opnieuw".' }, 'opnieuw analyseren aanbevolen')
+              : c.status === 'klaar' && (c.analysis_version || 0) < 4
+                ? h('div', { className: 'badge busy', title: 'De app volgt de bal nu beter (inzoomen als hij kwijt is). Klik op "Opnieuw" om dat ook voor deze video te gebruiken. Je kalibratie blijft bewaard; spelers koppelen moet je daarna opnieuw doen.' }, 'betere baldetectie: opnieuw analyseren') : null,
             busy ? h('div', { className: 'progress', title: c.message }, h('div', { style: { width: `${Math.round(100 * c.progress)}%` } })) : null,
             h('div', { className: 'muted small' }, c.message || '')),
           h('td', {}, c.n_keyframes ? h('span', { className: 'badge ok' }, `${c.n_keyframes} sleutelframe(s)`)
@@ -77,6 +80,8 @@ export async function render(root, ctx) {
               onchange: e => { c.analysis_mode = e.target.value; } },
               [['nauwkeurig', 'Nauwkeurig'], ['snel', 'Snel']].map(([v, l]) => h('option', { value: v, selected: (c.analysis_mode || 'nauwkeurig') === v }, l))), ' ',
             h('button', { className: busy ? '' : 'primary', disabled: busy, onclick: async () => {
+              if (c.status === 'klaar' && !confirm(`${c.filename} opnieuw analyseren? De kalibratie blijft bewaard, maar gekoppelde spelers, ` +
+                'teamcorrecties en aangewezen toeschouwers in deze video moet je daarna opnieuw doen.')) return;
               await api(`/clips/${c.id}/process`, { json: { mode: c.analysis_mode || 'nauwkeurig' } }); draw(); ctx.refreshSteps();
             } },
               c.status === 'klaar' ? 'Opnieuw' : 'Analyseer'), ' ',
@@ -90,7 +95,7 @@ export async function render(root, ctx) {
     const busyNow = clips.some(c => BUSY.includes(c.status));
     if (wasBusy && !busyNow) {
       ctx.refreshSteps();
-      if (clips.every(c => c.status === 'klaar')) toast('Analyse klaar. Volgende stap: kalibreren (knop bovenaan).');
+      if (clips.every(c => c.status === 'klaar')) toast('Analyse klaar. Volgende stap: kalibreren (tabblad met het gele bolletje).');
     }
     wasBusy = busyNow;
     if (busyNow) timer = setTimeout(draw, 2000);

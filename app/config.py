@@ -17,6 +17,7 @@ STATIC_DIR = ROOT / "static"
 YOLO_MODEL = os.environ.get("MATCH_ANALYZER_MODEL", "yolo11m.pt")
 MODELS_DIR = DATA_DIR / "models"
 BALL_CONF = 0.10
+PERSON_CONF = 0.10  # (het model zoekt lager, voor de bal)
 DETECT_IMGSZ = 1280  # groot, zodat verre spelers en de bal nog gevonden worden
 TARGET_FPS = 10.0  # aantal geanalyseerde frames per seconde video
 # Snelle analyse: kleiner model op een kleiner beeld. Ongeveer 2x zo snel, maar mist vaker

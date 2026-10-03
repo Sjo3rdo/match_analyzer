@@ -40,7 +40,8 @@ def ffmpeg_exe() -> str:
 
 # Versie van de analyse; clips die met een oudere versie zijn verwerkt, krijgen in de
 # interface het advies om opnieuw te analyseren.
-ANALYSIS_VERSION = 3  # 3: nieuwe teamindeling (zon/schaduw, toeschouwers, gelijk tussen video's)
+ANALYSIS_VERSION = 4  # 3: nieuwe teamindeling (zon/schaduw, toeschouwers, gelijk tussen video's); 4: balvolger
+TEAMS_VERSION = 3  # wat alleen opnieuw teams indelen oplevert (zonder opnieuw te analyseren)
 
 
 def probe(path: Path) -> dict:
@@ -293,6 +294,25 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
                     break
         counter["idx"] = idx
 
+    # De bal volgen: kandidaten kiezen die bij het spoor passen, en inzoomen als hij kwijt is
+    from .ball import BallTracker
+
+    tracker_ball = BallTracker(int(clip.get("width") or cap.get(cv2.CAP_PROP_FRAME_WIDTH) or 1920),
+                               int(clip.get("height") or cap.get(cv2.CAP_PROP_FRAME_HEIGHT) or 1080))
+    zoom = getattr(detector, "detect_balls", None)
+
+    def follow_ball(frame, frame_no, det):
+        cands = getattr(det, "balls", None)
+        if cands is None:  # (eenvoudige detector: alleen de beste bal)
+            return
+        pick = tracker_ball.choose(cands)
+        if pick is None and zoom is not None:
+            boxes = [tracker_ball.crop_box()] if tracker_ball.crop_box() else tracker_ball.scan_boxes(frame_no)
+            if boxes:
+                pick = tracker_ball.choose(zoom(frame, boxes))
+        tracker_ball.update(pick)
+        det.ball = (pick.x, pick.y, pick.conf) if pick is not None else None
+
     batch_size = getattr(detector, "batch_size", 1)
     detect_many = getattr(detector, "detect_batch", None)
     threads = [threading.Thread(target=reader, daemon=True), threading.Thread(target=worker_post, daemon=True)]
@@ -312,6 +332,7 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
                 break
             dets = detect_many([b[0] for b in batch]) if detect_many and len(batch) > 1 else [detector(b[0]) for b in batch]
             for (frame, t, frame_no), det in zip(batch, dets):
+                follow_ball(frame, frame_no, det)
                 if not put(q_dets, (frame, t, frame_no, det)):
                     break
     except BaseException as e:  # noqa: BLE001
@@ -331,6 +352,7 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
     cap.release()
     flush()
     np.save(out_dir / "motion.npy", np.array(inter) if inter else np.zeros((0, 3, 3)))
+    _drop_static_balls(store, clip_id, inter)
 
     store.set_clip_status(clip_id, "analyse", 0.95, "Stukjes van dezelfde speler aan elkaar plakken")
     _stitch(store, clip_id, stats, inter, eff_fps)
@@ -391,6 +413,20 @@ def _finish_tracks(store: Store, clip_id: int, stats: dict[int, _TrackStats], ou
     assign_clip_teams(store, clip_id, keep_manual=False)
 
 
+def _drop_static_balls(store: Store, clip_id: int, inter: list) -> None:
+    """'Ballen' die eigenlijk een vast ding in de achtergrond zijn weggooien (zie ball.static_runs)."""
+    from .ball import static_runs
+
+    rows = store.rows("SELECT idx, x, y, conf FROM ball WHERE clip_id = ? ORDER BY idx", (clip_id,))
+    if not rows or not inter:
+        return
+    arr = np.array(rows, float)
+    drop = static_runs(arr[:, 0].astype(int), arr[:, 1:3], arr[:, 3], cumulative(np.array(inter)))
+    if drop.any():
+        with store.tx() as c:
+            c.executemany("DELETE FROM ball WHERE clip_id = ? AND idx = ?", [(clip_id, int(i)) for i in arr[drop, 0]])
+
+
 def assign_clip_teams(store: Store, clip_id: int, keep_manual: bool = True) -> dict:
     """Teams van een video (opnieuw) bepalen uit de shirtkleuren, en gelijktrekken met de andere
     video's van dezelfde wedstrijd (anders kan 'Thuis' in de 2e helft ineens 'Uit' heten).
@@ -416,10 +452,16 @@ def assign_clip_teams(store: Store, clip_id: int, keep_manual: bool = True) -> d
     if have:
         lab = np.array([teams.hex_to_lab(r["color"]) for r in have])
         w = np.array([r["n_frames"] or 1 for r in have], float)
-        new = teams.assign_teams(lab, w, exclude=np.array([r["track_id"] in still for r in have]))
+        # Leren van correcties: wat de gebruiker zelf in een team zette, bepaalt de teamkleuren.
+        # Aangewezen toeschouwers doen niet mee.
+        manual = [keep_manual and r["team"] != r["team_auto"] for r in have]
+        anchors = np.array([r["team"] if m and r["team"] in (0, 1) else -1 for r, m in zip(have, manual)])
+        exclude = np.array([r["track_id"] in still or (m and r["team"] == teams.TEAM_SPECTATOR) for r, m in zip(have, manual)])
+        new = teams.assign_teams(lab, w, exclude=exclude, anchors=anchors)
+        anchored = all(np.any(anchors == t) for t in (0, 1))
         ref, from_clips = _reference_team_colors(store, clip["match_id"], exclude_clip=clip_id)
         mine = teams.team_centers(lab, w, new)
-        if all(c is not None for c in ref) and all(c is not None for c in mine):
+        if not anchored and all(c is not None for c in ref) and all(c is not None for c in mine):
             same = teams.color_distance(mine[0], ref[0]) + teams.color_distance(mine[1], ref[1])
             cross = teams.color_distance(mine[0], ref[1]) + teams.color_distance(mine[1], ref[0])
             # Andere video's van deze wedstrijd: zelfde shirts, dus gewoon het beste kiezen. Opgeslagen
@@ -512,7 +554,8 @@ class Worker:
 
                 try:
                     assign_clip_teams(self.store, clip_id, keep_manual=True)
-                    self.store.run("UPDATE clips SET analysis_version = ? WHERE id = ?", (ANALYSIS_VERSION, clip_id))
+                    self.store.run("UPDATE clips SET analysis_version = MAX(COALESCE(analysis_version, 0), ?) WHERE id = ?",
+                                   (TEAMS_VERSION, clip_id))
                 except Exception:  # noqa: BLE001
                     log.error("Teams indelen clip %s mislukt\n%s", clip_id, traceback.format_exc())
                 analytics.invalidate(geometry=False)

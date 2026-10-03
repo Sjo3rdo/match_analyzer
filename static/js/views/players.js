@@ -1,5 +1,5 @@
 // Stap 3: wie is wie? Selectie invoeren en gevolgde "tracks" aan spelers koppelen.
-import { api, h, toast, fmtTime, TEAM_COLORS, teamName, playerLabel } from '../util.js';
+import { api, h, toast, fmtTime, TEAM_COLORS, teamName, playerLabel, teamOptions, markSpectator } from '../util.js';
 
 export async function render(root, ctx) {
   const { match } = ctx;
@@ -15,7 +15,9 @@ export async function render(root, ctx) {
       'De app volgt iedereen op het veld als losse "tracks" en deelt ze op shirtkleur in teams in. Een speler krijgt meestal ' +
       'meerdere tracks (het volgen breekt af bij botsingen of als de camera wegdraait). Koppel hieronder tracks aan spelers. ' +
       'Snelste manier: voer rugnummers in en klik "Automatisch koppelen" (werkt als rugnummers leesbaar waren), ' +
-      'en koppel de rest hier of door in "Video + minimap" op een speler te klikken.'),
+      'en koppel de rest hier of door in "Video + minimap" op een speler te klikken. Staat er een toeschouwer tussen, klik dan 🚫: ' +
+      'die telt dan nergens meer mee, en de app biedt aan vergelijkbare personen op dezelfde plek mee weg te halen. ' +
+      'Zet je een paar spelers zelf in het goede team, dan gebruikt "↻ Opnieuw indelen" die als voorbeeld voor de rest.'),
     h('div', { className: 'panel' },
       h('div', { className: 'row', style: { justifyContent: 'space-between' } }, h('h2', {}, 'Selectie'),
         h('button', { title: 'Als de app de teams andersom heeft genoemd (bijv. jouw team staat bij "Uit")', onclick: async () => {
@@ -104,7 +106,7 @@ export async function render(root, ctx) {
       h('button', { className: 'small', title: 'Alleen in deze video de teams omwisselen (als de app ze hier andersom heeft dan in de andere video\'s)', onclick: async () => {
         await api(`/clips/${clipId}/swap-teams`, { json: {} }); toast('Teams omgewisseld in deze video'); drawTracks();
       } }, '⇄ Alleen deze video'),
-      h('button', { className: 'small', title: 'Teams opnieuw automatisch bepalen op shirtkleur (wat je zelf hebt aangepast blijft staan)', onclick: async () => {
+      h('button', { className: 'small', title: 'Teams opnieuw automatisch bepalen op shirtkleur. Wat je zelf hebt aangepast blijft staan en dient als voorbeeld voor de rest.', onclick: async () => {
         await api(`/clips/${clipId}/reassign-teams`, { method: 'POST' }); toast('Teams opnieuw ingedeeld'); drawTracks();
       } }, '↻ Opnieuw indelen')));
     trackPanel.append(h('div', { className: 'cards' }, shown.slice(0, limit).map(t => card(t, clip))));
@@ -120,11 +122,15 @@ export async function render(root, ctx) {
         style: { cursor: 'pointer' }, onclick: () => location.hash = `#/match/${match.id}/video?clip=${t.clip_id}&t=${t.t_start}&track=${t.track_id}` }),
       h('div', { className: 'row small', style: { justifyContent: 'space-between' } },
         h('span', {}, h('span', { className: 'swatch', style: { background: t.color || '#ccc' } }), ` #${t.track_id}`),
-        h('span', { className: 'muted' }, `${fmtTime(t.t_start)}–${fmtTime(t.t_end)}`)),
+        h('span', { className: 'muted' }, `${fmtTime(t.t_start)}–${fmtTime(t.t_end)}`),
+        t.team === 3 ? null : h('button', { className: 'small', title: 'Dit is een toeschouwer: weghalen (telt dan nergens meer mee)',
+          style: { padding: '1px 6px' }, onclick: e => spectator(t, e.target.closest('.card')) }, '🚫')),
       t.jersey_guess ? h('div', { className: 'small' }, `Rugnummer? ${t.jersey_guess} (${Math.round(100 * t.jersey_conf)}%)`) : null,
-      h('select', { onchange: async e => { await patch({ team: Number(e.target.value) }); t.team = Number(e.target.value); } },
-        [[0, teamName(match, 0)], [1, teamName(match, 1)], [2, 'Overig (scheids/keeper)'], [-1, 'Onbekend']].map(([v, l]) =>
-          h('option', { value: v, selected: t.team === v }, l))),
+      h('select', { onchange: async e => {
+        const v = Number(e.target.value);
+        if (v === 3) return spectator(t, e.target.closest('.card'));
+        await patch({ team: v }); t.team = v;
+      } }, teamOptions(match, t.team)),
       h('select', { onchange: async e => {
         const pid = e.target.value ? Number(e.target.value) : null;
         await patch({ player_id: pid }); t.player_id = pid;
@@ -133,6 +139,12 @@ export async function render(root, ctx) {
       } },
         h('option', { value: '' }, '– speler kiezen –'),
         teamPlayers.map(p => h('option', { value: p.id, selected: t.player_id === p.id }, `${playerLabel(p)} (${teamName(match, p.team)})`))));
+  }
+
+  function spectator(t, cardEl) {
+    t.team = 3;
+    if (onlyPitch) cardEl?.remove();
+    markSpectator(t.clip_id, t.track_id, assistBox, () => drawTracks());
   }
 
   // --- koppel-assistent ---------------------------------------------------------------------

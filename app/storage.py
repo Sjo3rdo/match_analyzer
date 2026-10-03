@@ -107,6 +107,21 @@ CREATE TABLE IF NOT EXISTS squad_players (
     name TEXT NOT NULL,
     number TEXT
 );
+CREATE TABLE IF NOT EXISTS venues (
+    id INTEGER PRIMARY KEY,
+    lat REAL NOT NULL,
+    lon REAL NOT NULL,
+    pitch_length REAL,
+    pitch_width REAL,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS ball_manual (
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    t REAL NOT NULL,
+    x REAL,
+    y REAL,
+    PRIMARY KEY (clip_id, t)
+);
 CREATE TABLE IF NOT EXISTS markers (
     id INTEGER PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,

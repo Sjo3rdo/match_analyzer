@@ -57,7 +57,36 @@ export function teamName(match, team) {
   if (team === 0) return match.team0_name;
   if (team === 1) return match.team1_name;
   if (team === 2) return 'Overig (scheids/keeper)';
+  if (team === 3) return 'Toeschouwer (telt niet mee)';
   return 'Onbekend';
+}
+
+// Keuzelijst voor het team van een track (met de optie om iemand als toeschouwer weg te halen)
+export function teamOptions(match, current) {
+  return [[0, teamName(match, 0)], [1, teamName(match, 1)], [2, 'Overig (scheids/keeper)'],
+    [3, '🚫 Toeschouwer (weghalen)'], [-1, 'Onbekend']].map(([v, l]) => h('option', { value: v, selected: current === v }, l));
+}
+
+// Een track als toeschouwer weghalen; daarna vergelijkbare personen (zelfde plek, zelfde kleding)
+// in één keer mee laten weghalen. box: element waarin de vraag komt; done: na afloop.
+export async function markSpectator(clipId, trackId, box, done) {
+  const r = await api(`/clips/${clipId}/tracks/${trackId}`, { method: 'PATCH', json: { team: 3 } });
+  toast('Weggehaald: telt nergens meer mee');
+  const sim = r.similar || [];
+  if (!sim.length || !box) { done?.(); return; }
+  const close = () => { box.replaceChildren(); done?.(); };
+  box.replaceChildren(h('div', { className: 'hint', style: { marginBottom: '12px' } },
+    h('b', {}, `Nog ${sim.length} vergelijkbare ${sim.length === 1 ? 'persoon' : 'personen'} gevonden`),
+    h('div', { className: 'small muted', style: { margin: '4px 0 8px' } },
+      'Zelfde soort kleding en op dezelfde plek (ook in je andere video\'s van deze wedstrijd). Ook weghalen?'),
+    h('div', { className: 'row', style: { gap: '6px', marginBottom: '8px' } }, sim.slice(0, 16).map(s =>
+      h('img', { src: `/api/clips/${s.clip_id}/thumb/${s.track_id}`, title: s.reason, style: { height: '70px', borderRadius: '4px' } }))),
+    h('div', { className: 'row' },
+      h('button', { className: 'primary', onclick: async () => {
+        await api('/tracks/spectators', { json: { items: sim } });
+        toast(`${sim.length} extra weggehaald`); close();
+      } }, `Ja, alle ${sim.length} weghalen`),
+      h('button', { onclick: close }, 'Nee'))));
 }
 
 export function playerLabel(p) {

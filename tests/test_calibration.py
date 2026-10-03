@@ -166,3 +166,41 @@ def test_front_back_sign_when_pitch_corner_is_behind_camera():
         assert np.all(w > 0)
         Hb = np.linalg.inv(K)
         assert (Hb @ np.array([pts[0]["pitch"][0], pts[0]["pitch"][1], 1.0]))[2] > 0
+
+
+def test_goal_post_tops_and_crossbar_help_the_camera_fit():
+    """Ingezoomd op het doel, positie 3-4 m verkeerd geschat: met alleen de voeten van de palen
+    blijft de app dicht bij die verkeerde plek; de bovenkanten en de lat zeggen hoe ver weg en hoe
+    ingezoomd het doel is, en verbeteren zo de plek en de kalibratie."""
+    import math
+    from app import pitch
+    from app.calibration import camera_projection, default_focal, fit_calibration, fit_camera, project_3d
+    size, true, H = _sideline_camera(zoom=1.25)
+    P = camera_projection(true, size)
+    g = pitch.DEFAULT
+    feet = _items(H, [("pt", pitch.LANDMARKS["Doelpaal rechts boven"]), ("pt", pitch.LANDMARKS["Doelpaal rechts onder"])])
+    tops = [{"name": n, "img": project_3d(P, g.elevated[n])[0].tolist(), "pitch3": list(g.elevated[n])}
+            for n in ("Doelpaal rechts boven, bovenkant", "Doelpaal rechts onder, bovenkant")]
+    a, b = np.array(g.elevated_lines["Lat rechts"])
+    tops.append({"name": "Lat rechts", "img": project_3d(P, 0.3 * a + 0.7 * b)[0].tolist(), "line3": [list(a), list(b)]})
+    prior = {**PRIOR, "f": default_focal(1920)}
+
+    def pos_err(pts):
+        cam = fit_camera(pts, prior)[1]
+        return math.hypot(cam["x"] - true[0], cam["y"] - true[1])
+
+    assert pos_err(feet + tops) < 0.5 * pos_err(feet)
+    near = np.array([[x, y] for x in range(90, 106, 3) for y in range(20, 50, 4)], float)
+    K, _ = fit_calibration(feet + tops, camera=prior)
+    assert np.median(np.linalg.norm(apply_h(K, apply_h(H, near)) - near, axis=1)) < 1.0
+
+
+def test_elevated_points_need_camera_position():
+    import pytest
+    from app import pitch
+    from app.calibration import fit_calibration
+    H = _true_h()
+    pts = _items(np.linalg.inv(H), [("pt", (105.0, 30.34)), ("pt", (105.0, 37.66)), ("pt", (94.0, 34.0))])
+    pts += [{"name": "x", "img": [500.0, 300.0], "pitch3": list(pitch.DEFAULT.elevated["Doelpaal rechts boven, bovenkant"])}]
+    with pytest.raises(ValueError, match="positie"):
+        fit_calibration(pts)

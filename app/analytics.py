@@ -23,7 +23,7 @@ import numpy as np
 from . import config, pitch
 from .calibration import CameraModel, Keyframe, apply_h, camera_prior, fit_keyframe
 from .storage import Store, clip_dir
-from .teams import TEAM_OTHER
+from .teams import TEAM_OTHER, TEAM_SPECTATOR
 from .tracking import still_fraction
 
 # Twee lagen cache, zoals een kast met twee planken:
@@ -152,11 +152,10 @@ def _load_geo(store: Store, clip_id: int) -> ClipData | None:
     feet = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, boxes[:, 3]], axis=1)
     xy = cam.project_rows(idx, feet)
 
-    brows = np.array(store.rows("SELECT idx, x, y FROM ball WHERE clip_id = ? ORDER BY idx", (clip_id,)),
-                     dtype=np.float64).reshape(-1, 3)
-    ball_idx, ball_img = brows[:, 0].astype(int), brows[:, 1:3]
+    ball_idx, ball_img, manual, no_ball = _ball_rows(store, clip_id, t)
     ball_xy = clean_ball(t[ball_idx] if len(ball_idx) else np.zeros(0), cam.project_rows(ball_idx, ball_img),
-                         geom) if cam.calibrated else np.full((len(ball_idx), 2), np.nan)
+                         geom, keep=manual) if cam.calibrated else np.full((len(ball_idx), 2), np.nan)
+    ball_idx, ball_xy, ball_img = fill_ball_gaps(t, ball_idx, ball_xy, ball_img, blocked=no_ball)
 
     d = ClipData(clip, t, fps, cam.calibrated, idx, track, boxes, xy, ball_idx, ball_xy, ball_img,
                  camera=cam, groups=group_rows(track), geom=geom)
@@ -189,6 +188,10 @@ def load_clip(store: Store, clip_id: int) -> ClipData | None:
         pid = tr["player_id"]
         d.entity[tid] = entity_key(clip_id, tid, pid)
         d.team[tid] = players[pid]["team"] if pid in players else tr["team"]
+    # door de gebruiker aangewezen toeschouwers tellen nergens mee
+    spectators = {tid for tid, tr in d.tracks.items() if tr["team"] == TEAM_SPECTATOR and tr["player_id"] is None}
+    if spectators:
+        d.valid_tracks = set(geo.valid_tracks) - spectators
     with _lock:
         _data[key] = d
         while len(_data) > 16:
@@ -200,13 +203,68 @@ def _project_rows(cam: CameraModel, idx: np.ndarray, pts: np.ndarray) -> np.ndar
     return cam.project_rows(idx, pts)
 
 
+def _ball_rows(store: Store, clip_id: int, t: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray, set[int]]:
+    """Balposities per beeld (beeldpixels): wat de analyse vond, met daaroverheen wat de gebruiker
+    zelf aanwees ("hier is de bal" of "hier is geen bal"). Ook: welke rijen met de hand zijn gezet,
+    en in welke beelden volgens de gebruiker geen bal is."""
+    found = {int(i): (x, y) for i, x, y in store.rows("SELECT idx, x, y FROM ball WHERE clip_id = ?", (clip_id,))}
+    manual: set[int] = set()
+    no_ball: set[int] = set()
+    if len(t):
+        for tm, x, y in store.rows("SELECT t, x, y FROM ball_manual WHERE clip_id = ?", (clip_id,)):
+            i = int(np.argmin(np.abs(t - tm)))
+            if abs(t[i] - tm) > 0.08:
+                continue
+            if x is None or y is None:
+                found.pop(i, None)
+                manual.discard(i)
+                no_ball.add(i)
+            else:
+                found[i] = (x, y)
+                manual.add(i)
+    idx = np.array(sorted(found), dtype=int)
+    img = np.array([found[i] for i in idx], dtype=np.float64).reshape(-1, 2)
+    return idx, img, np.isin(idx, list(manual)), no_ball
+
+
+def fill_ball_gaps(t: np.ndarray, idx: np.ndarray, xy: np.ndarray, img: np.ndarray, max_gap: float = 1.0,
+                   max_speed: float = 35.0, blocked: set[int] | None = None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Korte gaten in het balspoor opvullen (de bal achter een speler, of even niet gezien):
+    rechte lijn tussen de laatste plek ervoor en de eerste erna, als dat met een haalbare snelheid kan."""
+    ok = np.flatnonzero(~np.isnan(xy).any(axis=1)) if len(xy) else np.zeros(0, int)
+    if len(ok) < 2:
+        return idx, xy, img
+    add_i, add_xy, add_img = [], [], []
+    for a, b in zip(ok[:-1], ok[1:]):
+        i0, i1 = int(idx[a]), int(idx[b])
+        if i1 - i0 < 2:
+            continue
+        dt = t[i1] - t[i0]
+        if dt > max_gap or np.linalg.norm(xy[b] - xy[a]) / max(dt, 1e-3) > max_speed:
+            continue
+        have = set(idx[a:b + 1].tolist()) | (blocked or set())  # (ook: waar de gebruiker zei: geen bal)
+        for i in range(i0 + 1, i1):
+            if i in have:
+                continue
+            f = (t[i] - t[i0]) / max(dt, 1e-6)
+            add_i.append(i)
+            add_xy.append(xy[a] + f * (xy[b] - xy[a]))
+            add_img.append(img[a] + f * (img[b] - img[a]))
+    if not add_i:
+        return idx, xy, img
+    all_i = np.concatenate([idx, add_i])
+    order = np.argsort(all_i, kind="stable")
+    return (all_i[order], np.vstack([xy, add_xy])[order], np.vstack([img, add_img])[order])
+
+
 def clean_ball(t: np.ndarray, xy: np.ndarray, geom: pitch.Geometry, margin: float = 2.0,
-               max_speed: float = 40.0) -> np.ndarray:
+               max_speed: float = 40.0, keep: np.ndarray | None = None) -> np.ndarray:
     """Onmogelijke balposities weggooien (NaN):
     - buiten het veld: een reservebal of pion langs de lijn, of een hoge bal (de projectie gaat
       ervan uit dat de bal op de grond ligt, dus een bal in de lucht komt ver buiten het veld uit);
     - losse uitschieters: een 'bal' die ineens 30 m verderop ligt en direct weer terug is."""
     xy = np.array(xy, dtype=np.float64, copy=True)
+    orig = xy.copy()
     if len(xy) == 0:
         return xy
     x, y = xy[:, 0], xy[:, 1]
@@ -222,6 +280,8 @@ def clean_ball(t: np.ndarray, xy: np.ndarray, geom: pitch.Geometry, margin: floa
         v2 = np.linalg.norm(xy[c] - xy[b]) / dt2
         if v1 > max_speed and v2 > max_speed and np.linalg.norm(xy[c] - xy[a]) / (dt1 + dt2) < max_speed:
             xy[b] = np.nan
+    if keep is not None and len(keep):  # met de hand aangewezen: altijd houden
+        xy[keep] = orig[keep]
     return xy
 
 
@@ -765,3 +825,99 @@ def suggest_tracks(store: Store, player_id: int, clip_id: int | None = None, lim
                         "n_frames": c["n"], "score": round(min(1.0, score), 3), "reason": ", ".join(reason)})
     out.sort(key=lambda r: -r["score"])
     return out[:limit]
+
+
+# --- toeschouwers aanwijzen -----------------------------------------------------------------
+
+def _anchored_feet(d: ClipData, rows: np.ndarray) -> np.ndarray | None:
+    """Voetpunten omgerekend naar het eerste beeld van de video (de camerabeweging eruit): wie
+    stilstaat langs de lijn, staat dan steeds op dezelfde plek."""
+    if d.camera is None or len(d.camera.A) == 0:
+        return None
+    A = d.camera.A[d.idx[rows]]
+    feet = np.stack([(d.boxes[rows, 0] + d.boxes[rows, 2]) / 2, d.boxes[rows, 3], np.ones(len(rows))], 1)
+    p = np.einsum("nij,nj->ni", A, feet)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        p = p[:, :2] / p[:, 2:3]
+    return p
+
+
+def similar_spectators(store: Store, clip_id: int, track_id: int, limit: int = 40) -> list[dict]:
+    """Tracks in deze wedstrijd die waarschijnlijk dezelfde toeschouwer zijn (of vlak naast hem staan):
+    zelfde soort kleding en op dezelfde plek (in deze video: zelfde plek ten opzichte van de
+    achtergrond; in andere video's: zelfde plek op het veld, als beide gekalibreerd zijn)."""
+    from .teams import color_distance, hex_to_lab
+
+    d = load_clip(store, clip_id)
+    if d is None or track_id not in d.tracks:
+        return []
+    ref_rows = d.rows_of(track_id)
+    ref_col = hex_to_lab(d.tracks[track_id]["color"])
+    if len(ref_rows) == 0 or ref_col is None:
+        return []
+    ref_h = float(np.median(d.boxes[ref_rows, 3] - d.boxes[ref_rows, 1]))
+    ref_img = _anchored_feet(d, ref_rows)
+    ref_img = np.nanmedian(ref_img, axis=0) if ref_img is not None else None
+    ref_xy = np.nanmedian(d.xy[ref_rows], axis=0) if d.calibrated else None
+    clip = store.one("SELECT match_id FROM clips WHERE id = ?", (clip_id,))
+    out = []
+    for c in store.all("SELECT id FROM clips WHERE match_id = ? AND status = 'klaar'", (clip["match_id"],)):
+        cd = d if c["id"] == clip_id else load_clip(store, c["id"])
+        if cd is None:
+            continue
+        for tid, tr in cd.tracks.items():
+            if (c["id"], tid) == (clip_id, track_id) or tr["player_id"] or tr["team"] == TEAM_SPECTATOR:
+                continue
+            if tid not in cd.valid_tracks:
+                continue  # telt toch al niet mee
+            col = hex_to_lab(tr["color"])
+            if col is None or color_distance(col, ref_col) > 14:
+                continue
+            rows = cd.rows_of(tid)
+            if len(rows) == 0:
+                continue
+            dist = None
+            if cd is d and ref_img is not None:
+                p = _anchored_feet(cd, rows)
+                if p is not None and np.isfinite(p).any():
+                    dist = float(np.linalg.norm(np.nanmedian(p, axis=0) - ref_img)) / max(ref_h, 1.0)
+                    if dist > 1.5:
+                        continue
+                    dist_txt = "zelfde plek in beeld"
+            if dist is None:
+                if ref_xy is None or not cd.calibrated or not np.isfinite(ref_xy).all():
+                    continue
+                xy = np.nanmedian(cd.xy[rows], axis=0)
+                if not np.isfinite(xy).all() or np.linalg.norm(xy - ref_xy) > 4.0:
+                    continue
+                dist = float(np.linalg.norm(xy - ref_xy)) / 4.0
+                dist_txt = f"{np.linalg.norm(xy - ref_xy):.0f} m van de aangewezen plek"
+            still = cd.stationary.get(tid, 0.0) if cd.stationary else 0.0
+            if still < 0.4:
+                continue  # loopt rond: waarschijnlijk toch een speler
+            out.append({"clip_id": c["id"], "track_id": tid, "t_start": round(float(tr["t_start"] or 0), 2),
+                        "t_end": round(float(tr["t_end"] or 0), 2), "reason": dist_txt,
+                        "score": round(float(still) * float(np.exp(-dist)), 3)})
+    out.sort(key=lambda r: -r["score"])
+    return out[:limit]
+
+
+def clip_ball(store: Store, clip_id: int, t0: float, t1: float) -> list[dict]:
+    """De bal in beeldpixels tussen t0 en t1 (om in de video te tekenen en te controleren).
+    kind: 'gevonden' (door de analyse), 'hand' (door de gebruiker) of 'geschat' (gat opgevuld)."""
+    d = load_clip(store, clip_id)
+    if d is None or not len(d.ball_idx):
+        return []
+    found = {int(i) for (i,) in store.rows("SELECT idx FROM ball WHERE clip_id = ?", (clip_id,))}
+    manual = {int(np.argmin(np.abs(d.t - tm))) for (tm,) in store.rows(
+        "SELECT t FROM ball_manual WHERE clip_id = ? AND x IS NOT NULL", (clip_id,))}
+    lo, hi = np.searchsorted(d.t, t0), np.searchsorted(d.t, t1, side="right")
+    out = []
+    for k in range(np.searchsorted(d.ball_idx, lo), np.searchsorted(d.ball_idx, hi)):
+        i = int(d.ball_idx[k])
+        x, y = d.ball_img[k]
+        if not np.isfinite([x, y]).all():
+            continue
+        out.append({"t": round(float(d.t[i]), 3), "x": round(float(x), 1), "y": round(float(y), 1),
+                    "kind": "hand" if i in manual else "gevonden" if i in found else "geschat"})
+    return out

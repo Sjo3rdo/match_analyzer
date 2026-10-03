@@ -1,5 +1,5 @@
 // Video met spelersboxen + 2D-minimap (bovenaanzicht), momenten markeren en spelers aanklikken.
-import { api, h, toast, fmtTime, matchMinute, TEAM_COLORS, teamName, playerLabel, labelList } from '../util.js';
+import { api, h, toast, fmtTime, matchMinute, TEAM_COLORS, teamName, playerLabel, labelList, teamOptions, markSpectator } from '../util.js';
 import { PitchView } from '../pitch.js';
 
 export async function render(root, ctx) {
@@ -11,7 +11,7 @@ export async function render(root, ctx) {
   }
   let clip = clips.find(c => c.id === Number(ctx.params.get('clip'))) || clips[0];
   let selectedTrack = ctx.params.get('track') ? Number(ctx.params.get('track')) : null;
-  let showBoxes = true;
+  let showBoxes = true, placingBall = false;
   const playerById = new Map(match.players.map(p => [`p${p.id}`, p]));
 
   const video = h('video', { controls: true, preload: 'auto', playsInline: true });
@@ -20,6 +20,9 @@ export async function render(root, ctx) {
   const side = h('div', { className: 'panel' });
   const eventsBox = h('div', { className: 'list' });
   const label = h('input', { placeholder: 'Label (bijv. Goal, Kans, Redding)', list: 'moment-labels', style: { flex: 1 } });
+  const ballBtn = h('button', { title: 'Pauzeer, klik hierop en klik daarna op de bal in de video. De app gebruikt dat voor balbezit en passes.',
+    onclick: () => { placingBall = !placingBall; video.pause(); ballBtn.className = placingBall ? 'primary' : ''; ballBtn.textContent = placingBall ? 'Klik nu op de bal…' : '⚽ Bal aanwijzen'; } },
+    '⚽ Bal aanwijzen');
   const markerPlayer = h('select', {}, h('option', { value: '' }, '– speler (optioneel) –'),
     match.players.map(p => h('option', { value: p.id }, playerLabel(p))));
 
@@ -27,7 +30,10 @@ export async function render(root, ctx) {
     h('div', { className: 'row', style: { marginBottom: '12px' } }, 'Video:',
       h('select', { onchange: e => { clip = clips.find(c => c.id === Number(e.target.value)); ctx.setParam('clip', clip.id); loadClip(0); } },
         clips.map(c => h('option', { value: c.id, selected: c.id === clip.id }, c.filename))),
-      h('label', {}, h('input', { type: 'checkbox', checked: true, onchange: e => { showBoxes = e.target.checked; draw(); } }), ' spelersboxen tonen')),
+      h('label', {}, h('input', { type: 'checkbox', checked: true, onchange: e => { showBoxes = e.target.checked; draw(); } }), ' spelersboxen tonen'),
+      ballBtn,
+      h('button', { title: 'Op dit moment is er geen bal te zien (de app zag iets anders aan voor de bal)', onclick: () => setBall(null) }, '🚫 Geen bal hier'),
+      h('span', { className: 'small muted' }, 'Bal: ⭕ gevonden · 🟡 geschat · 🟢 door jou aangewezen')),
     h('div', { className: 'grid2' },
       h('div', {},
         h('div', { className: 'video-wrap' }, video, overlay),
@@ -52,7 +58,7 @@ export async function render(root, ctx) {
   requestAnimationFrame(() => { pv.resize(); draw(); });
 
   // --- data in tijdvensters ophalen -------------------------------------------------------
-  const posCache = new Map(), boxCache = new Map();
+  const posCache = new Map(), boxCache = new Map(), ballCache = new Map();
   async function windowed(cache, kind, size, t) {
     const k = Math.floor(t / size);
     if (!cache.has(k)) {
@@ -70,14 +76,15 @@ export async function render(root, ctx) {
   let lastBoxes = [];
   async function draw() {
     const t = video.currentTime;
-    const [pos, boxes] = await Promise.all([windowed(posCache, 'positions', 30, t), windowed(boxCache, 'boxes', 10, t)]);
+    const [pos, boxes, balls] = await Promise.all([windowed(posCache, 'positions', 30, t), windowed(boxCache, 'boxes', 10, t),
+      windowed(ballCache, 'ball', 30, t)]);
     // minimap
     pv.draw();
     const fr = nearestFrame(pos.frames || [], t);
     if (!pos.calibrated) {
       const c = pv.ctx; c.fillStyle = 'rgba(0,0,0,.5)'; c.fillRect(0, 0, pv.cssW, pv.cssH);
       c.fillStyle = '#fff'; c.font = '14px sans-serif'; c.textAlign = 'center';
-      c.fillText('Kalibreer deze video eerst (stap 2)', pv.cssW / 2, pv.cssH / 2);
+      c.fillText('Kalibreer deze video eerst (tabblad Kalibratie)', pv.cssW / 2, pv.cssH / 2);
     } else if (fr) {
       for (const [x, y, team, ent, tid] of fr.p) {
         const p = playerById.get(ent);
@@ -97,6 +104,13 @@ export async function render(root, ctx) {
     let nearestT = null;
     for (const b of boxes) if (b.t <= t && t - b.t < 0.5 && (nearestT === null || b.t > nearestT)) nearestT = b.t;
     lastBoxes = boxes.filter(b => b.t === nearestT).map(b => ({ ...b, px: [b.box[0] * sx, b.box[1] * sy + yOff, b.box[2] * sx, b.box[3] * sy + yOff] }));
+    lastScale = { sx, sy, yOff };
+    const ball = nearestFrame(balls || [], t);
+    if (ball && t - ball.t < 0.15) {  // de bal: gevonden (wit), geschat (geel) of door jou aangewezen (groen)
+      const col = { hand: '#30d158', geschat: '#ffd600' }[ball.kind] || '#fff';
+      c.beginPath(); c.arc(ball.x * sx, ball.y * sy + yOff, 9, 0, 2 * Math.PI);
+      c.strokeStyle = col; c.lineWidth = 2; c.setLineDash(ball.kind === 'geschat' ? [3, 3] : []); c.stroke(); c.setLineDash([]);
+    }
     if (!showBoxes) return;
     for (const b of lastBoxes) {
       const [x1, y1, x2, y2] = b.px;
@@ -118,8 +132,23 @@ export async function render(root, ctx) {
   video.addEventListener('seeked', draw);
   video.addEventListener('loadeddata', draw);
 
+  let lastScale = null;
+  async function setBall(px) {
+    video.pause();
+    const t = video.currentTime;
+    const body = px ? { t, x: px[0], y: px[1] } : { t, x: null, y: null };
+    await api(`/clips/${clip.id}/ball`, { json: body });
+    ballCache.clear(); posCache.clear();
+    toast(px ? 'Bal aangewezen. Speel een stukje verder en wijs hem weer aan waar de app hem mist.' : 'Opgeslagen: hier geen bal');
+    draw();
+  }
   overlay.addEventListener('click', e => {
     const r = overlay.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top;
+    if (placingBall && lastScale) {
+      placingBall = false; ballBtn.className = ''; ballBtn.textContent = '⚽ Bal aanwijzen';
+      setBall([x / lastScale.sx, (y - lastScale.yOff) / lastScale.sy]);
+      return;
+    }
     const hit = lastBoxes.filter(b => x >= b.px[0] && x <= b.px[2] && y >= b.px[1] && y <= b.px[3])
       .sort((a, b) => (a.px[2] - a.px[0]) - (b.px[2] - b.px[0]))[0];
     if (!hit) { video.paused ? video.play() : video.pause(); return; }
@@ -156,14 +185,21 @@ export async function render(root, ctx) {
           t.jersey_guess ? h('div', {}, `Rugnummer gelezen: ${t.jersey_guess}`) : null,
           h('div', {}, h('span', { className: 'swatch', style: { background: t.color || '#ccc' } }), ' shirtkleur'))),
       h('div', { className: 'row', style: { marginTop: '8px' } },
-        h('select', { onchange: e => patch({ team: Number(e.target.value) }) },
-          [[0, teamName(match, 0)], [1, teamName(match, 1)], [2, 'Overig'], [-1, 'Onbekend']].map(([v, l]) => h('option', { value: v, selected: t.team === v }, l))),
+        h('select', { onchange: e => {
+          const v = Number(e.target.value);
+          if (v !== 3) return patch({ team: v });
+          t.team = 3;
+          const box = h('div');
+          side.append(box);
+          markSpectator(clip.id, t.track_id, box, () => { for (const cache of [posCache, boxCache]) cache.clear(); draw(); });
+          for (const cache of [posCache, boxCache]) cache.clear(); draw();
+        } }, teamOptions(match, t.team)),
         h('select', { onchange: e => patch({ player_id: e.target.value ? Number(e.target.value) : null }) },
           h('option', { value: '' }, '– speler –'),
           match.players.map(p => h('option', { value: p.id, selected: t.player_id === p.id }, `${playerLabel(p)} (${teamName(match, p.team)})`)))),
       t.player_id ? h('div', { style: { marginTop: '8px' } }, h('a', { href: `#/match/${match.id}/spelers?clip=${clip.id}&assist=${t.player_id}` },
         '🔍 Zoek meer tracks van deze speler (koppel-assistent)')) : null,
-      match.players.length ? null : h('div', { className: 'small muted' }, 'Voeg eerst spelers toe bij "3. Spelers".'));
+      match.players.length ? null : h('div', { className: 'small muted' }, 'Voeg eerst spelers toe bij "Spelers".'));
   }
 
   async function addMoment() {
@@ -196,7 +232,7 @@ export async function render(root, ctx) {
   }
 
   function loadClip(t0) {
-    posCache.clear(); boxCache.clear();
+    posCache.clear(); boxCache.clear(); ballCache.clear();
     video.src = `/api/clips/${clip.id}/video`;
     video.addEventListener('loadedmetadata', () => { video.currentTime = t0 || 0; }, { once: true });
     drawSide(); loadEvents();
