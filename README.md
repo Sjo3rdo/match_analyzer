@@ -36,7 +36,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.5 · 9292e3c`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.6 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. De browser haalt de interface na een update altijd vers op. Kwam je van een
 versie zonder versienummer rechtsboven, druk dan één keer op ⌥⌘R in Safari om de oude, bewaarde
 pagina weg te gooien (anders zie je bijv. geen deelknop of krijg je "Method Not Allowed").
