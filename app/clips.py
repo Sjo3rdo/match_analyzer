@@ -1,49 +1,24 @@
-"""Highlights exporteren met ffmpeg: losse fragmenten of één samengevoegde reel."""
+"""Een lange video knippen in delen (bijv. 1e en 2e helft, warming-up eruit) vóór de analyse.
+
+We kopiëren de videostroom zonder opnieuw te coderen ("stream copy"): razendsnel, ook bij
+bestanden van vele GB, en zonder kwaliteitsverlies. Nadeel: een knip kan alleen op een
+sleutelbeeld van de video beginnen, dus het begin kan tot ~1 seconde eerder liggen dan gekozen.
+"""
 from __future__ import annotations
 
-import re
 import subprocess
-import tempfile
-import time
 from pathlib import Path
 
-from . import config
 from .pipeline import ffmpeg_exe
 
 
-def _safe(name: str) -> str:
-    return re.sub(r"[^\w\-]+", "_", name).strip("_")[:60] or "clip"
-
-
-# Vast formaat, zodat fragmenten uit verschillende telefoonvideo's samengevoegd kunnen worden
-_FORMAT = ("scale=1920:1080:force_original_aspect_ratio=decrease,"
-           "pad=1920:1080:(ow-iw)/2:(oh-ih)/2,setsar=1,fps=30")
-
-
-def cut(src: Path, start: float, end: float, dst: Path, audio: bool = True) -> Path:
-    cmd = [ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{max(0, start):.2f}", "-i", str(src),
-           "-t", f"{max(0.5, end - start):.2f}", "-vf", _FORMAT,
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-           *(["-c:a", "aac"] if audio else ["-an"]), "-movflags", "+faststart", str(dst)]
-    subprocess.run(cmd, check=True)
-    return dst
-
-
-def export(items: list[dict], name: str) -> Path:
-    """items: [{"path", "start", "end"}]. Eén item -> los fragment, meer -> samengevoegd."""
-    config.EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    dst = config.EXPORTS_DIR / f"{_safe(name)}-{stamp}.mp4"
-    if len(items) == 1:
-        it = items[0]
-        return cut(Path(it["path"]), it["start"], it["end"], dst)
-    with tempfile.TemporaryDirectory() as tmp:
-        parts = []
-        for i, it in enumerate(items):
-            parts.append(cut(Path(it["path"]), it["start"], it["end"], Path(tmp) / f"{i:03d}.mp4",
-                             audio=False))
-        lst = Path(tmp) / "list.txt"
-        lst.write_text("".join(f"file '{p}'\n" for p in parts))
-        subprocess.run([ffmpeg_exe(), "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-                        "-i", str(lst), "-c", "copy", "-movflags", "+faststart", str(dst)], check=True)
+def cut_copy(src: Path, start: float, end: float, dst: Path) -> Path:
+    if end <= start:
+        raise ValueError("Het einde moet na het begin liggen")
+    cmd = [ffmpeg_exe(), "-y", "-loglevel", "error", "-ss", f"{max(0.0, start):.3f}", "-i", str(src),
+           "-t", f"{end - start:.3f}", "-map", "0:v:0", "-map", "0:a:0?", "-c", "copy",
+           "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(dst)]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0 or not dst.exists() or dst.stat().st_size == 0:
+        raise RuntimeError(f"Knippen mislukt: {r.stderr[-500:]}")
     return dst

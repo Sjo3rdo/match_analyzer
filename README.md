@@ -17,7 +17,8 @@ Alles draait op je eigen laptop. Er gaat geen video naar internet.
 | Per speler | Gelopen afstand, topsnelheid, sprints, minuten, heatmap en gemiddelde positie. |
 | Bal | Balbezit per team, passes, balverlies, passnetwerk. |
 | Minimap | Een 2D-bovenaanzicht dat met de video meeloopt. |
-| Highlights | Momenten markeren, automatische sprints en passes, export als losse clip of als reel per speler. |
+| Knippen | Een lange video vóór de analyse in delen knippen (1e/2e helft), warming-up en rust eruit. |
+| Clips en delen | Clips maken zoals in Veo: begin/eind, label, spelers taggen, opmerking, tekenen op beeld (beeld bevriest), spotlight die een speler volgt, afspeellijst per speler. Export als mp4, reel of zip, en direct delen via AirDrop, WhatsApp, Berichten of Mail. |
 
 ## Installeren en starten (MacBook met Apple Silicon)
 
@@ -70,8 +71,26 @@ Zie het als een puzzel in drie lagen: eerst *zien* (wie staat waar in beeld), da
    **Video + minimap** te pauzeren en op een speler te klikken.
 
 4. **Bekijken.** Bij **Statistieken** zie je de team- en spelerscijfers, heatmaps, de teamvorm
-   en het passnetwerk, en kun je alles als CSV exporteren. Bij **Highlights** maak je clips en
-   reels.
+   en het passnetwerk, en kun je alles als CSV exporteren.
+
+5. **Clips en delen.** Maak bij **Video + minimap** met één klik een clip van het moment dat je
+   ziet, of zet bij **Clips & delen** een automatische suggestie (sprint, pass) om in een clip. Daar
+   kun je:
+   - begin en eind per seconde verschuiven;
+   - een label, spelers en een opmerking toevoegen;
+   - een **spotlight** op een speler zetten: een gele ring onder zijn voeten met zijn naam, die hem
+     door de clip volgt;
+   - op het beeld **tekenen**: pijlen, lijnen, cirkels, vrije lijnen en tekst. In de export bevriest
+     het beeld dan een paar seconden met de tekening erop, zoals bij een tv-analyse;
+   - alle clips van één speler als **afspeellijst** afspelen of als reel exporteren.
+
+   Met **Exporteer** maak je een mp4 (1080p). Daarna kun je op **Deel** klikken voor AirDrop,
+   WhatsApp, Berichten of Mail; dat werkt in Safari. Of je downloadt het bestand.
+
+**Een lange video knippen.** Klik bij **1. Video's** op **Knippen**. Klik **Begin deel** bij de
+aftrap en **Einde deel** bij het eindsignaal, en doe hetzelfde voor de tweede helft. Alles daartussen
+(warming-up, rust) valt weg. Het knippen is binnen seconden klaar en kost geen kwaliteit. Een deel kan
+wel tot ongeveer 1 seconde eerder beginnen dan je koos.
 
 ## Tips voor het filmen
 

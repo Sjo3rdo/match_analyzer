@@ -5,6 +5,8 @@ import json
 import logging
 import mimetypes
 import shutil
+import subprocess
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -13,7 +15,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics, clips as clip_export, config, pitch
+from . import analytics, clips as clip_export, config, pitch, render
 from .calibration import fit_homography
 from .pipeline import Worker, probe, read_frame
 from .storage import Store, clip_dir
@@ -206,15 +208,23 @@ def clip_video(clip_id: int, request: Request):
     return _range_response(preview if preview.exists() else Path(c["path"]), request)
 
 
+def _snap_time(clip_id: int, t: float) -> float:
+    """Tijd afronden op het dichtstbijzijnde geanalyseerde frame (als de clip geanalyseerd is),
+    zodat een sleutelframe precies op een frame van de camerabeweging valt."""
+    r = store.one("SELECT t FROM frames WHERE clip_id = ? ORDER BY ABS(t - ?) LIMIT 1", (clip_id, t))
+    return r["t"] if r else t
+
+
 @app.get("/api/clips/{clip_id}/frame")
 def clip_frame(clip_id: int, t: float = 0.0):
     c = _get("clips", clip_id)
     try:
-        frame = read_frame(Path(c["path"]), t)
+        frame, ft = read_frame(Path(c["path"]), _snap_time(clip_id, t))
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
-    return Response(buf.tobytes(), media_type="image/jpeg")
+    return Response(buf.tobytes(), media_type="image/jpeg",
+                    headers={"X-Frame-Time": f"{ft:.4f}", "Access-Control-Expose-Headers": "X-Frame-Time"})
 
 
 # --- kalibratie --------------------------------------------------------------------------
@@ -248,6 +258,7 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
         _, err = fit_homography([p["img"] for p in points], [p["pitch"] for p in points])
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    data["t"] = _snap_time(clip_id, float(data["t"]))
     if data.get("id"):
         store.run("UPDATE keyframes SET t = ?, points = ? WHERE id = ? AND clip_id = ?",
                   (data["t"], json.dumps(points), data["id"], clip_id))
@@ -256,7 +267,7 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
         kid = store.run("INSERT INTO keyframes (clip_id, t, points) VALUES (?,?,?)",
                         (clip_id, data["t"], json.dumps(points)))
     analytics.invalidate()
-    return {"id": kid, "error_m": round(err, 2)}
+    return {"id": kid, "t": data["t"], "error_m": round(err, 2)}
 
 
 @app.get("/api/clips/{clip_id}/predict")
@@ -361,49 +372,144 @@ def clip_boxes(clip_id: int, t0: float = 0, t1: float = 10):
     return analytics.clip_boxes(store, clip_id, t0, t1)
 
 
-# --- markers en export -------------------------------------------------------------------
+# --- clips (momenten), knippen en export -----------------------------------------------
 
-@app.get("/api/matches/{match_id}/markers")
-def get_markers(match_id: int):
-    return store.all("SELECT * FROM markers WHERE match_id = ? ORDER BY clip_id, t", (match_id,))
+def _moment_payload(data: dict) -> dict:
+    out = {}
+    for k in ("start", "end"):
+        if k in data:
+            out[k] = max(0.0, float(data[k]))
+    for k in ("label", "comment"):
+        if k in data:
+            out[k] = data[k]
+    if "spotlight_player_id" in data:
+        out["spotlight_player_id"] = int(data["spotlight_player_id"]) if data["spotlight_player_id"] else None
+    if "players" in data:
+        out["players"] = json.dumps([int(p) for p in data["players"] or []])
+    if "drawings" in data:
+        out["drawings"] = json.dumps(data["drawings"] or [])
+    return out
 
 
-@app.post("/api/matches/{match_id}/markers")
-def create_marker(match_id: int, data: dict = Body(...)):
-    mid = store.run("INSERT INTO markers (match_id, clip_id, t, label, player_id) VALUES (?,?,?,?,?)",
-                    (match_id, data["clip_id"], data["t"], data.get("label") or "Moment",
-                     data.get("player_id")))
-    return _get("markers", mid)
+@app.get("/api/matches/{match_id}/moments")
+def get_moments(match_id: int):
+    return store.moments(match_id)
 
 
-@app.delete("/api/markers/{marker_id}")
-def delete_marker(marker_id: int):
-    store.run("DELETE FROM markers WHERE id = ?", (marker_id,))
+@app.post("/api/matches/{match_id}/moments")
+def create_moment(match_id: int, data: dict = Body(...)):
+    c = _get("clips", int(data["clip_id"]))
+    fields = {"label": "Moment", "players": "[]", "drawings": "[]", **_moment_payload(data)}
+    fields.setdefault("start", 0.0)
+    fields.setdefault("end", fields["start"] + 10)
+    if c["duration"]:
+        fields["end"] = min(fields["end"], c["duration"])
+    if fields["end"] - fields["start"] < 0.5:
+        raise HTTPException(400, "Een clip moet minstens een halve seconde duren")
+    cols = ["match_id", "clip_id", *fields]
+    mid = store.run(f"INSERT INTO moments ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                    (match_id, c["id"], *fields.values()))
+    return store.moment(mid)
+
+
+@app.patch("/api/moments/{moment_id}")
+def update_moment(moment_id: int, data: dict = Body(...)):
+    m = store.moment(moment_id)
+    if m is None:
+        raise HTTPException(404, "Niet gevonden")
+    fields = _moment_payload(data)
+    start, end = fields.get("start", m["start"]), fields.get("end", m["end"])
+    if end - start < 0.5:
+        raise HTTPException(400, "Een clip moet minstens een halve seconde duren")
+    if fields:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        store.run(f"UPDATE moments SET {sets} WHERE id = ?", (*fields.values(), moment_id))
+    return store.moment(moment_id)
+
+
+@app.delete("/api/moments/{moment_id}")
+def delete_moment(moment_id: int):
+    store.run("DELETE FROM moments WHERE id = ?", (moment_id,))
     return {"ok": True}
+
+
+@app.post("/api/clips/{clip_id}/split")
+def split_clip(clip_id: int, data: dict = Body(...)):
+    """Knip een video in delen. data: {segments: [{start, end, name?, period?, start_minute?}],
+    delete_original: bool}. Elk deel wordt een nieuwe video in dezelfde wedstrijd."""
+    c = _get("clips", clip_id)
+    if c["status"] in ("wachtrij", "preview", "analyse"):
+        raise HTTPException(409, "Wacht tot de analyse klaar is")
+    segments = sorted(data.get("segments") or [], key=lambda s: float(s["start"]))
+    if not segments:
+        raise HTTPException(400, "Geen delen gekozen")
+    src = Path(c["path"])
+    stem = Path(c["filename"]).stem
+    created = []
+    later = store.all("SELECT id, order_idx FROM clips WHERE match_id = ? AND order_idx > ?",
+                      (c["match_id"], c["order_idx"]))
+    for row in later:  # ruimte maken in de volgorde
+        store.run("UPDATE clips SET order_idx = ? WHERE id = ?", (row["order_idx"] + len(segments), row["id"]))
+    for i, seg in enumerate(segments):
+        name = (seg.get("name") or f"deel {i + 1}").strip()
+        filename = f"{stem} - {name}{src.suffix}"
+        cid = store.run("INSERT INTO clips (match_id, filename, path, order_idx, period, start_minute) "
+                        "VALUES (?,?,?,?,?,?)",
+                        (c["match_id"], filename, "", c["order_idx"] + 1 + i, int(seg.get("period") or c["period"]),
+                         float(seg.get("start_minute") or 0)))
+        dst = clip_dir(cid) / ("source" + src.suffix.lower())
+        try:
+            clip_export.cut_copy(src, float(seg["start"]), float(seg["end"]), dst)
+            info = probe(dst)
+        except (RuntimeError, ValueError) as e:
+            store.run("DELETE FROM clips WHERE id = ?", (cid,))
+            shutil.rmtree(dst.parent, ignore_errors=True)
+            raise HTTPException(400, str(e)) from e
+        store.run("UPDATE clips SET path = ?, fps = ?, width = ?, height = ?, duration = ? WHERE id = ?",
+                  (str(dst), info["fps"], info["width"], info["height"], info["duration"], cid))
+        created.append(_get("clips", cid))
+    if data.get("delete_original"):
+        delete_clip(clip_id)
+    analytics.invalidate()
+    return created
 
 
 @app.post("/api/matches/{match_id}/export")
 def export(match_id: int, data: dict = Body(...)):
-    """data: {name, items: [{clip_id, start, end}]}"""
-    items = []
-    for it in data.get("items", []):
-        c = _get("clips", int(it["clip_id"]))
-        items.append({"path": c["path"], "start": float(it["start"]), "end": float(it["end"])})
-    if not items:
-        raise HTTPException(400, "Geen fragmenten gekozen")
+    """data: {name, moment_ids: [...], mode: 'reel' | 'zip'}"""
+    ids = [int(i) for i in data.get("moment_ids") or []]
+    if not ids:
+        raise HTTPException(400, "Geen clips gekozen")
     try:
-        out = clip_export.export(items, data.get("name") or "highlights")
+        out = render.export_moments(store, ids, data.get("name") or "clips", data.get("mode") or "reel")
     except Exception as e:  # noqa: BLE001
+        logging.exception("Export mislukt")
         raise HTTPException(500, f"Exporteren mislukt: {e}") from e
     return {"file": out.name, "url": f"/api/exports/{out.name}"}
 
 
 @app.get("/api/exports/{name}")
 def get_export(name: str):
+    p = _export_path(name)
+    media = "application/zip" if p.suffix == ".zip" else "video/mp4"
+    return FileResponse(p, media_type=media, filename=name)
+
+
+def _export_path(name: str) -> Path:
     p = (config.EXPORTS_DIR / name).resolve()
     if p.parent != config.EXPORTS_DIR.resolve() or not p.exists():
         raise HTTPException(404)
-    return FileResponse(p, media_type="video/mp4", filename=name)
+    return p
+
+
+@app.post("/api/exports/{name}/reveal")
+def reveal_export(name: str):
+    """Toon het bestand in de Finder (alleen op de Mac waar de app draait)."""
+    p = _export_path(name)
+    if sys.platform == "darwin":
+        subprocess.run(["open", "-R", str(p)], check=False)
+        return {"ok": True}
+    return {"ok": False, "path": str(p)}
 
 
 app.mount("/", StaticFiles(directory=config.STATIC_DIR, html=True), name="static")

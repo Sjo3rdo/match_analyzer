@@ -68,3 +68,14 @@ canvas { max-width: 100%; display: block; }
   background: var(--text); color: var(--bg); opacity: 0; transition: opacity .2s; pointer-events: none; max-width: 420px; }
 #toast.show { opacity: .95; }
 .empty { padding: 30px; text-align: center; color: var(--muted); }
+.video-wrap canvas.full { bottom: 0; height: 100%; touch-action: none; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 9px; border-radius: 999px;
+  border: 1px solid var(--border); cursor: pointer; font-size: 12px; }
+.chip input { display: none; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+.list-item.selected { background: rgba(31,138,76,.12); }
+textarea { font: inherit; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel); color: var(--text); }
+.timeline { position: relative; height: 34px; background: var(--border); border-radius: 6px; cursor: pointer; margin: 8px 0; }
+.timeline .seg { position: absolute; top: 4px; bottom: 4px; background: var(--accent); opacity: .75; border-radius: 4px; color: #fff;
+  font-size: 11px; padding: 2px 4px; overflow: hidden; white-space: nowrap; }
+.timeline .head { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--danger); }

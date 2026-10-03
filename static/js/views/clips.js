@@ -6,6 +6,8 @@ const BUSY = ['wachtrij', 'preview', 'analyse'];
 export async function render(root, ctx) {
   const { match } = ctx;
   const panel = h('div', { className: 'panel' });
+  const splitPanel = h('div');
+  let splitCleanup = () => {};
   const fileInput = h('input', { type: 'file', accept: 'video/*', multiple: true });
   const status = h('span', { className: 'muted' });
   const upload = async () => {
@@ -29,7 +31,7 @@ export async function render(root, ctx) {
       'naar spelers en de bal. Dat kan op een MacBook ongeveer even lang duren als de video zelf.'),
     h('div', { className: 'panel' }, h('h2', {}, 'Video\'s toevoegen'),
       h('div', { className: 'row' }, fileInput, h('button', { className: 'primary', onclick: upload }, 'Uploaden'), status)),
-    panel);
+    panel, splitPanel);
 
   let timer;
   const draw = async () => {
@@ -59,6 +61,8 @@ export async function render(root, ctx) {
           h('td', {}, h('input', { type: 'number', min: 0, step: 1, value: c.start_minute, style: { width: '70px' },
             onchange: e => patch(c, { start_minute: Number(e.target.value) }) })),
           h('td', {}, h('span', { className: `badge ${badge}` }, c.status),
+            c.status === 'klaar' && (c.analysis_version || 0) < 2
+              ? h('div', { className: 'badge err', title: 'Deze video is geanalyseerd met een oudere versie die de tijden van iPhone-video\'s verkeerd las. Klik op "Opnieuw".' }, 'opnieuw analyseren aanbevolen') : null,
             busy ? h('div', { className: 'progress', title: c.message }, h('div', { style: { width: `${Math.round(100 * c.progress)}%` } })) : null,
             h('div', { className: 'muted small' }, c.message || '')),
           h('td', {}, c.n_keyframes ? h('span', { className: 'badge ok' }, `${c.n_keyframes} sleutelframe(s)`)
@@ -66,6 +70,7 @@ export async function render(root, ctx) {
           h('td', {},
             h('button', { className: busy ? '' : 'primary', disabled: busy, onclick: async () => { await api(`/clips/${c.id}/process`, { method: 'POST' }); draw(); } },
               c.status === 'klaar' ? 'Opnieuw' : 'Analyseer'), ' ',
+            h('button', { disabled: busy, onclick: () => openSplit(c), title: 'Lange video in delen knippen, of warming-up/rust eruit halen' }, '✂️ Knippen'), ' ',
             h('button', { className: 'danger', onclick: async () => {
               if (!confirm(`${c.filename} verwijderen?`)) return;
               await api(`/clips/${c.id}`, { method: 'DELETE' }); draw();
@@ -75,5 +80,70 @@ export async function render(root, ctx) {
     if (clips.some(c => BUSY.includes(c.status))) timer = setTimeout(draw, 2000);
   };
   await draw();
-  return () => clearTimeout(timer);
+  // --- knippen vóór analyse ---------------------------------------------------------------
+  function openSplit(c) {
+    splitCleanup();
+    let segs = [], pendingStart = null;
+    const video = h('video', { controls: true, preload: 'auto', playsInline: true, src: `/api/clips/${c.id}/video`, style: { width: '100%', borderRadius: '8px', background: '#000' } });
+    const timeline = h('div', { className: 'timeline', title: 'Klik om naar dat moment te gaan' });
+    const list = h('div');
+    const status = h('span', { className: 'muted small' });
+    const delOrig = h('input', { type: 'checkbox' });
+    const dur = () => video.duration || c.duration || 1;
+    timeline.addEventListener('click', e => {
+      const r = timeline.getBoundingClientRect();
+      video.currentTime = dur() * (e.clientX - r.left) / r.width;
+    });
+    const drawTimeline = () => {
+      timeline.replaceChildren(
+        ...segs.map(s => h('div', { className: 'seg', style: { left: `${100 * s.start / dur()}%`, width: `${100 * (s.end - s.start) / dur()}%` } }, s.name)),
+        pendingStart !== null ? h('div', { className: 'seg', style: { left: `${100 * pendingStart / dur()}%`, width: `${100 * Math.max(0, video.currentTime - pendingStart) / dur()}%`, opacity: .4 } }) : null,
+        h('div', { className: 'head', style: { left: `${100 * video.currentTime / dur()}%` } }));
+      status.textContent = pendingStart !== null ? `Begin gezet op ${fmtTime(pendingStart)} – ga naar het einde en klik "Einde deel"` : '';
+    };
+    const addSeg = (start, end) => {
+      if (end - start < 1) return toast('Een deel moet minstens 1 seconde duren');
+      const n = segs.length;
+      segs.push({ start, end, name: n === 0 ? '1e helft' : n === 1 ? '2e helft' : `deel ${n + 1}`, period: Math.min(n + 1, 4), start_minute: n === 1 ? 45 : 0 });
+      segs.sort((a, b) => a.start - b.start); drawList(); drawTimeline();
+    };
+    const drawList = () => list.replaceChildren(...segs.map((s, i) => h('div', { className: 'row', style: { margin: '6px 0' } },
+      h('b', {}, `${fmtTime(s.start)} – ${fmtTime(s.end)}`),
+      h('input', { value: s.name, style: { width: '140px' }, oninput: e => { s.name = e.target.value; drawTimeline(); } }),
+      h('select', { onchange: e => { s.period = Number(e.target.value); } },
+        [1, 2, 3, 4].map(p => h('option', { value: p, selected: s.period === p }, p <= 2 ? `${p}e helft` : `Verlenging ${p - 2}`))),
+      h('label', {}, 'start min ', h('input', { type: 'number', min: 0, value: s.start_minute, style: { width: '64px' }, onchange: e => { s.start_minute = Number(e.target.value); } })),
+      h('button', { onclick: () => { video.currentTime = s.start; video.play(); } }, '▶'),
+      h('button', { className: 'danger', onclick: () => { segs.splice(i, 1); drawList(); drawTimeline(); } }, '×'))));
+    video.addEventListener('timeupdate', drawTimeline);
+    video.addEventListener('loadedmetadata', drawTimeline);
+    splitPanel.replaceChildren(h('div', { className: 'panel' },
+      h('div', { className: 'row', style: { justifyContent: 'space-between' } }, h('h2', {}, `✂️ Knippen: ${c.filename}`),
+        h('button', { onclick: splitCleanup }, 'Sluiten')),
+      h('div', { className: 'hint' }, 'Speel af of klik op de tijdlijn. Klik "Begin deel" bij de aftrap en "Einde deel" bij het eindsignaal; herhaal voor de 2e helft. ' +
+        'Alles buiten de groene delen (warming-up, rust) valt weg. Knippen kopieert de video zonder kwaliteitsverlies en is binnen enkele seconden klaar; ' +
+        'een deel kan tot ~1 s eerder beginnen dan gekozen.' + (c.status === 'klaar' ? ' Let op: de delen moeten daarna opnieuw geanalyseerd worden.' : '')),
+      video, timeline,
+      h('div', { className: 'row' },
+        h('button', { onclick: () => { pendingStart = video.currentTime; drawTimeline(); } }, '⏵ Begin deel'),
+        h('button', { onclick: () => { if (pendingStart === null) return toast('Klik eerst "Begin deel"'); addSeg(pendingStart, video.currentTime); pendingStart = null; drawTimeline(); } }, '⏹ Einde deel'),
+        h('button', { onclick: () => { const t = video.currentTime; segs = []; addSeg(0, t); addSeg(t, dur()); }, title: 'Twee delen: tot hier en vanaf hier' }, '⫽ Splits hier in tweeën'),
+        status),
+      list,
+      h('div', { className: 'row', style: { marginTop: '10px' } },
+        h('label', {}, delOrig, ' originele video daarna verwijderen (bespaart schijfruimte)'),
+        h('span', { style: { flex: 1 } }),
+        h('button', { className: 'primary', onclick: async e => {
+          if (!segs.length) return toast('Voeg eerst minstens één deel toe');
+          e.target.disabled = true; e.target.textContent = 'Bezig met knippen...';
+          try {
+            const made = await api(`/clips/${c.id}/split`, { json: { segments: segs, delete_original: delOrig.checked } });
+            toast(`${made.length} nieuwe video('s) gemaakt`); splitCleanup(); draw();
+          } finally { e.target.disabled = false; e.target.textContent = '✂️ Knippen'; }
+        } }, '✂️ Knippen'))));
+    splitPanel.scrollIntoView({ behavior: 'smooth' });
+    splitCleanup = () => { video.pause(); video.removeAttribute('src'); splitPanel.replaceChildren(); splitCleanup = () => {}; };
+  }
+
+  return () => { clearTimeout(timer); splitCleanup(); };
 }
