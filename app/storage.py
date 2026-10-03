@@ -79,7 +79,8 @@ CREATE TABLE IF NOT EXISTS keyframes (
     t REAL NOT NULL,
     points TEXT NOT NULL,
     auto INTEGER DEFAULT 0,
-    score TEXT
+    score TEXT,
+    accepted INTEGER DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS moments (
     id INTEGER PRIMARY KEY,
@@ -133,6 +134,8 @@ class Store:
         if "auto" not in kcols:
             self.run("ALTER TABLE keyframes ADD COLUMN auto INTEGER DEFAULT 0")
             self.run("ALTER TABLE keyframes ADD COLUMN score TEXT")
+        if "accepted" not in kcols:  # automatisch sleutelframe door de gebruiker goedgekeurd
+            self.run("ALTER TABLE keyframes ADD COLUMN accepted INTEGER DEFAULT 0")
         # status van het automatisch bijstellen van de kalibratie
         for col, typ in (("calib_status", "TEXT"), ("calib_progress", "REAL"), ("calib_message", "TEXT")):
             if col not in cols:

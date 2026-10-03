@@ -17,6 +17,9 @@ export async function render(root, ctx) {
   let t = 0, img = null, pairs = [], pendingImg = null, pendingPitch = null, editingId = null;
   let predicted = [], showPred = true, drag = null, keyframes = [];
   let fit = { H: null, err: null, cam: null, msg: '' }, placingCam = false;
+  let frameT = null;            // tijd van het beeld dat nu getoond wordt
+  let proposal = null;          // automatisch voorstel dat nog bevestigd moet worden
+  let view = { s: 1, ox: 0, oy: 0 }, pan = null;  // inzoomen op het beeld
   const hasCam = () => clip.cam_x != null && clip.cam_y != null;
 
   const frameCanvas = h('canvas');
@@ -27,6 +30,9 @@ export async function render(root, ctx) {
   const pairList = h('div', { className: 'list' });
   const camPanel = h('div', { className: 'panel' });
   const kfList = h('div');
+  const proposeBox = h('div');
+  const saveBtn = h('button', { className: 'primary', onclick: save }, 'Sleutelframe opslaan');
+  const zoomLabel = h('span', { className: 'muted small' });
   const clipSel = h('select', { onchange: e => { clip = clips.find(c => c.id === Number(e.target.value)); ctx.setParam('clip', clip.id); loadClip(); } },
     clips.map(c => h('option', { value: c.id, selected: c.id === clip.id }, c.filename)));
   const predToggle = h('label', { className: 'small' }, h('input', { type: 'checkbox', checked: true,
@@ -47,31 +53,79 @@ export async function render(root, ctx) {
       h('div', { className: 'panel' },
         h('div', { className: 'row', style: { marginBottom: '8px' } }, slider, timeLabel),
         h('div', { className: 'frame-wrap' }, frameCanvas),
-        h('div', { className: 'row small muted', style: { marginTop: '6px' } },
-          'Sleep een punt om het te verschuiven. Rechtsklik op een punt verwijdert het.', predToggle)),
+        h('div', { className: 'row small', style: { marginTop: '6px' } },
+          h('button', { title: 'Inzoomen', onclick: () => zoomBy(1.6) }, '🔍＋'),
+          h('button', { title: 'Uitzoomen', onclick: () => zoomBy(1 / 1.6) }, '🔍－'),
+          h('button', { onclick: () => { view = { s: 1, ox: 0, oy: 0 }; drawFrame(); } }, 'Passend'), zoomLabel,
+          h('span', { style: { flex: 1 } }), predToggle),
+        h('div', { className: 'small muted', style: { marginTop: '4px' } },
+          'Inzoomen: knijp op het trackpad (of ⌥ + scrollen). Verschuiven: met twee vingers vegen, of Shift + slepen. ' +
+          'Sleep een punt om het te verschuiven; rechtsklik verwijdert het. Punten die je zet schuiven mee met het veld als je ' +
+          'naar een ander moment gaat, zodat je bijv. de verre hoekvlag op een later moment kunt toevoegen.')),
       h('div', {},
         h('div', { className: 'panel' }, h('h3', {}, 'Veld (klik op een punt of lijn)'), pitchCanvas),
         camPanel,
         h('div', { className: 'panel' },
           h('div', { className: 'row', style: { justifyContent: 'space-between' } }, h('h3', {}, 'Punten in dit sleutelframe'), errLabel),
+          proposeBox,
           pairList,
           h('div', { className: 'row', style: { marginTop: '10px' } },
-            h('button', { className: 'primary', onclick: save }, 'Sleutelframe opslaan'),
+            saveBtn,
             h('button', { onclick: usePredicted }, 'Voorspelde punten overnemen'),
-            h('button', { onclick: () => { pairs = []; editingId = null; redraw(); } }, 'Leegmaken'))),
+            h('button', { onclick: () => { pairs = []; editingId = null; proposal = null; redraw(); } }, 'Leegmaken'))),
         h('div', { className: 'panel' }, h('h3', {}, 'Sleutelframes van deze video'), kfList))));
 
   const pv = new PitchView(pitchCanvas, { margin: 14 });  // ruimte om je eigen plek naast het veld aan te klikken
   requestAnimationFrame(() => { pv.resize(); drawPitch(); });
 
-  function imgCoords(e) {
+  function canvasCoords(e) {
     const r = frameCanvas.getBoundingClientRect();
     return [(e.clientX - r.left) * frameCanvas.width / r.width, (e.clientY - r.top) * frameCanvas.height / r.height];
   }
-  const pxPerCss = () => frameCanvas.width / frameCanvas.getBoundingClientRect().width;
+  function imgCoords(e) {
+    const [cx, cy] = canvasCoords(e);
+    return [cx / view.s + view.ox, cy / view.s + view.oy];
+  }
+  // schermpixels -> beeldpixels (zodat stippen en lijnen even groot blijven als je inzoomt)
+  const pxPerCss = () => frameCanvas.width / (frameCanvas.getBoundingClientRect().width || frameCanvas.width) / view.s;
+
+  // --- inzoomen en verschuiven ---------------------------------------------------------
+  function clampView() {
+    const W = frameCanvas.width, Hh = frameCanvas.height;
+    view.s = Math.max(1, Math.min(8, view.s));
+    view.ox = Math.max(0, Math.min(W - W / view.s, view.ox));
+    view.oy = Math.max(0, Math.min(Hh - Hh / view.s, view.oy));
+  }
+  function zoomAt(cx, cy, k) {
+    const ix = cx / view.s + view.ox, iy = cy / view.s + view.oy;
+    view.s *= k; view.s = Math.max(1, Math.min(8, view.s));
+    view.ox = ix - cx / view.s; view.oy = iy - cy / view.s;
+    clampView(); drawFrame();
+  }
+  function zoomBy(k) { zoomAt(frameCanvas.width / 2, frameCanvas.height / 2, k); }
+  frameCanvas.addEventListener('wheel', e => {
+    if (!img) return;
+    const zoom = e.ctrlKey || e.altKey || e.metaKey;  // knijpen op het trackpad geeft ctrlKey
+    if (!zoom && view.s <= 1) return;  // niet ingezoomd: gewoon de pagina scrollen
+    e.preventDefault();
+    if (zoom) {
+      const [cx, cy] = canvasCoords(e);
+      zoomAt(cx, cy, Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.002)));
+    } else {
+      const k = pxPerCss();
+      view.ox += e.deltaX * k; view.oy += e.deltaY * k;
+      clampView(); drawFrame();
+    }
+  }, { passive: false });
 
   frameCanvas.addEventListener('mousedown', e => {
-    if (!img || e.button !== 0) return;
+    if (!img) return;
+    if (e.button === 1 || (e.button === 0 && e.shiftKey)) {  // verschuiven
+      e.preventDefault();
+      pan = { x: e.clientX, y: e.clientY, ox: view.ox, oy: view.oy };
+      return;
+    }
+    if (e.button !== 0) return;
     const p = imgCoords(e), tol = 12 * pxPerCss();
     const hit = pairs.findIndex(q => Math.hypot(q.img[0] - p[0], q.img[1] - p[1]) < tol);
     if (hit >= 0) { drag = hit; return; }
@@ -82,13 +136,20 @@ export async function render(root, ctx) {
     }
     redraw();
   });
+  window.addEventListener('mousemove', onPan);
+  function onPan(e) {
+    if (!pan) return;
+    const r = frameCanvas.getBoundingClientRect(), k = frameCanvas.width / r.width / view.s;
+    view.ox = pan.ox - (e.clientX - pan.x) * k; view.oy = pan.oy - (e.clientY - pan.y) * k;
+    clampView(); drawFrame();
+  }
   frameCanvas.addEventListener('mousemove', e => {
     if (drag === null) return;
     pairs[drag].img = imgCoords(e);
     drawFrame(); scheduleFit();
   });
   window.addEventListener('mouseup', onUp);
-  function onUp() { if (drag !== null) { drag = null; redraw(); } }
+  function onUp() { pan = null; if (drag !== null) { drag = null; redraw(); } }
   frameCanvas.addEventListener('contextmenu', e => {
     e.preventDefault();
     const p = imgCoords(e), tol = 12 * pxPerCss();
@@ -173,7 +234,13 @@ export async function render(root, ctx) {
   async function setCamera(data) {
     const c = await api(`/clips/${clip.id}/camera`, { method: 'PATCH', json: data });
     Object.assign(clip, c);
-    drawCamPanel(); drawPitch(); scheduleFit(); loadKeyframes();
+    drawCamPanel(); drawPitch(); scheduleFit(); await loadKeyframes();
+    proposeIfEmpty();
+  }
+  // nog geen eigen sleutelframe en geen punten gezet: dan meteen een voorstel doen
+  function proposeIfEmpty() {
+    if (hasCam() && !pairs.length && !keyframes.some(k => !k.auto)) runPropose();
+    else drawProposal();
   }
 
   function drawCamPanel() {
@@ -199,7 +266,8 @@ export async function render(root, ctx) {
             const r = await api(`/clips/${clip.id}/camera/gps`, { method: 'POST' });
             Object.assign(clip, r.clip);
             toast(`Veld gevonden (${r.pitch_length} × ${r.pitch_width} m). Je positie staat op de tekening.`);
-            drawPitch(); scheduleFit(); loadKeyframes();
+            drawPitch(); scheduleFit(); await loadKeyframes();
+            proposeIfEmpty();
           } finally { drawCamPanel(); }
         } }, '📡 Zoek via GPS') : null,
         hasCam() ? h('button', { onclick: () => setCamera({ x: null, y: null, source: null }) }, 'Wissen') : null),
@@ -211,7 +279,11 @@ export async function render(root, ctx) {
   function drawFrame() {
     const c = frameCanvas.getContext('2d');
     if (!img) return;
+    c.setTransform(1, 0, 0, 1, 0, 0);
+    c.fillStyle = '#000'; c.fillRect(0, 0, frameCanvas.width, frameCanvas.height);
+    c.setTransform(view.s, 0, 0, view.s, -view.ox * view.s, -view.oy * view.s);
     c.drawImage(img, 0, 0);
+    zoomLabel.textContent = view.s > 1.01 ? `${view.s.toFixed(1)}×` : '';
     const lw = 2.5 * pxPerCss();
     const drawLines = (H, color, dash) => {
       c.save(); c.strokeStyle = color; c.lineWidth = lw; c.setLineDash(dash);
@@ -275,7 +347,8 @@ export async function render(root, ctx) {
 
   function drawPairs() {
     pairList.replaceChildren(...pairs.map((p, i) => h('div', { className: 'list-item' },
-      h('b', {}, i + 1), h('span', { style: { flex: 1 } }, p.line ? `op lijn: ${p.name}` : p.name),
+      h('b', {}, i + 1), h('span', { style: { flex: 1 } }, p.line ? `op lijn: ${p.name}` : p.name,
+        offScreen(p.img) ? h('span', { className: 'muted small', title: 'Dit punt ligt nu buiten beeld (gezet op een ander moment). Het telt gewoon mee.' }, ' · buiten beeld') : null),
       h('button', { onclick: () => { pairs.splice(i, 1); redraw(); } }, '×'))));
     if (!pairs.length) pairList.append(h('div', { className: 'muted small' },
       pendingImg ? 'Klik nu het bijbehorende punt op het veld.' : pendingPitch ? `Klik nu ${pendingPitch.line ? 'een plek op ' : ''}"${pendingPitch.name}" in het beeld.` : 'Nog geen punten.'));
@@ -289,14 +362,37 @@ export async function render(root, ctx) {
       `${Math.min(info.dof, need)}/${need} · ${fit.msg || info.hint || 'niet eenduidig'}`));
   }
 
-  function redraw() { drawFrame(); drawPitch(); drawPairs(); scheduleFit(); }
+  function offScreen([x, y]) { return !img || x < 0 || y < 0 || x > frameCanvas.width || y > frameCanvas.height; }
 
-  async function loadFrame() {
+  function redraw() { drawFrame(); drawPitch(); drawPairs(); drawProposal(); scheduleFit(); }
+
+  // Gezette punten schuiven mee met het veld als je naar een ander moment gaat (via de gemeten
+  // camerabeweging, of door de twee beelden te vergelijken als de video nog niet geanalyseerd is).
+  async function warpPairs(fromT, toT) {
+    const list = [...pairs.map(p => p.img), ...(pendingImg ? [pendingImg] : [])];
+    if (!list.length || fromT == null || Math.abs(fromT - toT) < 1e-3) return;
+    const r = await api(`/clips/${clip.id}/warp`, { json: { from_t: fromT, to_t: toT, points: list } }).catch(() => null);
+    if (!r || !r.ok) {
+      toast(`Punten konden niet meebewegen: ${r?.message || 'fout'}. Ze zijn gewist.`, true);
+      pairs = []; pendingImg = null; editingId = null; proposal = null;
+      return;
+    }
+    pairs.forEach((p, i) => { p.img = r.points[i]; });
+    if (pendingImg) pendingImg = r.points[pairs.length];
+    if (editingId) {  // het opgeslagen sleutelframe blijft zoals het was; opslaan maakt een nieuw
+      editingId = null;
+      toast('De punten zijn meegeschoven met het veld. Opslaan maakt een nieuw sleutelframe op dit moment.');
+    }
+  }
+
+  async function loadFrame({ warp = false } = {}) {
     // De server rondt af op het dichtstbijzijnde geanalyseerde frame en geeft de exacte tijd terug
     const res = await fetch(`/api/clips/${clip.id}/frame?t=${t.toFixed(3)}`);
     if (!res.ok) return toast('Frame kon niet geladen worden', true);
     const ft = Number(res.headers.get('X-Frame-Time'));
     if (!isNaN(ft)) { t = ft; slider.value = t; }
+    if (warp) await warpPairs(frameT, t);
+    frameT = t;
     timeLabel.textContent = `${fmtTime(t)} / ${fmtTime(clip.duration)}`;
     const im = new Image();
     const url = URL.createObjectURL(await res.blob());
@@ -304,7 +400,10 @@ export async function render(root, ctx) {
     await im.decode().catch(() => toast('Frame kon niet geladen worden', true));
     URL.revokeObjectURL(url);
     img = im;
-    frameCanvas.width = im.naturalWidth; frameCanvas.height = im.naturalHeight;
+    if (frameCanvas.width !== im.naturalWidth || frameCanvas.height !== im.naturalHeight) {
+      frameCanvas.width = im.naturalWidth; frameCanvas.height = im.naturalHeight;
+      view = { s: 1, ox: 0, oy: 0 };
+    }
     predicted = clip.status === 'klaar' ? await api(`/clips/${clip.id}/predict?t=${t}`) : [];
     redraw();
   }
@@ -313,7 +412,7 @@ export async function render(root, ctx) {
     keyframes = await api(`/clips/${clip.id}/keyframes`);
     const manual = keyframes.filter(k => !k.auto), autos = keyframes.filter(k => k.auto);
     const rows = manual.map(kf => h('div', { className: 'list-item', onclick: () => {
-      t = kf.t; slider.value = t; pairs = kf.points.map(p => ({ ...p })); editingId = kf.id; loadFrame();
+      t = kf.t; slider.value = t; pairs = kf.points.map(p => ({ ...p })); editingId = kf.id; proposal = null; loadFrame();
     } },
       h('b', {}, fmtTime(kf.t)), h('span', { style: { flex: 1 } }, `${kf.points.length} punten`),
       kf.error_m != null ? h('span', { className: `badge ${kf.error_m < 1 ? 'ok' : 'err'}` }, `${kf.error_m} m`) : null,
@@ -332,6 +431,34 @@ export async function render(root, ctx) {
   let calibTimer;
   function autoPanel(autos, manual) {
     const st = clip.calib_status, busy = st === 'wachtrij' || st === 'bezig';
+    const open = autos.filter(k => !k.accepted).length;
+    const fmtScore = k => k.score?.precision != null ? `${Math.round(100 * k.score.precision)}%` : '';
+    const jump = k => { t = k.t; slider.value = t; loadFrame({ warp: true }); loadKeyframes(); };
+    const review = autos.length && !busy ? h('div', {},
+      h('div', { className: 'small muted', style: { margin: '6px 0' } },
+        'Controleer ze gerust: klik op een tijd om dat moment te zien. De gele stippellijnen tonen hoe het veld daar ligt. ',
+        'Klopt het? Dan ✓. Klopt het niet? ✗ verwijdert hem, ✎ zet de punten klaar om zelf bij te stellen.'),
+      h('div', { className: 'list', style: { maxHeight: '220px', overflowY: 'auto' } }, autos.map(k => h('div', {
+        className: 'list-item', style: Math.abs(k.t - t) < 0.05 ? { outline: '2px solid var(--accent, #0a84ff)' } : {}, onclick: () => jump(k) },
+        h('b', {}, fmtTime(k.t)),
+        h('span', { style: { flex: 1 }, className: 'small muted', title: 'Deel van de gevonden witte lijnen dat op de veldtekening valt' }, fmtScore(k)),
+        k.accepted ? h('span', { className: 'badge ok' }, '✓ goed') : null,
+        k.accepted ? null : h('button', { title: 'Klopt', onclick: async e => {
+          e.stopPropagation(); await api(`/clips/${clip.id}/autocalib/accept`, { json: { ids: [k.id] } }); loadKeyframes();
+        } }, '✓'),
+        h('button', { title: 'Zelf bijstellen', onclick: async e => {
+          e.stopPropagation();
+          t = k.t; slider.value = t; pairs = []; editingId = null; proposal = null;
+          await loadFrame(); usePredicted();
+        } }, '✎'),
+        h('button', { className: 'danger', title: 'Klopt niet: verwijderen', onclick: async e => {
+          e.stopPropagation(); await api(`/keyframes/${k.id}`, { method: 'DELETE' }); loadKeyframes();
+          predicted = await api(`/clips/${clip.id}/predict?t=${t}`); drawFrame();
+        } }, '✗')))),
+      open ? h('div', { className: 'row', style: { marginTop: '6px' } },
+        h('button', { className: 'primary', onclick: async () => {
+          await api(`/clips/${clip.id}/autocalib/accept`, { json: {} }); toast(`${open} automatische sleutelframes goedgekeurd`); loadKeyframes();
+        } }, `✓ Alles accepteren (${open})`)) : null) : null;
     const box = h('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--border)' } },
       h('div', { className: 'row', style: { justifyContent: 'space-between' } },
         h('b', {}, '🤖 Automatisch bijgesteld'),
@@ -343,11 +470,13 @@ export async function render(root, ctx) {
           : clip.status !== 'klaar' ? 'Start na de analyse vanzelf.'
           : !manual.length ? 'Start vanzelf zodra je één sleutelframe hebt opgeslagen.'
           : (clip.calib_message || '') + (hasCam() ? '' : ' Tip: stel in waar je stond; dan werkt het bijstellen veel nauwkeuriger.')),
-      manual.length && clip.status === 'klaar' ? h('div', { className: 'row' },
+      review,
+      manual.length && clip.status === 'klaar' ? h('div', { className: 'row', style: { marginTop: '6px' } },
         h('button', { disabled: busy, onclick: async () => {
           await api(`/clips/${clip.id}/autocalib`, { method: 'POST' }); refreshClip();
-        } }, 'Opnieuw bijstellen'),
+        }, title: 'Goedgekeurde sleutelframes blijven staan' }, 'Opnieuw bijstellen'),
         autos.length ? h('button', { disabled: busy, onclick: async () => {
+          if (!confirm('Alle automatische sleutelframes wissen, ook de goedgekeurde?')) return;
           await api(`/clips/${clip.id}/autocalib`, { method: 'DELETE' }); await refreshClip(); loadKeyframes();
         } }, 'Wis automatische') : null) : null);
     clearTimeout(calibTimer);
@@ -363,6 +492,7 @@ export async function render(root, ctx) {
     Object.assign(clip, fresh);
     const nowBusy = clip.calib_status === 'wachtrij' || clip.calib_status === 'bezig';
     await loadKeyframes();
+    if (wasBusy && !nowBusy) ctx.refreshSteps?.();
     if (wasBusy && !nowBusy && clip.status === 'klaar') {  // klaar: voorspelling (geel) bijwerken
       predicted = await api(`/clips/${clip.id}/predict?t=${t}`);
       drawFrame();
@@ -373,7 +503,8 @@ export async function render(root, ctx) {
     const info = needInfo();
     if (!info.ok) return toast(`Nog niet genoeg: ${info.hint}`);
     const res = await api(`/clips/${clip.id}/keyframes`, { json: { id: editingId, t, points: pairs } });
-    editingId = res.id;
+    editingId = res.id; proposal = null; drawProposal();
+    ctx.refreshSteps?.();
     t = res.t;
     toast(`Sleutelframe opgeslagen (afwijking ${res.error_m} m)${clip.status === 'klaar' ? ' – de app stelt nu de rest van de video automatisch bij' : ''}`);
     setTimeout(refreshClip, 500);
@@ -395,22 +526,63 @@ export async function render(root, ctx) {
     t = Number(slider.value);
     timeLabel.textContent = `${fmtTime(t)} / ${fmtTime(clip.duration)}`;
     clearTimeout(debounce);
-    debounce = setTimeout(() => {
-      // Bij een nieuw moment begin je een nieuw sleutelframe
-      if (editingId) { editingId = null; pairs = []; }
-      loadFrame(); loadKeyframes();
-    }, 250);
+    debounce = setTimeout(() => { loadFrame({ warp: true }); loadKeyframes(); }, 250);
   });
 
   async function loadClip() {
     placingCam = false; drawCamPanel();
-    slider.max = clip.duration || 0; t = 0; slider.value = 0; pairs = []; editingId = null;
+    slider.max = clip.duration || 0; t = 0; slider.value = 0; pairs = []; editingId = null; proposal = null; frameT = null;
+    view = { s: 1, ox: 0, oy: 0 };
     await loadKeyframes();
-    if (keyframes.length) { const kf = keyframes[0]; t = kf.t; slider.value = t; pairs = kf.points.map(p => ({ ...p })); editingId = kf.id; }
+    const manual = keyframes.filter(k => !k.auto);
+    if (manual.length) { const kf = manual[0]; t = kf.t; slider.value = t; pairs = kf.points.map(p => ({ ...p })); editingId = kf.id; }
     await loadFrame();
+    if (!manual.length && hasCam()) runPropose();  // nog niets gekalibreerd: de app doet zelf een voorstel
+  }
+
+  // --- automatisch voorstel ---------------------------------------------------------------
+  let proposing = false;
+  async function runPropose() {
+    if (proposing) return;
+    if (!hasCam()) return toast('Stel eerst in waar je stond (📍 of via GPS); dan kan de app het veld zelf zoeken');
+    proposing = true; drawProposal();
+    try {
+      const r = await api(`/clips/${clip.id}/propose?t=${t.toFixed(3)}`);
+      if (Math.abs(r.t - t) > 0.05) return;  // intussen naar een ander moment gegaan
+      if (!r.ok) { proposal = { failed: r.message }; return; }
+      pairs = r.points.map(p => ({ ...p, img: [...p.img] }));
+      editingId = null; pendingImg = null; pendingPitch = null;
+      proposal = { info: r.info };
+    } catch { proposal = null; } finally { proposing = false; redraw(); }
+  }
+
+  function drawProposal() {
+    saveBtn.textContent = proposal && !proposal.failed ? '✓ Klopt – opslaan' : 'Sleutelframe opslaan';
+    const manualCount = keyframes.filter(k => !k.auto).length;
+    const btn = h('button', { disabled: proposing || !hasCam(), title: hasCam() ? '' : 'Stel eerst in waar je stond',
+      onclick: runPropose }, proposing ? '⏳ Veld zoeken… (± 10 s)' : '🤖 Zoek het veld automatisch');
+    let body;
+    if (proposing) body = h('div', { className: 'small muted' }, 'De app zoekt de witte lijnen en draait in gedachten rond vanaf jouw plek tot de veldtekening erop past.');
+    else if (proposal?.failed) body = h('div', { className: 'small' }, proposal.failed);
+    else if (proposal) body = h('div', { className: 'small' },
+      h('b', {}, 'Voorstel van de app. '), 'Vallen de witte lijnen op het veld? Sleep punten bij waar nodig (zoom gerust in) en klik ',
+      h('b', {}, '✓ Klopt'), '. Daarna stelt de app de rest van de video zelf bij.',
+      proposal.info.ambiguous
+        ? h('div', { style: { marginTop: '4px' } }, h('span', { className: 'badge err' }, 'twijfel'),
+            ' Er zijn hier weinig lijnen te zien, dus ook een andere stand past bijna even goed. Controleer extra goed, ',
+            'of schuif naar een moment met meer lijnen in beeld (16-meter, middenlijn, cirkel) en zoek opnieuw.')
+        : h('div', { className: 'muted' }, `Pasvorm: ${Math.round(100 * proposal.info.precision)}% van de gevonden lijnen valt op het model.`));
+    else if (!hasCam()) body = manualCount ? null : h('div', { className: 'small muted' },
+      'Tip: stel hieronder in waar je stond. Dan kan de app het veld zelf zoeken en hoef je alleen te controleren.');
+    else body = manualCount ? null : h('div', { className: 'small muted' }, 'Laat de app het veld zoeken, of klik zelf punten aan.');
+    proposeBox.replaceChildren(h('div', { className: proposal && !proposal.failed ? 'hint' : '', style: { margin: '6px 0' } },
+      ...[h('div', { className: 'row' }, btn), body].filter(Boolean)));
   }
   await loadClip();
   const onResize = () => { pv.resize(); drawPitch(); };
   window.addEventListener('resize', onResize);
-  return () => { clearTimeout(calibTimer); window.removeEventListener('mouseup', onUp); window.removeEventListener('resize', onResize); };
+  return () => {
+    clearTimeout(calibTimer); window.removeEventListener('mouseup', onUp); window.removeEventListener('mousemove', onPan);
+    window.removeEventListener('resize', onResize);
+  };
 }

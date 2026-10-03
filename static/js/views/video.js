@@ -34,6 +34,10 @@ export async function render(root, ctx) {
         h('div', { className: 'panel', style: { marginTop: '12px' } },
           h('div', { className: 'row' }, label, markerPlayer,
             h('button', { className: 'primary', onclick: addMoment, title: 'Maakt een clip van 6 s vóór tot 4 s na dit moment' }, '✂️ Maak clip')),
+          h('div', { className: 'small muted', style: { marginTop: '6px' } },
+            'Pauzeer bij een kans of goal, geef een label en klik "Maak clip" (6 s ervoor tot 4 s erna). Je clips staan hieronder bij ',
+            '"Momenten in deze video" en bij ', h('a', { href: `#/match/${match.id}/momenten` }, 'Clips & delen'),
+            ', waar je ze kunt bijknippen, tekenen en delen.'),
           labelList())),
       h('div', {},
         h('div', { className: 'panel' }, h('h3', {}, 'Minimap'), mini,
@@ -165,7 +169,7 @@ export async function render(root, ctx) {
     const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: clip.id, start: Math.max(0, t - 6), end: t + 4,
       label: label.value || 'Moment', players: pid ? [pid] : [], spotlight_player_id: pid } });
     label.value = '';
-    toast('Clip gemaakt – bewerk of deel hem bij "Clips & delen"');
+    toast('✓ Clip gemaakt. Hij staat bij "Momenten in deze video" en bij "Clips & delen".');
     loadEvents();
     return m;
   }

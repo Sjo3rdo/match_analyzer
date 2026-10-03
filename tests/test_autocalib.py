@@ -126,3 +126,28 @@ def test_autocalib_without_camera_position_never_worse(tmp_path):
     before, after, res = _run_drift_test(tmp_path, with_camera=False)
     assert np.all(after <= before + 1.0), (before.round(1), after.round(1))
     assert np.median(after) < 0.7 * np.median(before)
+
+
+def test_propose_finds_pitch_from_camera_position():
+    """Automatisch voorstel: alleen de aangeklikte camerapositie is bekend (2 m ernaast), geen klikken."""
+    tex = _texture()
+    for ti in (3.0, 9.0):
+        cam = _camera(ti)
+        Hc = camera_homography(cam, (W, H))
+        prior = {"x": cam[0] + 1.5, "y": cam[1] - 1.5, "h": cam[2], "f": default_focal(W), "sigma_pos": 3.0,
+                 "width": W, "height": H}
+        res = ac.propose(_frame(tex, Hc), prior)
+        assert res is not None, ti
+        Hp, info = res
+        img = apply_h(Hc, ac.SAMPLES)
+        ok = (img[:, 0] > 0) & (img[:, 0] < W) & (img[:, 1] > 0) & (img[:, 1] < H)
+        err = np.linalg.norm(apply_h(Hp, ac.SAMPLES[ok]) - img[ok], axis=1)
+        assert np.median(err) < 8, (ti, np.median(err), info)
+
+
+def test_propose_refuses_without_lines():
+    rng = np.random.default_rng(1)
+    grass = np.full((H, W, 3), (55, 140, 65), np.uint8)
+    grass = cv2.add(grass, rng.integers(0, 30, (H, W, 3), dtype=np.uint8))
+    prior = {"x": 52.5, "y": 85.0, "h": 6.0, "f": default_focal(W), "sigma_pos": 8.0, "width": W, "height": H}
+    assert ac.propose(grass, prior) is None
