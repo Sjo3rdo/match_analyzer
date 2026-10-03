@@ -61,6 +61,11 @@ Zie het als een puzzel in drie lagen: eerst *zien* (wie staat waar in beeld), da
    - Klik daarna hetzelfde punt aan op de veldtekening.
    - Doe dit voor minstens 4 punten, liefst 6 of meer, verspreid over het beeld. De witte lijnen
      laten zien of het klopt.
+   - **Filmen vanaf de zijlijn op ooghoogte?** Dan zie je vaak maar 1 of 2 hoekpunten. Klik dan ook
+     op een plek **ergens op een veldlijn**, zoals de zijlijn vlak voor je, de 16-meterlijn of de
+     doellijn, en daarna op die lijn in de veldtekening (hij kleurt rood). Een punt telt 2, een lijn
+     telt mee met hoogstens 2 punten, en je hebt er samen 8 nodig, bijvoorbeeld 1 punt en 3 lijnen.
+     Let op: precies 2 punten en 2 lijnen ligt wiskundig niet vast; voeg dan nog iets toe.
    - Omdat je uit de hand filmt, voeg je elke 30 tot 60 seconden een *sleutelframe* toe, en ook na
      elke flinke zwenk of zoom. Tussen de sleutelframes volgt de app de camerabeweging zelf, zoals
      een lijm die de plattegrond op het beeld vasthoudt. Na de analyse voorspelt de app de punten
@@ -99,6 +104,9 @@ wel tot ongeveer 1 seconde eerder beginnen dan je koos.
 - **Liggend filmen**, in 1080p of 4K, met 30 of 60 fps.
 - **Rustig zwenken.** Snelle rukken en veel in- en uitzoomen maken de kalibratie lastiger.
 - **Houd veldlijnen in beeld.** Die heeft de kalibratie nodig.
+- **Vanaf de zijlijn op ooghoogte** werkt het ook, maar spelers aan de overkant zijn dan klein en
+  afstanden daar minder nauwkeurig. Houd liefst de zijlijn voor je én een doel of de 16-meterlijn
+  in beeld.
 
 ## Hoe nauwkeurig is het?
 

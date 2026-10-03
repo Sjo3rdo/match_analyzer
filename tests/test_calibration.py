@@ -52,3 +52,40 @@ def test_camera_model_blends_keyframes():
 def test_cumulative_identity():
     A = cumulative(np.tile(np.eye(3), (5, 1, 1)))
     assert np.allclose(A, np.eye(3))
+
+
+def _line_item(H, seg, s):
+    """Beeldpunt dat op veldlijn seg ligt (fractie s), via de inverse van H."""
+    a, b = np.array(seg[0], float), np.array(seg[1], float)
+    w = (1 - s) * a + s * b
+    return {"img": apply_h(np.linalg.inv(H), w[None])[0].tolist(), "line": [list(seg[0]), list(seg[1])]}
+
+
+def test_calibration_with_lines_from_sideline():
+    import pytest
+    """Zijlijn-situatie: maar 2 echte punten in beeld, aangevuld met 3 lijnen.
+    (Precies 2 punten + 2 lijnen ligt wiskundig nooit vast; dat test de volgende test.)"""
+    from app.calibration import fit_calibration
+    from app.pitch import LINES
+    H = _true_h()
+    pts = [{"img": apply_h(np.linalg.inv(H), np.array([[94.0, 34.0]]))[0].tolist(), "pitch": [94.0, 34.0]},  # strafschopstip
+           {"img": apply_h(np.linalg.inv(H), np.array([[105.0, 30.34]]))[0].tolist(), "pitch": [105.0, 30.34]}]  # doelpaal
+    for name, fr in (("Zijlijn onder", (0.6, 0.9)), ("16-meterlijn rechts (voorkant)", (0.2, 0.8)),
+                     ("Doellijn rechts", (0.3, 0.6))):
+        pts += [_line_item(H, LINES[name], f) for f in fr]
+    K, err = fit_calibration(pts)
+    with pytest.raises(ValueError):  # 2 punten + 2 lijnen: niet eenduidig
+        fit_calibration(pts[:6])
+    assert err < 1e-4
+    probe = np.array([[700.0, 500.0], [1500.0, 650.0]])
+    assert np.allclose(apply_h(K, probe), apply_h(H, probe), atol=1e-3)
+
+
+def test_calibration_rejects_too_little_information():
+    import pytest
+    from app.calibration import fit_calibration
+    from app.pitch import LINES
+    H = _true_h()
+    pts = [_line_item(H, LINES["Zijlijn onder"], f) for f in (0.1, 0.3, 0.5, 0.7, 0.9)]  # 5 punten, één lijn
+    with pytest.raises(ValueError):
+        fit_calibration(pts)

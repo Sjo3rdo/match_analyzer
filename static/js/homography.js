@@ -58,3 +58,74 @@ function solve(M, v) {
   }
   return A.map((r, i) => r[n] / r[i]);
 }
+
+// --- kalibratie met punten én punten-op-een-lijn (beeld -> veld) ----------------------------
+// pairs: [{img: [x, y], pitch: [X, Y]}] of [{img: [x, y], line: [[X1, Y1], [X2, Y2]]}]
+function lineCoeffs([[x1, y1], [x2, y2]]) {
+  const a = y1 - y2, b = x2 - x1, c = x1 * y2 - x2 * y1, n = Math.hypot(a, b) || 1;
+  return [a / n, b / n, c / n];
+}
+
+// Hoeveel informatie: punt = 2, elke lijn hoogstens 2 (meer punten op dezelfde lijn helpen niet)
+export function calibrationInfo(pairs) {
+  const lines = new Map();
+  let points = 0;
+  for (const p of pairs) {
+    if (p.pitch) points++;
+    else { const k = JSON.stringify(p.line); lines.set(k, Math.min(2, (lines.get(k) || 0) + 1)); }
+  }
+  const dof = 2 * points + [...lines.values()].reduce((s, v) => s + v, 0);
+  const ok = dof >= 8 && !(points === 2 && lines.size === 2 && dof === 8);
+  let hint = '';
+  if (dof < 8) hint = `nog ${8 - dof} nodig (punt telt 2, lijn telt max 2)`;
+  else if (!ok) hint = '2 punten + 2 lijnen ligt niet vast: voeg nog een punt of lijn toe';
+  return { dof, ok, hint, points, lines: lines.size };
+}
+
+export function fitCalibration(pairs) {
+  if (!calibrationInfo(pairs).ok) return null;
+  const imgs = pairs.map(p => p.img);
+  const world = pairs.flatMap(p => (p.pitch ? [p.pitch] : p.line));
+  const norm = pts => {
+    const cx = pts.reduce((s, p) => s + p[0], 0) / pts.length, cy = pts.reduce((s, p) => s + p[1], 0) / pts.length;
+    const d = pts.reduce((s, p) => s + Math.hypot(p[0] - cx, p[1] - cy), 0) / pts.length || 1;
+    const k = Math.SQRT2 / d;
+    return [[k, 0, -k * cx], [0, k, -k * cy], [0, 0, 1]];
+  };
+  const Ti = norm(imgs), Tp = norm(world), TpInvT = transpose(inv(Tp));
+  const A = [], b = [];
+  pairs.forEach(p => {
+    const [x, y] = apply(Ti, p.img);
+    if (p.pitch) {
+      const [X, Y] = apply(Tp, p.pitch);
+      A.push([x, y, 1, 0, 0, 0, -X * x, -X * y]); b.push(X);
+      A.push([0, 0, 0, x, y, 1, -Y * x, -Y * y]); b.push(Y);
+    } else {
+      const l = lineCoeffs(p.line);
+      let [la, lb, lc] = TpInvT.map(r => r[0] * l[0] + r[1] * l[1] + r[2] * l[2]);
+      const n = Math.hypot(la, lb) || 1; la /= n; lb /= n; lc /= n;
+      A.push([la * x, la * y, la, lb * x, lb * y, lb, lc * x, lc * y]); b.push(-lc);
+    }
+  });
+  const AtA = Array.from({ length: 8 }, (_, i) => Array.from({ length: 8 }, (_, j) => A.reduce((s, r) => s + r[i] * r[j], 0)));
+  const Atb = Array.from({ length: 8 }, (_, i) => A.reduce((s, r, k) => s + r[i] * b[k], 0));
+  const h = solve(AtA, Atb);
+  if (!h) return null;
+  const Gn = [[h[0], h[1], h[2]], [h[3], h[4], h[5]], [h[6], h[7], 1]];
+  const G = mul(inv(Tp), mul(Gn, Ti));
+  if (!G.flat().every(Number.isFinite)) return null;
+  return G.map(r => r.map(v => v / G[2][2]));
+}
+
+// Gemiddelde fout in meters (punt: afstand, lijnpunt: afstand tot de lijn)
+export function calibrationError(G, pairs) {
+  const e = pairs.map(p => {
+    const q = apply(G, p.img);
+    if (p.pitch) return Math.hypot(q[0] - p.pitch[0], q[1] - p.pitch[1]);
+    const [a, b, c] = lineCoeffs(p.line);
+    return Math.abs(a * q[0] + b * q[1] + c);
+  });
+  return e.reduce((s, v) => s + v, 0) / e.length;
+}
+
+function transpose(m) { return m[0].map((_, j) => m.map(r => r[j])); }

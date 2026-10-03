@@ -21,17 +21,126 @@ import numpy as np
 
 
 def fit_homography(image_pts: np.ndarray, pitch_pts: np.ndarray) -> tuple[np.ndarray, float]:
-    """Homografie beeld -> veld plus gemiddelde terugprojectiefout in meters."""
-    image_pts = np.asarray(image_pts, dtype=np.float64).reshape(-1, 2)
-    pitch_pts = np.asarray(pitch_pts, dtype=np.float64).reshape(-1, 2)
-    if len(image_pts) < 4:
-        raise ValueError("Minstens 4 punten nodig voor kalibratie")
-    method = cv2.RANSAC if len(image_pts) >= 6 else 0
-    K, _ = cv2.findHomography(image_pts, pitch_pts, method, 2.0)
-    if K is None:
-        raise ValueError("Kalibratie mislukt: punten liggen (bijna) op één lijn")
-    err = float(np.mean(np.linalg.norm(apply_h(K, image_pts) - pitch_pts, axis=1)))
-    return K / K[2, 2], err
+    """Homografie beeld -> veld uit alleen punten, plus gemiddelde fout in meters."""
+    return fit_calibration([{"img": a, "pitch": b} for a, b in zip(np.asarray(image_pts).reshape(-1, 2),
+                                                                    np.asarray(pitch_pts).reshape(-1, 2))])
+
+
+def _norm_matrix(pts: np.ndarray) -> np.ndarray:
+    c = pts.mean(axis=0)
+    d = np.mean(np.linalg.norm(pts - c, axis=1)) or 1.0
+    k = np.sqrt(2) / d
+    return np.array([[k, 0, -k * c[0]], [0, k, -k * c[1]], [0, 0, 1]])
+
+
+def _line_coeffs(seg) -> np.ndarray:
+    (x1, y1), (x2, y2) = seg
+    l = np.array([y1 - y2, x2 - x1, x1 * y2 - x2 * y1], dtype=np.float64)
+    return l / (np.hypot(l[0], l[1]) or 1.0)
+
+
+def calibration_dof(points: list[dict]) -> int:
+    """Hoeveel 'informatie' de kalibratie heeft: een punt telt 2, elke lijn hoogstens 2."""
+    per_line: dict[str, int] = {}
+    n = 0
+    for p in points:
+        if "pitch" in p and p["pitch"] is not None:
+            n += 2
+        elif p.get("line"):
+            key = str(p["line"])
+            per_line[key] = min(2, per_line.get(key, 0) + 1)
+    return n + sum(per_line.values())
+
+
+def calibration_residuals(K: np.ndarray, points: list[dict]) -> np.ndarray:
+    """Fout per kalibratiepunt in meters (punt: afstand tot het veldpunt, lijnpunt: tot de lijn)."""
+    out = []
+    for p in points:
+        q = apply_h(K, np.asarray(p["img"], float))[0]
+        if "pitch" in p and p["pitch"] is not None:
+            out.append(np.linalg.norm(q - np.asarray(p["pitch"], float)))
+        else:
+            l = _line_coeffs(p["line"])
+            out.append(abs(l[0] * q[0] + l[1] * q[1] + l[2]))
+    return np.array(out)
+
+
+def fit_calibration(points: list[dict]) -> tuple[np.ndarray, float]:
+    """Homografie beeld -> veld uit punten én punten-op-een-lijn.
+
+    points: [{"img": [x, y], "pitch": [X, Y]}]  (bekend veldpunt), of
+            [{"img": [x, y], "line": [[X1, Y1], [X2, Y2]]}]  (ergens op die veldlijn).
+    Een punt levert twee vergelijkingen, een punt-op-lijn één (l^T K x = 0). Samen lineair
+    oplossen (genormaliseerd), daarna verfijnen op de echte fout in meters.
+    """
+    if calibration_dof(points) < 8:
+        raise ValueError("Te weinig informatie: gebruik minstens 4 punten, of combineer punten "
+                         "met lijnen (elke lijn telt mee met hoogstens 2 punten)")
+    img = np.array([p["img"] for p in points], dtype=np.float64)
+    world = [np.asarray(p["pitch"], float) for p in points if p.get("pitch") is not None]
+    for p in points:
+        if p.get("pitch") is None:
+            world += [np.asarray(p["line"][0], float), np.asarray(p["line"][1], float)]
+    Ti, Tp = _norm_matrix(img), _norm_matrix(np.array(world))
+    Tp_inv_T = np.linalg.inv(Tp).T
+    rows = []
+    for p, (x, y) in zip(points, apply_h(Ti, img)):
+        if p.get("pitch") is not None:
+            X, Y = apply_h(Tp, np.asarray(p["pitch"], float))[0]
+            rows.append([x, y, 1, 0, 0, 0, -X * x, -X * y, -X])
+            rows.append([0, 0, 0, x, y, 1, -Y * x, -Y * y, -Y])
+        else:
+            a, b, c = Tp_inv_T @ _line_coeffs(p["line"])
+            n = np.hypot(a, b) or 1.0
+            a, b, c = a / n, b / n, c / n
+            rows.append([a * x, a * y, a, b * x, b * y, b, c * x, c * y, c])
+    A = np.array(rows)
+    _, sv, vt = np.linalg.svd(A)
+    if len(sv) >= 8 and sv[7] < 1e-9 * sv[0]:
+        raise ValueError("Deze combinatie legt het veld nog niet vast (bijv. precies 2 punten + 2 lijnen, "
+                         "of alles op één lijn). Voeg nog een punt of een andere lijn toe.")
+    Kn = vt[-1].reshape(3, 3)
+    K = np.linalg.inv(Tp) @ Kn @ Ti
+    K = _refine(K / K[2, 2], points)
+    if not np.all(np.isfinite(K)):
+        raise ValueError("Kalibratie mislukt")
+    return K, float(np.mean(calibration_residuals(K, points)))
+
+
+def _refine(K: np.ndarray, points: list[dict], iters: int = 15) -> np.ndarray:
+    """Gauss-Newton op de fouten in meters (punten 2D, lijnpunten 1D)."""
+    def res(h):
+        Kh = np.append(h, 1.0).reshape(3, 3)
+        r = []
+        for p in points:
+            q = apply_h(Kh, np.asarray(p["img"], float))[0]
+            if p.get("pitch") is not None:
+                r += list(q - np.asarray(p["pitch"], float))
+            else:
+                l = _line_coeffs(p["line"])
+                r.append(l[0] * q[0] + l[1] * q[1] + l[2])
+        return np.array(r)
+    h = K.reshape(-1)[:8].copy()
+    r = res(h)
+    if not np.all(np.isfinite(r)):
+        return K
+    for _ in range(iters):
+        J = np.empty((len(r), 8))
+        for k in range(8):
+            e = 1e-7 * max(1.0, abs(h[k]))
+            hk = h.copy()
+            hk[k] += e
+            J[:, k] = (res(hk) - r) / e
+        try:
+            step = np.linalg.lstsq(J, -r, rcond=None)[0]
+        except np.linalg.LinAlgError:
+            break
+        h_new = h + step
+        r_new = res(h_new)
+        if not np.all(np.isfinite(r_new)) or r_new @ r_new >= r @ r:
+            break
+        h, r = h_new, r_new
+    return np.append(h, 1.0).reshape(3, 3)
 
 
 def apply_h(H: np.ndarray, pts: np.ndarray) -> np.ndarray:

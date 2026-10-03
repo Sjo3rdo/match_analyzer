@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from . import config, pitch
-from .calibration import CameraModel, Keyframe, fit_homography
+from .calibration import CameraModel, Keyframe, fit_calibration
 from .storage import Store, clip_dir
 from .teams import TEAM_OTHER
 
@@ -83,9 +83,10 @@ def load_clip(store: Store, clip_id: int) -> ClipData | None:
     kfs = []
     for kf in store.keyframes(clip_id):
         pts = kf["points"]
-        if len(pts) < 4:
+        try:
+            K, _ = fit_calibration(pts)
+        except ValueError:
             continue
-        K, _ = fit_homography([p["img"] for p in pts], [p["pitch"] for p in pts])
         kfs.append(Keyframe(int(np.argmin(np.abs(t - kf["t"]))), K))
     cam = CameraModel(inter[:len(t)], kfs)
 
@@ -397,26 +398,44 @@ def clip_positions(store: Store, clip_id: int, t0: float, t1: float) -> dict:
     return {"calibrated": d.calibrated, "frames": frames}
 
 
+def _to_image(d: ClipData, i: int, world: np.ndarray) -> np.ndarray:
+    """Veldpunten -> beeldpunten op geanalyseerd frame i (NaN als achter de camera)."""
+    img = np.zeros_like(world)
+    for H, w in d.camera.homographies(i):
+        hom = np.hstack([world, np.ones((len(world), 1))]) @ np.linalg.inv(H).T
+        hom[hom[:, 2] <= 0, 2] = np.nan
+        img += w * hom[:, :2] / hom[:, 2:3]
+    return img
+
+
 def predict_landmarks(store: Store, clip_id: int, t: float) -> list[dict]:
-    """Waar de veldpunten volgens het cameramodel in beeld liggen op tijdstip t."""
+    """Waar de veldpunten en -lijnen volgens het cameramodel in beeld liggen op tijdstip t.
+
+    Lijnen komen terug als twee punten-op-de-lijn, zodat ze bij een nieuw sleutelframe met
+    één klik overgenomen kunnen worden (handig bij beelden vanaf de zijlijn)."""
     d = load_clip(store, clip_id)
     if d is None or not d.calibrated:
         return []
     i = int(np.argmin(np.abs(d.t - t)))
+    W, Hh = d.clip["width"], d.clip["height"]
+    inside = lambda x, y: np.isfinite(x) & np.isfinite(y) & (x >= -0.02 * W) & (x <= 1.02 * W) \
+        & (y >= -0.02 * Hh) & (y <= 1.02 * Hh)  # noqa: E731
     names = list(pitch.LANDMARKS)
     world = np.array([pitch.LANDMARKS[n] for n in names], dtype=np.float64)
-    img = np.zeros_like(world)
-    for H, w in d.camera.homographies(i):
-        Hi = np.linalg.inv(H)
-        hom = np.hstack([world, np.ones((len(world), 1))]) @ Hi.T
-        if np.any(hom[:, 2] <= 0):
-            hom[hom[:, 2] <= 0, 2] = np.nan
-        img += w * hom[:, :2] / hom[:, 2:3]
-    W, Hh = d.clip["width"], d.clip["height"]
+    img = _to_image(d, i, world)
     out = []
     for n, (x, y), wp in zip(names, img, world):
-        if np.isfinite(x) and np.isfinite(y) and -0.02 * W <= x <= 1.02 * W and -0.02 * Hh <= y <= 1.02 * Hh:
+        if inside(x, y):
             out.append({"name": n, "img": [round(float(x), 1), round(float(y), 1)], "pitch": wp.tolist()})
+    for n, (a, b) in pitch.LINES.items():
+        s = np.linspace(0, 1, 41)[:, None]
+        pts = _to_image(d, i, (1 - s) * np.array(a) + s * np.array(b))
+        ok = np.flatnonzero(inside(pts[:, 0], pts[:, 1]))
+        if len(ok) < 4:
+            continue
+        for k in (ok[len(ok) // 4], ok[(3 * len(ok)) // 4]):
+            out.append({"name": n, "img": [round(float(pts[k, 0]), 1), round(float(pts[k, 1]), 1)],
+                        "line": [list(a), list(b)]})
     return out
 
 

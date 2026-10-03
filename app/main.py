@@ -16,7 +16,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import analytics, clips as clip_export, config, pitch, render
-from .calibration import fit_homography
+from .calibration import fit_calibration
 from .pipeline import Worker, probe, read_frame
 from .storage import Store, clip_dir
 
@@ -61,7 +61,8 @@ def _update(table: str, id_: int, data: dict, allowed: set[str]) -> dict:
 @app.get("/api/pitch")
 def get_pitch():
     return {"length": pitch.LENGTH, "width": pitch.WIDTH,
-            "landmarks": [{"name": k, "x": v[0], "y": v[1]} for k, v in pitch.LANDMARKS.items()]}
+            "landmarks": [{"name": k, "x": v[0], "y": v[1]} for k, v in pitch.LANDMARKS.items()],
+            "lines": [{"name": k, "from": list(a), "to": list(b)} for k, (a, b) in pitch.LINES.items()]}
 
 
 # --- wedstrijden -------------------------------------------------------------------------
@@ -239,10 +240,8 @@ def get_keyframes(clip_id: int):
 
 
 def _calib_error(points: list[dict]) -> float | None:
-    if len(points) < 4:
-        return None
     try:
-        return round(fit_homography([p["img"] for p in points], [p["pitch"] for p in points])[1], 2)
+        return round(fit_calibration(points)[1], 2)
     except ValueError:
         return None
 
@@ -252,10 +251,8 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
     """data: {t, points: [{name, img: [x, y], pitch: [x, y]}], id?}"""
     _get("clips", clip_id)
     points = data.get("points") or []
-    if len(points) < 4:
-        raise HTTPException(400, "Minstens 4 punten nodig")
     try:
-        _, err = fit_homography([p["img"] for p in points], [p["pitch"] for p in points])
+        _, err = fit_calibration(points)
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     data["t"] = _snap_time(clip_id, float(data["t"]))

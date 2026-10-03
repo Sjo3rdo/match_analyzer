@@ -14,20 +14,48 @@ TEAM_OTHER = 2
 TEAM_UNKNOWN = -1
 
 
+def _surroundings(frame: np.ndarray, x1: int, y1: int, x2: int, y2: int) -> np.ndarray:
+    """Pixels rondom de speler: links en rechts op romphoogte, en de grond onder de voeten."""
+    H, W = frame.shape[:2]
+    h, w = y2 - y1, x2 - x1
+    r0, r1 = y1 + int(0.15 * h), y1 + int(0.5 * h)
+    pad = max(3, int(0.6 * w))
+    parts = [frame[max(0, r0):r1, max(0, x1 - pad):max(0, x1 - 2)],
+             frame[max(0, r0):r1, min(W, x2 + 2):min(W, x2 + pad)],
+             frame[min(H, y2 + 1):min(H, y2 + max(3, int(0.2 * h))), max(0, x1 - pad // 2):min(W, x2 + pad // 2)]]
+    pix = [p.reshape(-1, 3) for p in parts if p.size]
+    return np.vstack(pix) if pix else np.zeros((0, 3), np.uint8)
+
+
 def shirt_color(frame: np.ndarray, box: np.ndarray) -> np.ndarray | None:
-    """Mediaankleur (Lab) van de romp, of None als er te weinig bruikbare pixels zijn."""
+    """Mediaankleur (Lab) van het shirt, of None als er te weinig bruikbare pixels zijn.
+
+    We houden alleen rompixels over die duidelijk afwijken van de directe omgeving van de
+    speler (gras, bomen, hek, lucht). Een vaste "groen = gras"-regel werkt niet: dan
+    verdwijnen groene shirts, en gele shirts lijken soms sprekend op zonbeschenen gras.
+    """
     x1, y1, x2, y2 = [int(v) for v in box]
     h, w = y2 - y1, x2 - x1
     if h < 20 or w < 8:
         return None
-    crop = frame[max(0, y1 + int(0.15 * h)):y1 + int(0.5 * h),
-                 max(0, x1 + int(0.2 * w)):x2 - int(0.2 * w)]
+    crop = frame[max(0, y1 + int(0.15 * h)):max(0, y1 + int(0.5 * h)),
+                 max(0, x1 + int(0.15 * w)):max(0, x2 - int(0.15 * w))]
     if crop.size == 0:
         return None
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV).reshape(-1, 3)
-    grass = (hsv[:, 0] > 30) & (hsv[:, 0] < 90) & (hsv[:, 1] > 60)
-    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).reshape(-1, 3)[~grass]
-    if len(lab) < 15:
+    n_px = crop.shape[0] * crop.shape[1]
+    if n_px > 160:  # grote (dichtbije) spelers: verkleinen, dat scheelt veel rekenwerk
+        f = np.sqrt(160 / n_px)
+        crop = cv2.resize(crop, None, fx=f, fy=f, interpolation=cv2.INTER_AREA)
+    lab = cv2.cvtColor(crop, cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float32)
+    around = _surroundings(frame, x1, y1, x2, y2)
+    if len(around) >= 10:
+        if len(around) > 150:
+            around = around[np.linspace(0, len(around) - 1, 150).astype(int)]
+        bg = cv2.cvtColor(around.reshape(-1, 1, 3), cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float32)
+        wts = np.array([0.5, 1.0, 1.0], np.float32)  # helderheid telt minder (schaduw/zon)
+        d2 = (((lab[:, None, :] - bg[None]) * wts) ** 2).sum(-1).min(axis=1)
+        lab = lab[d2 > 81]  # afstand > 9
+    if len(lab) < max(8, 0.1 * crop.shape[0] * crop.shape[1]):
         return None
     return np.median(lab, axis=0).astype(np.float32)
 
@@ -60,8 +88,16 @@ def kmeans(x: np.ndarray, k: int, weights: np.ndarray | None = None, iters: int 
     return labels, c
 
 
+_W = np.array([0.5, 1.0, 1.0])  # Lab-weging: helderheid telt minder (zon/schaduw)
+
+
 def assign_teams(colors: np.ndarray, n_frames: np.ndarray) -> np.ndarray:
-    """Teamlabel per track: 0, 1 of TEAM_OTHER."""
+    """Teamlabel per track: 0, 1 of TEAM_OTHER.
+
+    k-means met meer groepen dan nodig (teams, scheidsrechter, keepers, publiek). De twee
+    groepen met de meeste speeltijd zijn de teams; een track hoort bij het dichtstbijzijnde
+    team als zijn kleur daar duidelijk genoeg op lijkt, anders is hij 'overig'.
+    """
     colors = np.asarray(colors, dtype=np.float64)
     n = len(colors)
     if n == 0:
@@ -69,14 +105,23 @@ def assign_teams(colors: np.ndarray, n_frames: np.ndarray) -> np.ndarray:
     if n < 3:
         return np.zeros(n, dtype=int)
     w = np.asarray(n_frames, dtype=np.float64)
-    best, best_cost = None, np.inf
+    x = colors * _W
+    k = min(5, n)
+    best, best_cost, best_c = None, np.inf, None
     for seed in range(10):  # meerdere starts: k-means kan in een slecht lokaal optimum belanden
-        labels, centers = kmeans(colors, 3, weights=w, seed=seed)
-        cost = float((w * ((colors - centers[labels]) ** 2).sum(1)).sum())
+        labels, centers = kmeans(x, k, weights=w, seed=seed)
+        cost = float((w * ((x - centers[labels]) ** 2).sum(1)).sum())
         if cost < best_cost:
-            best, best_cost = labels, cost
-    labels = best
-    size = np.array([np.asarray(n_frames)[labels == j].sum() for j in range(3)])
-    order = np.argsort(-size)  # grootste twee groepen = teams
-    mapping = {order[0]: 0, order[1]: 1, order[2]: TEAM_OTHER}
-    return np.array([mapping[l] for l in labels])
+            best, best_cost, best_c = labels, cost, centers
+    size = np.array([w[best == j].sum() for j in range(k)])
+    t0, t1 = np.argsort(-size)[:2]
+    team_c = best_c[[t0, t1]]
+    sep = np.linalg.norm(team_c[0] - team_c[1])
+    # overige groepen: bij een team als ze er duidelijk op lijken (bijv. hetzelfde shirt in de
+    # schaduw), anders scheidsrechter/keeper/publiek
+    mapping = {}
+    for j in range(k):
+        dj = np.linalg.norm(best_c[j] - team_c, axis=1)
+        mapping[j] = int(np.argmin(dj)) if dj.min() < 0.45 * sep else TEAM_OTHER
+    mapping[t0], mapping[t1] = 0, 1
+    return np.array([mapping[l] for l in best])
