@@ -54,6 +54,12 @@ def probe(path: Path) -> dict:
             "height": int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)), "duration": n / fps if fps else 0}
     cap.release()
     try:
+        from .geo import read_video_metadata
+
+        info.update(read_video_metadata(path, ffmpeg_exe()))
+    except Exception:  # noqa: BLE001  (geen GPS is geen probleem)
+        pass
+    try:
         import imageio_ffmpeg
 
         gen = imageio_ffmpeg.read_frames(str(path))

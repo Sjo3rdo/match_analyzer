@@ -66,6 +66,14 @@ Zie het als een puzzel in drie lagen: eerst *zien* (wie staat waar in beeld), da
      doellijn, en daarna op die lijn in de veldtekening (hij kleurt rood). Een punt telt 2, een lijn
      telt mee met hoogstens 2 punten, en je hebt er samen 8 nodig, bijvoorbeeld 1 punt en 3 lijnen.
      Let op: precies 2 punten en 2 lijnen ligt wiskundig niet vast; voeg dan nog iets toe.
+   - **Vertel de app waar je stond.** Klik bij **📍 Waar stond je bij het filmen?** op de veldtekening
+     waar je ongeveer stond, en kies je hoogte (staand, heuvel of tribune). Dan rekent de app met een
+     cameramodel en is **1 punt + 1 lijn** al genoeg, bijvoorbeeld een doelpaal en de zijlijn voor je.
+     Nog beter is 2 punten + 1 lijn of 1 punt + 2 lijnen; dan rekent de app ook uit of je hebt ingezoomd.
+   - **Zoek via GPS.** iPhone-video's bevatten meestal de GPS-positie. De knop **📡 Zoek via GPS**
+     zoekt het voetbalveld op in OpenStreetMap en zet je positie automatisch op de tekening. Daarvoor
+     wordt alleen de coördinaat naar OpenStreetMap gestuurd, en alleen als jij op de knop klikt. De
+     iPhone slaat de positie op ongeveer 5 à 10 m nauwkeurig op; klik je plek gerust preciezer aan.
    - Omdat je uit de hand filmt, voeg je elke 30 tot 60 seconden een *sleutelframe* toe, en ook na
      elke flinke zwenk of zoom. Tussen de sleutelframes volgt de app de camerabeweging zelf, zoals
      een lijm die de plattegrond op het beeld vasthoudt. Na de analyse voorspelt de app de punten

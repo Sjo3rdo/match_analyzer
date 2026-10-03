@@ -127,6 +127,11 @@ class Store:
         cols = {r["name"] for r in self.all("PRAGMA table_info(clips)")}
         if "analysis_version" not in cols:
             self.run("ALTER TABLE clips ADD COLUMN analysis_version INTEGER DEFAULT 0")
+        # GPS uit de video en de (geschatte) camerapositie op het veld
+        for col, typ in (("gps_lat", "REAL"), ("gps_lon", "REAL"), ("gps_acc", "REAL"), ("device", "TEXT"),
+                         ("cam_x", "REAL"), ("cam_y", "REAL"), ("cam_h", "REAL"), ("cam_source", "TEXT")):
+            if col not in cols:
+                self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
         # Oude 'markers' (één tijdstip) worden clips (begin + eind), zoals in de Veo-editor
         with self.tx() as c:
             for m in c.execute("SELECT * FROM markers").fetchall():

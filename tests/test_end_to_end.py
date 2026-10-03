@@ -1,5 +1,9 @@
 """Volledige keten met een synthetische video en een nep-detector (geen YOLO nodig)."""
 import importlib
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
 import os
 
 import cv2
@@ -167,3 +171,41 @@ def test_split_video(env):
     assert abs(parts[0]["duration"] - 2.0) < 0.6 and abs(parts[1]["duration"] - 2.5) < 0.6
     clips = client.get(f"/api/matches/{m['id']}").json()["clips"]
     assert [c["filename"] for c in clips] == ["lang - 1e helft.mp4", "lang - 2e helft.mp4"]
+
+
+def test_camera_position_via_gps_and_minimal_calibration(env, monkeypatch):
+    import math
+    from test_geo import _pitch_polygon
+    from app import geo
+    from app.calibration import apply_h, camera_homography, default_focal
+    main, client, tmp = env
+    video = tmp / "zijlijn.mp4"
+    make_video(video)
+    m = client.post("/api/matches", json={"name": "GPS"}).json()
+    with video.open("rb") as f:
+        clip = client.post(f"/api/matches/{m['id']}/clips", files=[("files", ("zijlijn.mp4", f, "video/mp4"))]).json()[0]
+    assert client.post(f"/api/clips/{clip['id']}/camera/gps").status_code == 400  # geen GPS in deze video
+
+    # GPS toevoegen alsof de iPhone het had opgeslagen: 6 m buiten de zijlijn, 10 m rechts van het midden
+    lat0, lon0 = 53.1425, 6.3756
+    poly, u, v = _pitch_polygon(lat0, lon0, 25, length=105, width=68)
+    cam = 10 * u + 40 * v
+    r = 6371000.0
+    main.store.run("UPDATE clips SET gps_lat = ?, gps_lon = ?, gps_acc = 2 WHERE id = ?",
+                   (lat0 + math.degrees(cam[1] / r), lon0 + math.degrees(cam[0] / (r * math.cos(math.radians(lat0)))), clip["id"]))
+    monkeypatch.setattr(geo, "query_pitches", lambda lat, lon, **kw: [poly])
+    pos = client.post(f"/api/clips/{clip['id']}/camera/gps").json()
+    assert abs(pos["y"] - 74) < 0.5 and abs(abs(pos["x"] - 52.5) - 10) < 0.5
+    client.patch(f"/api/clips/{clip['id']}/camera", json={"h": 1.7})
+
+    # beeld van een camera op die plek: 1 punt + 1 lijn moet nu genoeg zijn
+    c = client.get(f"/api/matches/{m['id']}").json()["clips"][0]
+    true = np.array([c["cam_x"], c["cam_y"], 1.7, math.radians(-60), math.radians(4), 0.0, math.log(default_focal(c["width"]))])
+    H = camera_homography(true, (c["width"], c["height"]))
+    pts = [{"name": "Strafschopstip rechts", "img": apply_h(H, np.array([[94.0, 34.0]]))[0].tolist(), "pitch": [94.0, 34.0]}]
+    for s in (0.6, 0.8):
+        w = np.array([s * 105, 68.0])
+        pts.append({"name": "Zijlijn onder", "img": apply_h(H, w[None])[0].tolist(), "line": [[0, 68], [105, 68]]})
+    prev = client.post(f"/api/clips/{clip['id']}/calibrate-preview", json={"points": pts}).json()
+    assert prev["ok"] and prev["error_m"] < 0.5 and prev["camera"]["h"] > 1
+    assert client.post(f"/api/clips/{clip['id']}/keyframes", json={"t": 0, "points": pts}).status_code == 200

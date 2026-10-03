@@ -89,3 +89,59 @@ def test_calibration_rejects_too_little_information():
     pts = [_line_item(H, LINES["Zijlijn onder"], f) for f in (0.1, 0.3, 0.5, 0.7, 0.9)]  # 5 punten, één lijn
     with pytest.raises(ValueError):
         fit_calibration(pts)
+
+
+def _sideline_camera(zoom=1.0):
+    from app.calibration import camera_homography, default_focal
+    import math
+    size = (1920, 1080)
+    true = np.array([60.0, 74.0, 1.7, math.radians(-50), math.radians(4), math.radians(1.0),
+                     math.log(default_focal(1920) * zoom)])
+    return size, true, camera_homography(true, size)
+
+
+def _items(H, spec):
+    from app.pitch import LINES
+    out = []
+    for kind, val in spec:
+        if kind == "pt":
+            out.append({"img": apply_h(H, np.array([val], float))[0].tolist(), "pitch": list(val)})
+        else:
+            name, s = val
+            a, b = np.array(LINES[name][0]), np.array(LINES[name][1])
+            out.append({"img": apply_h(H, ((1 - s) * a + s * b)[None])[0].tolist(), "line": [list(a), list(b)]})
+    return out
+
+
+def _probe_error(H, K):
+    probe = np.array([[x, y] for x in range(62, 106, 6) for y in range(17, 68, 6)], float)
+    img = apply_h(H, probe)
+    vis = (img[:, 0] > 0) & (img[:, 0] < 1920) & (img[:, 1] > 0) & (img[:, 1] < 1080)
+    return np.linalg.norm(apply_h(K, img[vis]) - probe[vis], axis=1)
+
+
+PRIOR = {"x": 63.0, "y": 77.0, "h": 1.6, "sigma_pos": 5.0, "width": 1920, "height": 1080}
+
+
+def test_camera_fit_point_and_line_when_not_zoomed():
+    """Zijlijn, ooghoogte, positie 4 m verkeerd geschat, niet ingezoomd: 1 punt + 1 lijn is genoeg."""
+    import pytest
+    from app.calibration import default_focal, fit_calibration
+    size, true, H = _sideline_camera()
+    pts = _items(H, [("pt", (94.0, 34.0)), ("line", ("Zijlijn onder", 0.55)), ("line", ("Zijlijn onder", 0.85))])
+    K, err = fit_calibration(pts, camera={**PRIOR, "f": default_focal(1920)})
+    e = _probe_error(H, K)
+    assert np.median(e) < 1.5 and e.max() < 5  # verste punten (±65 m op ooghoogte) zijn het minst nauwkeurig
+    with pytest.raises(ValueError):  # zonder positie lukt dit niet
+        fit_calibration(pts)
+
+
+def test_camera_fit_estimates_zoom_with_more_clicks():
+    """Ingezoomd (1,1x): met 2 punten + 1 lijn rekent de app de zoom zelf uit."""
+    from app.calibration import default_focal, fit_calibration
+    size, true, H = _sideline_camera(zoom=1.1)
+    pts = _items(H, [("pt", (94.0, 34.0)), ("pt", (105.0, 37.66)),
+                     ("line", ("Zijlijn onder", 0.55)), ("line", ("Zijlijn onder", 0.85))])
+    K, err = fit_calibration(pts, camera={**PRIOR, "f": default_focal(1920)})
+    e = _probe_error(H, K)
+    assert np.median(e) < 1.2 and e.max() < 5
