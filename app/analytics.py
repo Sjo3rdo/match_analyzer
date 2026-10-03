@@ -638,3 +638,130 @@ def clip_boxes(store: Store, clip_id: int, t0: float, t1: float) -> list[dict]:
                     "entity": d.entity.get(tid), "team": d.team.get(tid, -1),
                     "valid": tid in d.valid_tracks})
     return out
+
+
+# --- koppel-assistent ----------------------------------------------------------------------
+#
+# Metafoor: een speler laat een spoor achter dat steeds even onderbroken wordt (botsing, camera
+# draait weg). Heb je één stuk spoor herkend, dan zoeken we stukken die er logisch op aansluiten:
+# ze zijn niet tegelijk in beeld, beginnen ongeveer waar het vorige stuk ophield (rekening houdend
+# met hoe ver iemand in die tijd kan rennen) en hebben hetzelfde shirt. Een stuk dat beter aansluit
+# op een teamgenoot die al gekoppeld is, zakt in de lijst.
+
+def _track_summary(d: ClipData, tid: int) -> dict | None:
+    rows = d.rows_of(tid)
+    if len(rows) == 0:
+        return None
+    tt = d.t[d.idx[rows]]
+    feet = np.stack([(d.boxes[rows, 0] + d.boxes[rows, 2]) / 2, d.boxes[rows, 3]], 1)
+    xy = d.xy[rows]
+    ok = ~np.isnan(xy).any(axis=1)
+    return {"tid": tid, "t0": float(tt[0]), "t1": float(tt[-1]), "i0": int(d.idx[rows[0]]), "i1": int(d.idx[rows[-1]]),
+            "f0": feet[0], "f1": feet[-1], "h0": float(np.median(d.boxes[rows[:5], 3] - d.boxes[rows[:5], 1])),
+            "h1": float(np.median(d.boxes[rows[-5:], 3] - d.boxes[rows[-5:], 1])),
+            "p0": xy[ok][0] if ok.any() else None, "p1": xy[ok][-1] if ok.any() else None, "n": len(rows)}
+
+
+def _continuity(d: ClipData, a: dict, b: dict) -> tuple[float, float, float | None]:
+    """Hoe logisch b op a volgt (a eindigt vóór b begint): (kans 0..1, gat in s, afstand in m of None)."""
+    gap = b["t0"] - a["t1"]
+    if gap < -0.3:
+        return 0.0, gap, None
+    gap = max(gap, 0.0)
+    if d.calibrated and a["p1"] is not None and b["p0"] is not None:
+        dist = float(np.linalg.norm(b["p0"] - a["p1"]))
+        reach = 2.0 + 6.0 * gap  # wat een speler in die tijd ongeveer kan afleggen (plus meetfout)
+        p = float(np.exp(-0.5 * (max(0.0, dist - 0.5 * reach) / (0.5 * reach)) ** 2))
+    else:
+        # zonder kalibratie: in het beeld, met de camerabeweging eruit, in lichaamslengtes
+        A = d.camera.A
+        M = np.linalg.inv(A[b["i0"]]) @ A[a["i1"]]
+        q = M @ np.array([a["f1"][0], a["f1"][1], 1.0])
+        q = q[:2] / q[2] if abs(q[2]) > 1e-9 else np.array([np.inf, np.inf])
+        h = max(1.0, 0.5 * (a["h1"] + b["h0"]))
+        dist = None
+        moved = float(np.linalg.norm(q - b["f0"])) / h
+        reach = 1.0 + 3.5 * gap
+        p = float(np.exp(-0.5 * (max(0.0, moved - 0.5 * reach) / (0.5 * reach)) ** 2))
+        ratio = b["h0"] / max(1.0, a["h1"])
+        if gap < 3 and not 0.6 < ratio < 1.6:  # ineens veel groter of kleiner: iemand anders
+            p *= 0.3
+    return p * float(np.exp(-gap / 40.0)), gap, dist
+
+
+def suggest_tracks(store: Store, player_id: int, clip_id: int | None = None, limit: int = 8) -> list[dict]:
+    """Tracks die waarschijnlijk ook bij deze speler horen, best passend eerst."""
+    from .teams import color_distance, hex_to_lab
+
+    p = store.one("SELECT * FROM players WHERE id = ?", (player_id,))
+    if p is None:
+        return []
+    linked = store.all("SELECT t.* FROM tracks t JOIN clips c ON c.id = t.clip_id WHERE c.match_id = ? "
+                       "AND t.player_id = ?", (p["match_id"], player_id))
+    cols = [(hex_to_lab(r["color"]), r["n_frames"] or 1) for r in linked]
+    cols = [(c, w) for c, w in cols if c is not None]
+    my_color = np.average([c for c, _ in cols], axis=0, weights=[w for _, w in cols]) if cols else None
+    if clip_id is not None:
+        clip_ids = [clip_id]
+    else:
+        clip_ids = sorted({r["clip_id"] for r in linked}) or [
+            r["id"] for r in store.all("SELECT id FROM clips WHERE match_id = ? AND status = 'klaar'", (p["match_id"],))]
+    out = []
+    for cid in clip_ids:
+        d = load_clip(store, cid)
+        if d is None:
+            continue
+        mine = [s for s in (_track_summary(d, r["track_id"]) for r in linked if r["clip_id"] == cid) if s]
+        others: dict[int, list[dict]] = defaultdict(list)  # al gekoppelde teamgenoten
+        for tid, tr in d.tracks.items():
+            if tr["player_id"] and tr["player_id"] != player_id:
+                s = _track_summary(d, tid)
+                if s:
+                    others[tr["player_id"]].append(s)
+        for tid, tr in d.tracks.items():
+            if tr["player_id"] or tid not in d.valid_tracks or (tr["n_frames"] or 0) < 5:
+                continue
+            team = d.team.get(tid, -1)
+            if team not in (p["team"], -1):
+                continue
+            c = _track_summary(d, tid)
+            if c is None:
+                continue
+            # tegelijk in beeld met een stuk van deze speler: dat kan hij niet zijn
+            if any(min(c["t1"], m["t1"]) - max(c["t0"], m["t0"]) > 0.3 for m in mine):
+                continue
+
+            def cont(segs):
+                best = (0.0, None, None)
+                for m in segs:
+                    for a, b in ((m, c), (c, m)):
+                        if a["t1"] <= b["t0"] + 0.3:
+                            pr, gap, dist = _continuity(d, a, b)
+                            if pr > best[0]:
+                                best = (pr, gap, dist)
+                return best
+            pc, gap, dist = cont(mine) if mine else (0.3, None, None)
+            rival = max((cont(segs)[0] for segs in others.values()), default=0.0)
+            score = 0.3 + 0.7 * pc
+            if rival > pc + 0.2:
+                score *= 0.5
+            col = hex_to_lab(tr["color"])
+            de = color_distance(col, my_color) if col is not None and my_color is not None else None
+            if de is not None:
+                score *= 0.15 + 0.85 * float(np.exp(-0.5 * (de / 12.0) ** 2))
+            if tr.get("jersey_guess") and p.get("number") and (tr.get("jersey_conf") or 0) >= 0.4:
+                score *= 1.4 if str(tr["jersey_guess"]) == str(p["number"]).strip() else 0.3
+            reason = []
+            if gap is not None:
+                reason.append(f"sluit aan {gap:.1f} s {'later' if c['t0'] >= max(m['t1'] for m in mine) - 0.3 else 'eerder'}"
+                              .replace(".", ","))
+                if dist is not None:
+                    reason.append(f"{dist:.0f} m verderop")
+            if de is not None:
+                reason.append("zelfde shirt" if de < 8 else "shirt lijkt erop" if de < 16 else "ander shirt?")
+            if rival > pc + 0.2:
+                reason.append("past ook bij een teamgenoot")
+            out.append({"clip_id": cid, "track_id": tid, "t_start": round(c["t0"], 2), "t_end": round(c["t1"], 2),
+                        "n_frames": c["n"], "score": round(min(1.0, score), 3), "reason": ", ".join(reason)})
+    out.sort(key=lambda r: -r["score"])
+    return out[:limit]

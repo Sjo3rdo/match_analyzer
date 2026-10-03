@@ -767,6 +767,13 @@ def delete_player(player_id: int):
     return {"ok": True}
 
 
+@app.get("/api/players/{player_id}/suggestions")
+def player_suggestions(player_id: int, clip_id: int | None = None, limit: int = 8):
+    """Koppel-assistent: tracks die waarschijnlijk ook bij deze speler horen."""
+    _get("players", player_id)
+    return analytics.suggest_tracks(store, player_id, clip_id, min(30, max(1, limit)))
+
+
 @app.post("/api/matches/{match_id}/auto-assign")
 def auto_assign(match_id: int, data: dict = Body(default={})):
     """Koppel tracks aan spelers op basis van gelezen rugnummer + team (alleen nog niet gekoppelde)."""
@@ -792,6 +799,22 @@ def auto_assign(match_id: int, data: dict = Body(default={})):
 def match_stats(match_id: int):
     _get("matches", match_id)
     return analytics.match_stats(store, match_id)
+
+
+@app.get("/api/matches/{match_id}/highlights")
+def match_highlights(match_id: int):
+    """Mogelijke hoogtepunten uit het geluid (gejuich, fluitsignalen), per video."""
+    from . import audio
+    from .pipeline import ffmpeg_exe
+
+    out = []
+    for c in store.all("SELECT * FROM clips WHERE match_id = ? AND status = 'klaar' ORDER BY order_idx, id", (match_id,)):
+        try:
+            for e in audio.clip_events(c, clip_dir(c["id"]), ffmpeg_exe()):
+                out.append({**e, "clip_id": c["id"]})
+        except Exception:  # noqa: BLE001
+            logging.exception("Geluid van clip %s", c["id"])
+    return out
 
 
 @app.get("/api/clips/{clip_id}/positions")

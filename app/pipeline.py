@@ -334,6 +334,14 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
     _stitch(store, clip_id, stats, inter, eff_fps)
     store.set_clip_status(clip_id, "analyse", 0.96, "Teams en rugnummers bepalen")
     _finish_tracks(store, clip_id, stats, out_dir)
+    store.set_clip_status(clip_id, "analyse", 0.98, "Geluid beluisteren (gejuich, fluitsignalen)")
+    try:
+        from . import audio
+
+        (out_dir / "audio_events.json").unlink(missing_ok=True)
+        audio.clip_events(clip, out_dir, ffmpeg_exe())
+    except Exception:  # noqa: BLE001  (geen geluid of iets vreemds: geen hoogtepunten, wel een analyse)
+        log.warning("Geluid van clip %s niet geanalyseerd\n%s", clip_id, traceback.format_exc())
     store.run("UPDATE clips SET analysis_version = ? WHERE id = ?", (ANALYSIS_VERSION, clip_id))
     store.set_clip_status(clip_id, "klaar", 1.0, f"{idx} frames geanalyseerd")
 

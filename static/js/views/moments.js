@@ -4,7 +4,7 @@ import { api, h, toast, fmtTime, matchMinute, teamName, playerLabel, labelList, 
 
 const COLORS = ['#ffd600', '#ff3b30', '#ffffff', '#34c759', '#0a84ff'];
 const TOOLS = [['arrow', '➚ Pijl'], ['line', '╱ Lijn'], ['circle', '◯ Cirkel'], ['free', '✎ Vrij'], ['text', 'T Tekst']];
-const KIND = { sprint: '⚡ Sprint', pass: '➡️ Pass', balverlies: '✖️ Balverlies' };
+const KIND = { sprint: '⚡ Sprint', pass: '➡️ Pass', balverlies: '✖️ Balverlies', gejuich: '📣 Gejuich', fluitsignaal: '🔔 Fluitsignaal' };
 
 export async function render(root, ctx) {
   const { match } = ctx;
@@ -80,7 +80,12 @@ export async function render(root, ctx) {
   }
 
   async function loadSuggestions() {
-    try { events = (await api(`/matches/${match.id}/stats`)).events; } catch { events = []; }
+    const [st, hl] = await Promise.all([api(`/matches/${match.id}/stats`).catch(() => ({ events: [] })),
+      api(`/matches/${match.id}/highlights`).catch(() => [])]);
+    // Gejuich bovenaan (sterkste eerst): dat zijn de kansen en goals; daarna de rest op tijd
+    const loud = hl.filter(e => e.kind === 'gejuich').sort((a, b) => b.score - a.score);
+    events = [...loud, ...[...st.events, ...hl.filter(e => e.kind !== 'gejuich')]
+      .sort((a, b) => a.clip_id - b.clip_id || a.t - b.t)];
     drawSuggestions();
   }
   function drawSuggestions() {
@@ -90,10 +95,19 @@ export async function render(root, ctx) {
     const label = ent => (String(ent || '').startsWith('p') ? playerLabel(playerById.get(Number(ent.slice(1)))) : '') || 'onbekend';
     suggestBox.replaceChildren(...(ev.length ? ev.map(e => h('div', { className: 'list-item' },
       h('b', {}, matchMinute(clipById.get(e.clip_id), e.t)), h('span', {}, KIND[e.kind] || e.kind),
-      h('span', { style: { flex: 1 }, className: 'small' }, label(e.entity), e.to ? ` → ${label(e.to)}` : '', e.value ? ` (${e.value} km/u)` : ''),
+      e.kind === 'gejuich' || e.kind === 'fluitsignaal'
+        ? h('span', { style: { flex: 1 }, className: 'small muted' }, e.kind === 'gejuich' ? `uit het geluid, sterkte ${Math.round(e.score)}` : 'uit het geluid')
+        : h('span', { style: { flex: 1 }, className: 'small' }, label(e.entity), e.to ? ` → ${label(e.to)}` : '', e.value ? ` (${e.value} km/u)` : ''),
       h('button', { onclick: () => fromEvent(e) }, '+ clip'))) : [h('div', { className: 'muted small' }, 'Geen suggesties (analyseer en kalibreer eerst, en koppel spelers).')]));
   }
   async function fromEvent(e) {
+    if (e.kind === 'gejuich' || e.kind === 'fluitsignaal') {
+      // het moment zelf zit vóór het gejuich of het fluitsignaal
+      const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: e.clip_id, start: Math.max(0, e.t - 10),
+        end: e.t_end + 3, label: e.kind === 'gejuich' ? 'Kans' : 'Fluitsignaal', players: [] } });
+      moments.push(m); select(m); toast('Clip gemaakt: kijk of het klopt en pas het label aan');
+      return;
+    }
     const pid = String(e.entity || '').startsWith('p') ? Number(e.entity.slice(1)) : null;
     const players = [pid, String(e.to || '').startsWith('p') ? Number(e.to.slice(1)) : null].filter(Boolean);
     const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: e.clip_id, start: Math.max(0, e.t - 4),

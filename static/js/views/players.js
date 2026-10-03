@@ -8,6 +8,8 @@ export async function render(root, ctx) {
 
   const rosterPanel = h('div', { className: 'grid-cols' });
   const trackPanel = h('div', { className: 'panel' });
+  const assistBox = h('div');
+  let assistFor = null, hidden = new Set();
   root.append(
     h('div', { className: 'hint' },
       'De app volgt iedereen op het veld als losse "tracks" en deelt ze op shirtkleur in teams in. Een speler krijgt meestal ' +
@@ -71,7 +73,8 @@ export async function render(root, ctx) {
           h('td', { style: { width: '60px' } }, h('input', { value: p.number || '', style: { width: '56px' },
             onchange: e => api(`/players/${p.id}`, { method: 'PATCH', json: { number: e.target.value || null } }) })),
           h('td', {}, h('input', { value: p.name, onchange: e => api(`/players/${p.id}`, { method: 'PATCH', json: { name: e.target.value } }) })),
-          h('td', {}, h('button', { className: 'danger', onclick: async () => {
+          h('td', {}, h('button', { title: 'Koppel-assistent: zoek tracks van deze speler', onclick: () => openAssist(p.id) }, '🔍'), ' ',
+            h('button', { className: 'danger', onclick: async () => {
             await api(`/players/${p.id}`, { method: 'DELETE' });
             players = players.filter(q => q.id !== p.id); drawRoster(); drawTracks();
           } }, '×'))))),
@@ -79,15 +82,16 @@ export async function render(root, ctx) {
     }));
   }
 
-  let clipId = clips[0]?.id, onlyOpen = true, onlyPitch = true, limit = 48;
+  let clipId = clips.find(c => c.id === Number(ctx.params.get('clip')))?.id || clips[0]?.id;
+  let onlyOpen = true, onlyPitch = true, limit = 48;
   async function drawTracks() {
-    trackPanel.replaceChildren(h('h2', {}, 'Tracks koppelen'));
+    trackPanel.replaceChildren(h('h2', {}, 'Tracks koppelen'), assistBox);
     if (!clips.length) { trackPanel.append(h('div', { className: 'empty' }, 'Nog geen geanalyseerde video\'s.')); return; }
     const tracks = await api(`/clips/${clipId}/tracks`);
     const shown = tracks.filter(t => (!onlyOpen || !t.player_id) && (!onlyPitch || t.valid));
     const clip = clips.find(c => c.id === clipId);
     trackPanel.append(h('div', { className: 'row', style: { marginBottom: '12px' } },
-      'Video:', h('select', { onchange: e => { clipId = Number(e.target.value); limit = 48; drawTracks(); } },
+      'Video:', h('select', { onchange: e => { clipId = Number(e.target.value); limit = 48; drawTracks(); if (assistFor) openAssist(assistFor); } },
         clips.map(c => h('option', { value: c.id, selected: c.id === clipId }, c.filename))),
       h('label', {}, h('input', { type: 'checkbox', checked: onlyOpen, onchange: e => { onlyOpen = e.target.checked; drawTracks(); } }), ' alleen nog niet gekoppeld'),
       h('label', {}, h('input', { type: 'checkbox', checked: onlyPitch, onchange: e => { onlyPitch = e.target.checked; drawTracks(); } }), ' alleen op het veld'),
@@ -125,11 +129,47 @@ export async function render(root, ctx) {
         const pid = e.target.value ? Number(e.target.value) : null;
         await patch({ player_id: pid }); t.player_id = pid;
         if (pid && onlyOpen) e.target.closest('.card').remove();
+        if (pid) openAssist(pid);
       } },
         h('option', { value: '' }, '– speler kiezen –'),
         teamPlayers.map(p => h('option', { value: p.id, selected: t.player_id === p.id }, `${playerLabel(p)} (${teamName(match, p.team)})`))));
   }
 
+  // --- koppel-assistent ---------------------------------------------------------------------
+  // Na het koppelen van één track stelt de app tracks voor die er logisch op aansluiten:
+  // niet tegelijk in beeld, beginnend waar het vorige stuk ophield, met hetzelfde shirt.
+  async function openAssist(pid) {
+    if (assistFor !== pid) hidden = new Set();
+    assistFor = pid;
+    const p = players.find(x => x.id === pid);
+    const list = (await api(`/players/${pid}/suggestions?clip_id=${clipId}&limit=8`)).filter(r => !hidden.has(r.track_id));
+    const label = sc => sc >= 0.6 ? ['waarschijnlijk', 'ok'] : sc >= 0.35 ? ['mogelijk', 'busy'] : ['twijfel', ''];
+    assistBox.replaceChildren(h('div', { className: 'hint', style: { marginBottom: '12px' } },
+      h('div', { className: 'row', style: { justifyContent: 'space-between' } },
+        h('b', {}, `🔍 Koppel-assistent: waarschijnlijk ook ${playerLabel(p)}`),
+        h('button', { className: 'small', onclick: () => { assistFor = null; assistBox.replaceChildren(); } }, 'Sluiten')),
+      list.length ? h('div', { className: 'small muted', style: { margin: '4px 0 8px' } },
+        'Klopt het? Klik ✓ om te koppelen; daarna zoekt de app verder vanaf dat stuk. Klik op het plaatje om het in de video te zien.') : null,
+      list.length ? h('div', { className: 'cards' }, list.map(r => {
+        const [txt, cls] = label(r.score);
+        return h('div', { className: 'card' },
+          h('img', { src: `/api/clips/${r.clip_id}/thumb/${r.track_id}`, loading: 'lazy', style: { cursor: 'pointer' },
+            onclick: () => location.hash = `#/match/${match.id}/video?clip=${r.clip_id}&t=${r.t_start}&track=${r.track_id}` }),
+          h('div', { className: 'row small', style: { justifyContent: 'space-between' } },
+            h('span', {}, `#${r.track_id}`), h('span', { className: 'muted' }, `${fmtTime(r.t_start)}–${fmtTime(r.t_end)}`)),
+          h('div', { className: 'small' }, h('span', { className: `badge ${cls}` }, `${txt} ${Math.round(100 * r.score)}%`)),
+          h('div', { className: 'small muted' }, r.reason),
+          h('div', { className: 'row' },
+            h('button', { className: 'primary', onclick: async () => {
+              await api(`/clips/${r.clip_id}/tracks/${r.track_id}`, { method: 'PATCH', json: { player_id: pid } });
+              toast(`Gekoppeld aan ${playerLabel(p)}`); await drawTracks(); openAssist(pid);
+            } }, '✓ Koppel'),
+            h('button', { title: 'Niet deze speler', onclick: () => { hidden.add(r.track_id); openAssist(pid); } }, '✗')));
+      })) : h('div', { className: 'small muted' }, 'Geen goede kandidaten (meer) in deze video. Koppel een volgend stuk met de hand, dan zoekt de app verder.')));
+  }
+
   drawRoster();
   await drawTracks();
+  const assistParam = Number(ctx.params.get('assist'));
+  if (assistParam && players.some(p => p.id === assistParam)) openAssist(assistParam);
 }

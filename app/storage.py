@@ -107,13 +107,6 @@ CREATE TABLE IF NOT EXISTS squad_players (
     name TEXT NOT NULL,
     number TEXT
 );
-CREATE TABLE IF NOT EXISTS audio_events (
-    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
-    kind TEXT NOT NULL,
-    t REAL NOT NULL,
-    t_end REAL NOT NULL,
-    score REAL
-);
 CREATE TABLE IF NOT EXISTS markers (
     id INTEGER PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
