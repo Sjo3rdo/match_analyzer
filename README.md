@@ -12,12 +12,13 @@ Alles draait op je eigen laptop. Er gaat geen video naar internet.
 | Onderdeel | Wat je krijgt |
 |---|---|
 | Spelers volgen | Iedereen op het veld wordt in elk frame gevonden (YOLO) en over de tijd gevolgd. |
-| Teams | Automatisch ingedeeld op shirtkleur. Scheidsrechter en keepers komen bij 'overig'. |
-| Wie is wie | Rugnummers lezen (optioneel), en spelers koppelen door ze in de video aan te klikken. |
+| Teams | Automatisch ingedeeld op shirtkleur, ook in zon en schaduw, en gelijk over alle video's van een wedstrijd. Scheidsrechter, keepers en publiek komen bij 'overig'. |
+| Wie is wie | Rugnummers lezen (optioneel), spelers koppelen door ze in de video aan te klikken, en een koppel-assistent die de rest van het spoor van een speler voorstelt. Selecties bewaar je en neem je over in de volgende wedstrijd. |
 | Per speler | Gelopen afstand, topsnelheid, sprints, minuten, heatmap en gemiddelde positie. |
 | Bal | Balbezit per team, passes, balverlies, passnetwerk. |
 | Minimap | Een 2D-bovenaanzicht dat met de video meeloopt. |
 | Knippen | Een lange video vóór de analyse in delen knippen (1e/2e helft), warming-up en rust eruit. |
+| Hoogtepunten | Suggesties uit de analyse (sprints, passes) en uit het geluid (gejuich, fluitsignalen). |
 | Clips en delen | Clips maken zoals in Veo: begin/eind, label, spelers taggen, opmerking, tekenen op beeld (beeld bevriest), spotlight die een speler volgt, afspeellijst per speler. Export als mp4, reel of zip, en direct delen via AirDrop, WhatsApp, Berichten of Mail. |
 
 ## Installeren en starten (MacBook met Apple Silicon)
@@ -60,8 +61,14 @@ brengt je erheen.
 1. **Video's.** Maak een wedstrijd aan en upload je video's. Dat mogen er meerdere zijn,
    bijvoorbeeld per helft of als de telefoon tussendoor stopte. Geef bij elke video de helft en
    de beginminuut op, en klik op **Analyseer**. De app maakt eerst een afspeelbare kopie en zoekt
-   daarna ongeveer 10 keer per seconde naar spelers en de bal. Op een MacBook (M-chip) duurt dat
-   ongeveer even lang als de video zelf.
+   daarna ongeveer 10 keer per seconde naar spelers en de bal. Je ziet hoe lang het nog duurt.
+   - **Nauwkeurig of Snel.** *Nauwkeurig* vindt ook spelers ver weg en de bal het best. *Snel* is
+     ongeveer twee keer zo snel, maar mist vaker verre spelers en de bal: handig om eerst snel een
+     hele wedstrijd door te nemen.
+   - **Richting ⇄ omdraaien.** In de rust wisselen de teams van kant. Met dit vinkje (standaard aan
+     bij de 2e helft) spiegelt de app die video in de statistieken, zodat heatmaps en teamvorm over
+     de hele wedstrijd kloppen. Ben je in de rust zelf naar de andere kant van het veld gelopen,
+     vink het dan uit.
 
 2. **Kalibratie.** Je camera ziet het veld schuin, en daardoor lijken spelers die verder weg staan
    kleiner en dichter bij elkaar. Met kalibratie leg je als het ware een doorzichtige plattegrond
@@ -80,6 +87,10 @@ brengt je erheen.
      waar je ongeveer stond, en kies je hoogte (staand, heuvel of tribune). Dan rekent de app met een
      cameramodel en is **1 punt + 1 lijn** al genoeg, bijvoorbeeld een doelpaal en de zijlijn voor je.
      Nog beter is 2 punten + 1 lijn of 1 punt + 2 lijnen; dan rekent de app ook uit of je hebt ingezoomd.
+   - **Veldmaten.** De app gaat uit van 105 × 68 m. Amateurvelden zijn vaak kleiner, bijvoorbeeld
+     100 × 64. Vul de echte maten in bij **Veldmaten** (op de pagina Kalibratie); dan kloppen
+     afstanden en posities beter. Het strafschopgebied en de middencirkel zijn altijd even groot.
+     Na **Zoek via GPS** biedt de app aan om de maten uit OpenStreetMap over te nemen.
    - **Zoek via GPS.** iPhone-video's bevatten meestal de GPS-positie. De knop **📡 Zoek via GPS**
      zoekt het voetbalveld op in OpenStreetMap en zet je positie automatisch op de tekening. Daarvoor
      wordt alleen de coördinaat naar OpenStreetMap gestuurd, en alleen als jij op de knop klikt. De
@@ -113,9 +124,21 @@ brengt je erheen.
      niet, zet daar dan zelf een extra sleutelframe.
 
 3. **Spelers.** Toeschouwers, wissels langs de lijn en mensen vlak voor de camera worden zoveel
-   mogelijk weggefilterd: wie de hele tijd op dezelfde plek staat (gemeten tegen de achtergrond,
-   dus los van het zwenken), of wiens voeten buiten beeld vallen, telt niet als speler. Na de
-   kalibratie valt ook iedereen buiten het veld af. Voer de selectie in, met rugnummers. Klik op **Automatisch koppelen** om
+   mogelijk weggefilterd: wie meestal op dezelfde plek staat (gemeten tegen de achtergrond, dus
+   los van het zwenken), of wiens voeten buiten beeld vallen, telt niet als speler. Na de
+   kalibratie valt ook iedereen buiten het veld af. Voer de selectie in, met rugnummers.
+   - **Selectie overnemen.** Klik bij een team op **💾 Bewaar als vaste selectie**. Bij een volgende
+     wedstrijd kies je die teamnaam bij het aanmaken (of bij **📋 Selectie overnemen**), en staan de
+     spelers er meteen in. Je kunt ook de selectie van een eerdere wedstrijd overnemen.
+   - **Teams omwisselen.** De app weet niet welke shirtkleur jouw team is. Staat jouw team bij
+     "Uit"? Klik dan op **⇄ Teams omwisselen**. Video's van dezelfde wedstrijd houdt de app zelf
+     gelijk.
+   - **Koppel-assistent.** Koppel je een track aan een speler, dan stelt de app de tracks voor die
+     waarschijnlijk ook van hem zijn: ze zijn niet tegelijk in beeld, beginnen ongeveer waar het
+     vorige stuk ophield en hebben hetzelfde shirt. Zie het als een spoor in de sneeuw dat steeds
+     even onderbroken is: heb je één stuk, dan zoekt de app het volgende. Met **✓ Koppel** neem je
+     een voorstel over, daarna zoekt de app verder. Via 🔍 achter een speler open je de assistent
+     ook zelf. Klik op **Automatisch koppelen** om
    tracks met een leesbaar rugnummer te koppelen. De rest koppel je via de kaartjes of door in
    **Video + minimap** te pauzeren en op een speler te klikken.
 
@@ -124,8 +147,10 @@ brengt je erheen.
 
 5. **Clips en delen.** Maak bij **Video + minimap** met één klik een clip van het moment dat je
    ziet (6 s ervoor tot 4 s erna; hij verschijnt meteen onder "Momenten in deze video" en bij
-   **Clips & delen**), of zet bij **Clips & delen** een automatische suggestie (sprint, pass) om in een clip. Daar
-   kun je:
+   **Clips & delen**), of zet bij **Clips & delen** een automatische suggestie om in een clip: een
+   sprint, een pass, of iets uit het geluid. **📣 Gejuich** betekent dat het ineens veel luider werd,
+   bijvoorbeeld na een goal of grote kans; de clip begint daarom 10 s ervoor. Daarnaast vindt de app
+   **🔔 Fluitsignalen**. Bij Clips & delen kun je:
    - begin en eind per seconde verschuiven;
    - een label, spelers en een opmerking toevoegen;
    - een **spotlight** op een speler zetten: een gele ring onder zijn voeten met zijn naam, die hem
@@ -164,6 +189,11 @@ een vaste 180°-camera.
   *schatting*.
 - **Rugnummers.** Vanaf de zijlijn zijn die vaak onleesbaar. Gebruik ze daarom als suggestie en
   controleer de koppelingen.
+- **Teams en publiek.** In fel zonlicht lijkt een donkerblauw shirt soms grijs; zo'n speler kan bij
+  'overig' terechtkomen. Toeschouwers die bewegen (bijvoorbeeld langs de lijn lopen) worden pas
+  na de kalibratie herkend, omdat ze dan buiten het veld staan.
+- **Geluid.** Gejuich en fluitsignalen zijn suggesties. Wind in de microfoon of iemand die vlak
+  naast je praat, telt de app niet als gejuich, maar controleer het altijd even.
 - **Spelers buiten beeld.** Wie buiten beeld is, wordt niet gemeten. Het aantal minuten laat zien
   hoe lang iemand in beeld was.
 

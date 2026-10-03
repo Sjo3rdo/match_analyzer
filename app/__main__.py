@@ -39,6 +39,14 @@ def _is_match_analyzer(url: str) -> bool:
         return False
 
 
+def _answers(url: str) -> bool:
+    try:
+        with urllib.request.urlopen(url, timeout=2):
+            return True
+    except Exception:
+        return False
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Match Analyzer")
     ap.add_argument("--port", type=int, default=8000)
@@ -51,6 +59,10 @@ def main() -> None:
             print(f"Match Analyzer draait al op {url}; ik open de browser.")
             if not args.no_browser:
                 webbrowser.open(url)
+            return
+        if _answers(url + "/api/pitch"):  # een oudere versie (zonder versienummer) draait nog
+            print(f"Er draait nog een oudere versie van Match Analyzer op {url}. Stop die eerst "
+                  "(Ctrl+C in dat Terminal-venster) en start daarna opnieuw.")
             return
         port = next((p for p in range(port + 1, port + 20) if _port_free(p)), port)
         print(f"Poort {args.port} is bezet door een ander programma; ik gebruik poort {port}.")
