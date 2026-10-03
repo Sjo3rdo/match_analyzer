@@ -270,23 +270,64 @@ def _finish_tracks(store: Store, clip_id: int, stats: dict[int, _TrackStats], ou
 
 
 class Worker:
-    """Eén achtergrondthread die clips in volgorde verwerkt."""
+    """Eén achtergrondthread die taken in volgorde uitvoert: analyseren en kalibratie bijstellen."""
 
     def __init__(self, store: Store):
         self.store = store
-        self.q: queue.Queue[int] = queue.Queue()
+        self.q: queue.Queue[tuple[str, int]] = queue.Queue()
+        self._pending: set[tuple[str, int]] = set()
+        self._lock = threading.Lock()
         self.thread = threading.Thread(target=self._run, daemon=True)
         self.thread.start()
 
+    def _put(self, job: tuple[str, int]) -> bool:
+        with self._lock:
+            if job in self._pending:
+                return False
+            self._pending.add(job)
+        self.q.put(job)
+        return True
+
     def submit(self, clip_id: int) -> None:
         self.store.set_clip_status(clip_id, "wachtrij", 0.0, "In de wachtrij")
-        self.q.put(clip_id)
+        self._put(("process", clip_id))
+
+    def submit_autocalib(self, clip_id: int) -> None:
+        if self._put(("autocalib", clip_id)):
+            self.store.run("UPDATE clips SET calib_status = 'wachtrij', calib_progress = 0, "
+                           "calib_message = 'In de wachtrij' WHERE id = ?", (clip_id,))
 
     def _run(self) -> None:
         while True:
-            clip_id = self.q.get()
-            try:
-                process_clip(self.store, clip_id)
-            except Exception as e:  # noqa: BLE001
-                log.error("Verwerking clip %s mislukt\n%s", clip_id, traceback.format_exc())
-                self.store.set_clip_status(clip_id, "fout", None, str(e))
+            kind, clip_id = self.q.get()
+            with self._lock:
+                self._pending.discard((kind, clip_id))
+            if kind == "process":
+                try:
+                    process_clip(self.store, clip_id)
+                except Exception as e:  # noqa: BLE001
+                    log.error("Verwerking clip %s mislukt\n%s", clip_id, traceback.format_exc())
+                    self.store.set_clip_status(clip_id, "fout", None, str(e))
+                    continue
+                # bestaande handmatige kalibratie automatisch doortrekken over de hele video
+                if self.store.one("SELECT 1 AS x FROM keyframes WHERE clip_id = ? AND auto = 0", (clip_id,)):
+                    self.submit_autocalib(clip_id)
+            else:
+                self._autocalib(clip_id)
+
+    def _autocalib(self, clip_id: int) -> None:
+        from . import analytics
+        from .autocalib import run_autocalib
+
+        def progress(frac, n):
+            self.store.run("UPDATE clips SET calib_status = 'bezig', calib_progress = ?, calib_message = ? WHERE id = ?",
+                           (frac, f"{n} automatische sleutelframes", clip_id))
+        try:
+            progress(0.0, 0)
+            res = run_autocalib(self.store, clip_id, progress=progress)
+            self.store.run("UPDATE clips SET calib_status = 'klaar', calib_progress = 1, calib_message = ? WHERE id = ?",
+                           (f"{res['accepted']} van {res['tried']} momenten automatisch bijgesteld", clip_id))
+        except Exception as e:  # noqa: BLE001
+            log.error("Automatisch bijstellen clip %s mislukt\n%s", clip_id, traceback.format_exc())
+            self.store.run("UPDATE clips SET calib_status = 'fout', calib_message = ? WHERE id = ?", (str(e), clip_id))
+        analytics.invalidate()

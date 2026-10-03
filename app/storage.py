@@ -77,7 +77,9 @@ CREATE TABLE IF NOT EXISTS keyframes (
     id INTEGER PRIMARY KEY,
     clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
     t REAL NOT NULL,
-    points TEXT NOT NULL
+    points TEXT NOT NULL,
+    auto INTEGER DEFAULT 0,
+    score TEXT
 );
 CREATE TABLE IF NOT EXISTS moments (
     id INTEGER PRIMARY KEY,
@@ -127,6 +129,14 @@ class Store:
         cols = {r["name"] for r in self.all("PRAGMA table_info(clips)")}
         if "analysis_version" not in cols:
             self.run("ALTER TABLE clips ADD COLUMN analysis_version INTEGER DEFAULT 0")
+        kcols = {r["name"] for r in self.all("PRAGMA table_info(keyframes)")}
+        if "auto" not in kcols:
+            self.run("ALTER TABLE keyframes ADD COLUMN auto INTEGER DEFAULT 0")
+            self.run("ALTER TABLE keyframes ADD COLUMN score TEXT")
+        # status van het automatisch bijstellen van de kalibratie
+        for col, typ in (("calib_status", "TEXT"), ("calib_progress", "REAL"), ("calib_message", "TEXT")):
+            if col not in cols:
+                self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
         # GPS uit de video en de (geschatte) camerapositie op het veld
         for col, typ in (("gps_lat", "REAL"), ("gps_lon", "REAL"), ("gps_acc", "REAL"), ("device", "TEXT"),
                          ("cam_x", "REAL"), ("cam_y", "REAL"), ("cam_h", "REAL"), ("cam_source", "TEXT")):

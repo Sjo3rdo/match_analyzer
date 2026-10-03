@@ -66,6 +66,14 @@ def calibration_residuals(K: np.ndarray, points: list[dict]) -> np.ndarray:
     return np.array(out)
 
 
+def fit_keyframe(kf: dict, camera: dict | None = None) -> tuple[np.ndarray, float]:
+    """Kalibratie van een sleutelframe. Automatische sleutelframes bevatten exacte punten
+    (een raster uit de lijnen-fit), daar is geen cameramodel of verfijning voor nodig."""
+    if kf.get("auto"):
+        return _fit_free(kf["points"], refine=False)
+    return fit_calibration(kf["points"], camera=camera)
+
+
 def fit_calibration(points: list[dict], camera: dict | None = None) -> tuple[np.ndarray, float]:
     """Kalibratie; met `camera` (voorkennis over positie/hoogte) via het cameramodel."""
     if camera is not None:
@@ -89,7 +97,7 @@ def fit_calibration(points: list[dict], camera: dict | None = None) -> tuple[np.
     return _fit_free(points)
 
 
-def _fit_free(points: list[dict]) -> tuple[np.ndarray, float]:
+def _fit_free(points: list[dict], refine: bool = True) -> tuple[np.ndarray, float]:
     """Homografie beeld -> veld uit punten én punten-op-een-lijn.
 
     points: [{"img": [x, y], "pitch": [X, Y]}]  (bekend veldpunt), of
@@ -125,7 +133,9 @@ def _fit_free(points: list[dict]) -> tuple[np.ndarray, float]:
                          "of alles op één lijn). Voeg nog een punt of een andere lijn toe.")
     Kn = vt[-1].reshape(3, 3)
     K = np.linalg.inv(Tp) @ Kn @ Ti
-    K = _refine(K / K[2, 2], points)
+    K = K / K[2, 2]  # _refine houdt het laatste element op +1; het teken zetten we daarna goed
+    K = _refine(K, points) if refine else K
+    K = orient_by_points(normalize_h(K), [p["img"] for p in points])
     if not np.all(np.isfinite(K)):
         raise ValueError("Kalibratie mislukt")
     return K, float(np.mean(calibration_residuals(K, points)))
@@ -165,6 +175,26 @@ def _refine(K: np.ndarray, points: list[dict], iters: int = 15) -> np.ndarray:
             break
         h, r = h_new, r_new
     return np.append(h, 1.0).reshape(3, 3)
+
+
+def normalize_h(H: np.ndarray) -> np.ndarray:
+    """Schaal een homografie zonder het teken om te draaien.
+
+    Een homografie ligt vast op een factor na; ook het teken (+/-) maakt voor beeldcoördinaten
+    niet uit. Maar het teken van w zegt of een punt vóór (w > 0) of achter de camera ligt, en dat
+    gebruiken we. Delen door H[2, 2] zou het teken omdraaien als H[2, 2] negatief is (bijv. als de
+    hoek (0, 0) van het veld achter de camera ligt)."""
+    d = H[2, 2]
+    s = abs(d) if abs(d) > 1e-12 else (np.linalg.norm(H) or 1.0)
+    return H / s
+
+
+def orient_by_points(K: np.ndarray, img_pts) -> np.ndarray:
+    """Beeld -> veld: kies het teken zo dat aangeklikte beeldpunten (die op het veld, vóór de
+    camera liggen) een positieve w krijgen."""
+    pts = np.asarray(img_pts, float).reshape(-1, 2)
+    w = np.hstack([pts, np.ones((len(pts), 1))]) @ K[2]
+    return -K if np.sum(np.sign(w)) < 0 else K
 
 
 def apply_h(H: np.ndarray, pts: np.ndarray) -> np.ndarray:
@@ -214,7 +244,7 @@ class MotionEstimator:
             return np.eye(3)
         S = np.diag([self.scale, self.scale, 1.0])
         H = np.linalg.inv(S) @ H @ S
-        return H / H[2, 2]
+        return normalize_h(H)
 
 
 def _plausible(H: np.ndarray) -> bool:
@@ -230,7 +260,7 @@ def cumulative(inter: np.ndarray) -> np.ndarray:
     A[0] = np.eye(3)
     for i in range(1, n):
         M = A[i - 1] @ np.linalg.inv(inter[i])
-        A[i] = M / M[2, 2]
+        A[i] = normalize_h(M)
     return A
 
 
@@ -308,7 +338,7 @@ def camera_homography(params: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     C = np.array([cx, cy, -h])
     Kc = np.array([[f, 0, W / 2], [0, f, Hh / 2], [0, 0, 1.0]])
     H = Kc @ np.column_stack([R[:, 0], R[:, 1], -R @ C])
-    return H / H[2, 2] if abs(H[2, 2]) > 1e-12 else H
+    return normalize_h(H)
 
 
 def default_focal(width: int) -> float:
@@ -386,9 +416,9 @@ def fit_camera(points: list[dict], prior: dict) -> tuple[np.ndarray, dict]:
     fits = [_lm(fun, p0) for _, p0 in starts[:4]]
     p = min(fits, key=lambda q: float(np.sum(fun(q) ** 2)))
     H = camera_homography(p, size)
-    K = np.linalg.inv(H)
-    K /= K[2, 2]
-    cam = {"x": float(p[0]), "y": float(p[1]), "h": float(p[2]), "yaw_deg": math.degrees(p[3]) % 360,
+    K = orient_by_points(normalize_h(np.linalg.inv(H)), [p["img"] for p in points])
+    cam = {"params": [float(v) for v in p],
+           "x": float(p[0]), "y": float(p[1]), "h": float(p[2]), "yaw_deg": math.degrees(p[3]) % 360,
            "tilt_deg": math.degrees(p[4]), "roll_deg": math.degrees(p[5]),
            "hfov_deg": math.degrees(2 * math.atan(size[0] / 2 / math.exp(p[6])))}
     return K, cam
