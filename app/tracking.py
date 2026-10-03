@@ -220,3 +220,61 @@ def stitch_tracks(tracklets: dict[int, dict], fps: float, max_gap_s: float = 3.0
             r = prev[r]
         root[tid] = r
     return root
+
+
+def stationary_ids(t: np.ndarray, idx: np.ndarray, track: np.ndarray, feet: np.ndarray, heights: np.ndarray,
+                   A: np.ndarray, min_span: float = 1.5, max_speed: float = 0.15, min_still: float = 0.6) -> set[int]:
+    """Tracks van mensen die stilstaan ten opzichte van de achtergrond (toeschouwers, wissels).
+
+    t: tijd per geanalyseerd frame; idx/track/feet/heights: per detectie; A: camerabeweging
+    (frame -> referentieframe). Per track meten we hoeveel iemand in 1 seconde verplaatst, in
+    lichaamslengtes en los van het zwenken van de camera: we rekenen zijn voetpunt van een seconde
+    eerder om naar het beeld van nu. Op echte beelden: toeschouwers bij het hek < 0,05
+    lichaamslengte per seconde, spelers bijna altijd > 0,5.
+
+    min_still: welk deel van de tijd iemand stil moet staan. Niet 100%: mensen vlak bij de camera
+    lijken bij het zwenken toch te bewegen (ze staan dichterbij dan de achtergrond waarop we de
+    camerabeweging meten), en een track springt soms even over naar een buurman."""
+    return {tid for tid, f in still_fraction(t, idx, track, feet, heights, A, min_span, max_speed).items()
+            if f >= min_still}
+
+
+def still_fraction(t: np.ndarray, idx: np.ndarray, track: np.ndarray, feet: np.ndarray, heights: np.ndarray,
+                   A: np.ndarray, min_span: float = 1.5, max_speed: float = 0.15) -> dict[int, float]:
+    """Per track (die lang genoeg in beeld is): welk deel van de tijd hij stilstaat (0..1)."""
+    out: dict[int, float] = {}
+    idx = np.asarray(idx, int)
+    if len(idx) == 0 or len(A) == 0:
+        return out
+    try:
+        Ainv = np.linalg.inv(A)
+    except np.linalg.LinAlgError:
+        return out
+    feet = np.asarray(feet, float).reshape(-1, 2)
+    fh = np.hstack([feet, np.ones((len(feet), 1))])
+    heights = np.asarray(heights, float)
+    track = np.asarray(track, int)
+    order = np.lexsort((idx, track))
+    cuts = np.flatnonzero(np.diff(track[order])) + 1
+    for rows in np.split(order, cuts):
+        if len(rows) < 8:
+            continue
+        tt = t[idx[rows]]
+        if tt[-1] - tt[0] < min_span:
+            continue
+        js = np.searchsorted(tt, tt + 1.0)
+        ok = js < len(tt)
+        if ok.sum() < 3:
+            continue
+        k, j = rows[ok], rows[js[ok]]
+        M = np.einsum("nij,njk->nik", Ainv[idx[j]], A[idx[k]])  # beeld(k) -> beeld(j)
+        p = np.einsum("nij,nj->ni", M, fh[k])
+        with np.errstate(divide="ignore", invalid="ignore"):
+            p = p[:, :2] / p[:, 2:3]
+        dt = np.maximum(1e-3, t[idx[j]] - t[idx[k]])
+        h = max(1.0, float(np.median(heights[rows])))
+        v = np.linalg.norm(p - feet[j], axis=1) / dt / h
+        v = v[np.isfinite(v)]
+        if len(v) >= 3 and np.median(v) < max_speed:
+            out[int(track[rows[0]])] = float((v < 2 * max_speed).mean())
+    return out

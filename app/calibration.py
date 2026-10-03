@@ -298,6 +298,38 @@ class CameraModel:
         w = (ib - idx) / max(1, ib - ia)
         return [(self._G[a] @ self.A[idx], w), (self._G[b] @ self.A[idx], 1 - w)]
 
+    def _frame_h(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Per geanalyseerd frame de twee gemengde homografieën en het gewicht van de eerste."""
+        if getattr(self, "_fh", None) is None:
+            n = len(self.A)
+            frames = np.arange(n)
+            pos = np.searchsorted(self._kidx, frames)
+            last = len(self._kidx) - 1
+            a, b = np.clip(pos - 1, 0, last), np.clip(pos, 0, last)
+            ia, ib = self._kidx[a], self._kidx[b]
+            w = np.where(ib > ia, (ib - frames) / np.maximum(1, ib - ia), 1.0)
+            G = np.array(self._G)
+            self._fh = (np.einsum("nij,njk->nik", G[a], self.A), np.einsum("nij,njk->nik", G[b], self.A), w)
+        return self._fh
+
+    def project_rows(self, idx: np.ndarray, pts: np.ndarray, chunk: int = 200_000) -> np.ndarray:
+        """Beeldpunten -> veld voor veel rijen tegelijk (rij r hoort bij frame idx[r])."""
+        idx = np.asarray(idx, dtype=int)
+        pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
+        out = np.full((len(idx), 2), np.nan)
+        if not self.calibrated or len(idx) == 0:
+            return out
+        Ha, Hb, w = self._frame_h()
+        for s in range(0, len(idx), chunk):
+            ii, X = idx[s:s + chunk], np.hstack([pts[s:s + chunk], np.ones((len(pts[s:s + chunk]), 1))])
+            wa = w[ii][:, None]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                pa = np.einsum("nij,nj->ni", Ha[ii], X)
+                pb = np.einsum("nij,nj->ni", Hb[ii], X)
+                qa, qb = pa[:, :2] / pa[:, 2:3], pb[:, :2] / pb[:, 2:3]
+            out[s:s + chunk] = np.where(wa > 0, wa * qa, 0) + np.where(wa < 1, (1 - wa) * qb, 0)
+        return out
+
     def project(self, idx: int, pts: np.ndarray) -> np.ndarray:
         pts = np.asarray(pts, dtype=np.float64).reshape(-1, 2)
         hs = self.homographies(idx)

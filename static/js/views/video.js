@@ -161,6 +161,8 @@ export async function render(root, ctx) {
         h('select', { onchange: e => patch({ player_id: e.target.value ? Number(e.target.value) : null }) },
           h('option', { value: '' }, '– speler –'),
           match.players.map(p => h('option', { value: p.id, selected: t.player_id === p.id }, `${playerLabel(p)} (${teamName(match, p.team)})`)))),
+      t.player_id ? h('div', { style: { marginTop: '8px' } }, h('a', { href: `#/match/${match.id}/spelers?clip=${clip.id}&assist=${t.player_id}` },
+        '🔍 Zoek meer tracks van deze speler (koppel-assistent)')) : null,
       match.players.length ? null : h('div', { className: 'small muted' }, 'Voeg eerst spelers toe bij "3. Spelers".'));
   }
 
@@ -175,7 +177,8 @@ export async function render(root, ctx) {
   }
 
   async function loadEvents() {
-    const [moments, stats] = await Promise.all([api(`/matches/${match.id}/moments`), api(`/matches/${match.id}/stats`)]);
+    const [moments, stats, hl] = await Promise.all([api(`/matches/${match.id}/moments`), api(`/matches/${match.id}/stats`),
+      api(`/matches/${match.id}/highlights`).catch(() => [])]);
     const name = ent => playerLabel(playerById.get(ent)) || 'onbekend';
     const items = [
       ...moments.filter(m => m.clip_id === clip.id).map(m => ({ t: m.start, text: `🎬 ${m.label}${m.players.length ? ' – ' + m.players.map(id => name('p' + id)).join(', ') : ''}`,
@@ -183,6 +186,8 @@ export async function render(root, ctx) {
       ...stats.events.filter(e => e.clip_id === clip.id && (e.kind !== 'sprint' || playerById.has(e.entity))).map(e => ({
         t: e.t, text: e.kind === 'sprint' ? `⚡ Sprint ${name(e.entity)} (${e.value} km/u)`
           : e.kind === 'pass' ? `➡️ Pass ${name(e.entity)} → ${name(e.to)}` : `✖️ Balverlies ${name(e.entity)}` })),
+      ...hl.filter(e => e.clip_id === clip.id).map(e => ({ t: Math.max(0, e.t - 6),
+        text: e.kind === 'gejuich' ? '📣 Gejuich (mogelijk een kans of goal)' : '🔔 Fluitsignaal' })),
     ].sort((a, b) => a.t - b.t);
     eventsBox.replaceChildren(...(items.length ? items.map(it => h('div', { className: 'list-item', onclick: () => { video.currentTime = Math.max(0, it.t - 2); video.play(); } },
       h('b', {}, matchMinute(clip, it.t)), h('span', { className: 'muted small' }, fmtTime(it.t)), h('span', { style: { flex: 1 } }, it.text),

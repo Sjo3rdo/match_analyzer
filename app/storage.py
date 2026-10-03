@@ -95,6 +95,18 @@ CREATE TABLE IF NOT EXISTS moments (
     drawings TEXT DEFAULT '[]',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS squads (
+    id INTEGER PRIMARY KEY,
+    name TEXT NOT NULL,
+    color TEXT,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS squad_players (
+    id INTEGER PRIMARY KEY,
+    squad_id INTEGER NOT NULL REFERENCES squads(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    number TEXT
+);
 CREATE TABLE IF NOT EXISTS markers (
     id INTEGER PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
@@ -145,6 +157,16 @@ class Store:
                          ("cam_x", "REAL"), ("cam_y", "REAL"), ("cam_h", "REAL"), ("cam_source", "TEXT")):
             if col not in cols:
                 self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
+        # Analysekeuze (nauwkeurig/snel) en speelrichting per video (NULL = automatisch: 2e helft omdraaien)
+        for col, typ in (("analysis_mode", "TEXT"), ("flip", "INTEGER")):
+            if col not in cols:
+                self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
+        mcols = {r["name"] for r in self.all("PRAGMA table_info(matches)")}
+        # Veldmaten per wedstrijd, en de shirtkleur per team (om video's gelijk te trekken)
+        for col, typ in (("pitch_length", "REAL"), ("pitch_width", "REAL"), ("team0_color", "TEXT"),
+                         ("team1_color", "TEXT"), ("team0_squad", "INTEGER"), ("team1_squad", "INTEGER")):
+            if col not in mcols:
+                self.run(f"ALTER TABLE matches ADD COLUMN {col} {typ}")
         # Oude 'markers' (één tijdstip) worden clips (begin + eind), zoals in de Veo-editor
         with self.tx() as c:
             for m in c.execute("SELECT * FROM markers").fetchall():
@@ -173,6 +195,16 @@ class Store:
         with _lock:
             r = self.conn.execute(sql, args).fetchone()
             return dict(r) if r else None
+
+    def rows(self, sql: str, args: tuple = ()) -> list[tuple]:
+        """Rijen als gewone tuples: veel sneller dan dicts bij grote aantallen (detecties)."""
+        with _lock:
+            cur = self.conn.cursor()
+            cur.row_factory = None
+            try:
+                return cur.execute(sql, args).fetchall()
+            finally:
+                cur.close()
 
     def run(self, sql: str, args: tuple = ()) -> int:
         with _lock:

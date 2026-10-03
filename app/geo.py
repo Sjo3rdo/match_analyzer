@@ -4,7 +4,7 @@ Stap voor stap:
 1. Een iPhone (en de meeste Android-toestellen) slaat bij een video de GPS-positie op.
 2. Voetbalvelden zijn in OpenStreetMap ingetekend als rechthoek ("leisure=pitch").
 3. We zoeken het veld bij die positie, leggen er een lokaal assenstelsel in meters op en
-   rekenen de camerapositie om naar veldcoördinaten (0..105 x 0..68).
+   rekenen de camerapositie om naar veldcoördinaten (0..lengte x 0..breedte).
 
 Afspraak: de camera staat aan de kant van de 'onderste' zijlijn (y = 68), en x loopt van links
 naar rechts zoals jij het veld zag. Zo komt de veldtekening overeen met je beeld.
@@ -86,7 +86,8 @@ def query_pitches(lat: float, lon: float, radius: int = 300, timeout: int = 25) 
     return out
 
 
-def camera_on_pitch(lat: float, lon: float, polygons: list[list[tuple[float, float]]]) -> dict:
+def camera_on_pitch(lat: float, lon: float, polygons: list[list[tuple[float, float]]],
+                    geom: pitch.Geometry = pitch.DEFAULT) -> dict:
     """Kies het veld bij de camera en geef de camerapositie in veldcoördinaten."""
     best = None
     for poly in polygons:
@@ -112,7 +113,8 @@ def camera_on_pitch(lat: float, lon: float, polygons: list[list[tuple[float, flo
     right = np.array([-v[1], v[0]])  # rechts, gezien vanaf de camera die naar het veld kijkt (-v)
     if u @ right < 0:
         u = -u
-    x = pitch.LENGTH / 2 + (rel @ u) * pitch.LENGTH / length
-    y = pitch.WIDTH / 2 + (rel @ v) * pitch.WIDTH / width
+    # naar de veldmaten van de wedstrijd (zijn die gelijk aan het OpenStreetMap-veld, dan 1-op-1)
+    x = geom.length / 2 + (rel @ u) * geom.length / length
+    y = geom.width / 2 + (rel @ v) * geom.width / width
     return {"x": round(float(x), 1), "y": round(float(y), 1), "pitch_length": round(float(length), 1),
             "pitch_width": round(float(width), 1), "distance_to_pitch": round(float(best[0]), 1)}

@@ -4,7 +4,7 @@ import { api, h, toast, fmtTime, matchMinute, teamName, playerLabel, labelList, 
 
 const COLORS = ['#ffd600', '#ff3b30', '#ffffff', '#34c759', '#0a84ff'];
 const TOOLS = [['arrow', '➚ Pijl'], ['line', '╱ Lijn'], ['circle', '◯ Cirkel'], ['free', '✎ Vrij'], ['text', 'T Tekst']];
-const KIND = { sprint: '⚡ Sprint', pass: '➡️ Pass', balverlies: '✖️ Balverlies' };
+const KIND = { sprint: '⚡ Sprint', pass: '➡️ Pass', balverlies: '✖️ Balverlies', gejuich: '📣 Gejuich', fluitsignaal: '🔔 Fluitsignaal' };
 
 export async function render(root, ctx) {
   const { match } = ctx;
@@ -63,6 +63,12 @@ export async function render(root, ctx) {
     return moments.filter(m => (!filterPlayer || m.players.includes(Number(filterPlayer)) || m.spotlight_player_id === Number(filterPlayer))
       && (!filterLabel || (m.label || '').toLowerCase().includes(filterLabel)));
   }
+  // Minuut in de wedstrijd, en bij meerdere video's ook welke video en waar daarin
+  function where(c, t) {
+    if (clipById.size < 2) return [h('b', {}, matchMinute(c, t))];
+    const name = (c.filename || '').replace(/\.[^.]+$/, '');
+    return [h('b', {}, matchMinute(c, t)), h('span', { className: 'muted small' }, `${name} ${fmtTime(t)}`)];
+  }
   function names(ids) { return ids.map(id => playerLabel(playerById.get(id))).filter(Boolean).join(', '); }
   function drawList() {
     const v = visible();
@@ -71,7 +77,7 @@ export async function render(root, ctx) {
       return h('div', { className: `list-item ${current?.id === m.id ? 'selected' : ''}`, onclick: () => select(m) },
         h('input', { type: 'checkbox', checked: selected.has(m.id), onclick: e => e.stopPropagation(),
           onchange: e => { e.target.checked ? selected.add(m.id) : selected.delete(m.id); } }),
-        h('b', {}, matchMinute(c, m.start)),
+        ...where(c, m.start),
         h('span', { style: { flex: 1 } }, m.label || 'Moment', ' ', h('span', { className: 'muted small' }, names(m.players))),
         m.spotlight_player_id ? h('span', { title: 'Spotlight' }, '🔦') : null,
         m.drawings.length ? h('span', { title: 'Tekeningen' }, `✏️${m.drawings.length}`) : null,
@@ -80,7 +86,12 @@ export async function render(root, ctx) {
   }
 
   async function loadSuggestions() {
-    try { events = (await api(`/matches/${match.id}/stats`)).events; } catch { events = []; }
+    const [st, hl] = await Promise.all([api(`/matches/${match.id}/stats`).catch(() => ({ events: [] })),
+      api(`/matches/${match.id}/highlights`).catch(() => [])]);
+    // Gejuich bovenaan (sterkste eerst): dat zijn de kansen en goals; daarna de rest op tijd
+    const loud = hl.filter(e => e.kind === 'gejuich').sort((a, b) => b.score - a.score);
+    events = [...loud, ...[...st.events, ...hl.filter(e => e.kind !== 'gejuich')]
+      .sort((a, b) => a.clip_id - b.clip_id || a.t - b.t)];
     drawSuggestions();
   }
   function drawSuggestions() {
@@ -89,11 +100,20 @@ export async function render(root, ctx) {
       && (e.kind !== 'sprint' || String(e.entity).startsWith('p'))).slice(0, 80);
     const label = ent => (String(ent || '').startsWith('p') ? playerLabel(playerById.get(Number(ent.slice(1)))) : '') || 'onbekend';
     suggestBox.replaceChildren(...(ev.length ? ev.map(e => h('div', { className: 'list-item' },
-      h('b', {}, matchMinute(clipById.get(e.clip_id), e.t)), h('span', {}, KIND[e.kind] || e.kind),
-      h('span', { style: { flex: 1 }, className: 'small' }, label(e.entity), e.to ? ` → ${label(e.to)}` : '', e.value ? ` (${e.value} km/u)` : ''),
+      ...where(clipById.get(e.clip_id), e.t), h('span', {}, KIND[e.kind] || e.kind),
+      e.kind === 'gejuich' || e.kind === 'fluitsignaal'
+        ? h('span', { style: { flex: 1 }, className: 'small muted' }, e.kind === 'gejuich' ? `uit het geluid, sterkte ${Math.round(e.score)}` : 'uit het geluid')
+        : h('span', { style: { flex: 1 }, className: 'small' }, label(e.entity), e.to ? ` → ${label(e.to)}` : '', e.value ? ` (${e.value} km/u)` : ''),
       h('button', { onclick: () => fromEvent(e) }, '+ clip'))) : [h('div', { className: 'muted small' }, 'Geen suggesties (analyseer en kalibreer eerst, en koppel spelers).')]));
   }
   async function fromEvent(e) {
+    if (e.kind === 'gejuich' || e.kind === 'fluitsignaal') {
+      // het moment zelf zit vóór het gejuich of het fluitsignaal
+      const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: e.clip_id, start: Math.max(0, e.t - 10),
+        end: e.t_end + 3, label: e.kind === 'gejuich' ? 'Kans' : 'Fluitsignaal', players: [] } });
+      moments.push(m); select(m); toast('Clip gemaakt: kijk of het klopt en pas het label aan');
+      return;
+    }
     const pid = String(e.entity || '').startsWith('p') ? Number(e.entity.slice(1)) : null;
     const players = [pid, String(e.to || '').startsWith('p') ? Number(e.to.slice(1)) : null].filter(Boolean);
     const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: e.clip_id, start: Math.max(0, e.t - 4),
@@ -109,19 +129,30 @@ export async function render(root, ctx) {
   }
 
   // --- editor --------------------------------------------------------------------------
-  let saveTimer;
-  function save(fields) {
-    Object.assign(current, fields);
+  // Wijzigingen verzamelen en na 0,3 s in één keer opslaan. Alle velden die intussen veranderd zijn
+  // gaan mee (eerder ging bij snel achter elkaar wijzigen van verschillende velden de eerste verloren).
+  let saveTimer, pending = {}, pendingFor = null;
+  function flushSave() {
     clearTimeout(saveTimer);
-    const m = current;
-    saveTimer = setTimeout(async () => {
-      try { Object.assign(m, await api(`/moments/${m.id}`, { method: 'PATCH', json: fields })); } catch {}
-      drawList();
-    }, 300);
+    if (!pendingFor || !Object.keys(pending).length) return Promise.resolve();
+    const m = pendingFor, fields = pending;
+    pending = {}; pendingFor = null;
+    return api(`/moments/${m.id}`, { method: 'PATCH', json: fields })
+      .then(r => { for (const [k, v] of Object.entries(r)) if (!(pendingFor === m && k in pending)) m[k] = v; })
+      .catch(() => {}).finally(drawList);
+  }
+  function save(fields) {
+    if (pendingFor && pendingFor !== current) flushSave();
+    Object.assign(current, fields);
+    pendingFor = current;
+    Object.assign(pending, fields);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, 300);
     drawList();
   }
 
   function select(m) {
+    flushSave();
     current = m; stopDraw(); playlist = playlist && playlist.includes(m.id) ? playlist : null;
     ctx.setParam('moment', m.id);
     const c = clipById.get(m.clip_id);
@@ -186,6 +217,7 @@ export async function render(root, ctx) {
         h('span', { style: { flex: 1 } }),
         h('button', { className: 'danger', onclick: async () => {
           if (!confirm('Deze clip verwijderen?')) return;
+          if (pendingFor === m) { pending = {}; pendingFor = null; clearTimeout(saveTimer); }
           await api(`/moments/${m.id}`, { method: 'DELETE' });
           moments = moments.filter(x => x.id !== m.id); current = null;
           visible()[0] ? select(visible()[0]) : (drawEditor(), drawList());
@@ -405,5 +437,5 @@ export async function render(root, ctx) {
   loadSuggestions();
   const onResize = () => (drawMode ? redrawDraw() : drawOverlay());
   window.addEventListener('resize', onResize);
-  return () => { cancelAnimationFrame(raf); clearTimeout(freezeTimer); video.pause(); video.removeAttribute('src'); window.removeEventListener('resize', onResize); };
+  return () => { flushSave(); cancelAnimationFrame(raf); clearTimeout(freezeTimer); video.pause(); video.removeAttribute('src'); window.removeEventListener('resize', onResize); };
 }

@@ -84,7 +84,22 @@ def test_spectators_filtered():
 
 def test_people_cut_off_at_bottom_filtered():
     d = _people_clip(False)
-    d.boxes[d.track == 2] = [800, 900, 900, 1080]
+    d.boxes[d.track == 2] = [800, 900, 900, 1074]  # zo eindigt een kader van YOLO aan de rand (net boven 1080)
     d.boxes[d.track == 2, 0] += np.arange(100) * 5  # beweegt wel, maar voeten buiten beeld
     d.boxes[d.track == 2, 2] += np.arange(100) * 5
     assert analytics._valid_tracks(d) == {1}
+
+
+def test_ball_outside_pitch_and_jumps_removed():
+    from app import pitch
+    t = np.arange(10) / 10
+    xy = np.array([[50, 30], [50.5, 30], [51, 30], [90, 60], [52, 30], [52.5, 30], [53, 30],
+                   [53.5, 80], [54, 30], [54.5, 30]], float)  # 3 = losse uitschieter, 7 = buiten het veld
+    out = analytics.clean_ball(t, xy, pitch.DEFAULT)
+    assert np.isnan(out[3]).all() and np.isnan(out[7]).all()
+    assert not np.isnan(out[[0, 1, 2, 4, 5, 6, 8, 9]]).any()
+
+
+def test_heatmap_counts_seconds_per_video_fps():
+    pts = np.array([[52.5, 34.0]] * 25)
+    assert abs(sum(map(sum, analytics.heatmap(pts, 12.5))) - 2.0) < 1e-6  # 25 beelden bij 12,5 per seconde

@@ -48,7 +48,9 @@ export async function render(root, ctx) {
       draw();
     };
     panel.append(h('table', {},
-      h('tr', {}, ['', 'Bestand', 'Duur', 'Helft', 'Start (min)', 'Status', 'Kalibratie', ''].map(t => h('th', {}, t))),
+      h('tr', {}, ['', 'Bestand', 'Duur', 'Helft', 'Start (min)',
+        h('span', { title: 'Speelrichting omdraaien voor de statistieken, zodat beide helften dezelfde kant op spelen' }, 'Richting ⇄'),
+        'Status', 'Kalibratie', ''].map(t => h('th', {}, t))),
       clips.map((c, i) => {
         const busy = BUSY.includes(c.status);
         const badge = c.status === 'klaar' ? 'ok' : c.status === 'fout' ? 'err' : busy ? 'busy' : '';
@@ -56,10 +58,13 @@ export async function render(root, ctx) {
           h('td', {}, h('button', { onclick: () => move(i, -1), title: 'Omhoog' }, '↑'), h('button', { onclick: () => move(i, 1), title: 'Omlaag' }, '↓')),
           h('td', {}, c.filename, h('div', { className: 'muted small' }, `${c.width}×${c.height} · ${Math.round(c.fps)} fps`)),
           h('td', {}, fmtTime(c.duration)),
-          h('td', {}, h('select', { onchange: e => patch(c, { period: Number(e.target.value) }) },
+          h('td', {}, h('select', { onchange: async e => { await patch(c, { period: Number(e.target.value) }); if (c.flip == null) draw(); } },
             [1, 2, 3, 4].map(p => h('option', { value: p, selected: c.period === p }, p <= 2 ? `${p}e helft` : `Verlenging ${p - 2}`)))),
           h('td', {}, h('input', { type: 'number', min: 0, step: 1, value: c.start_minute, style: { width: '70px' },
             onchange: e => patch(c, { start_minute: Number(e.target.value) }) })),
+          h('td', {}, h('label', { className: 'small', title: 'Omdraaien: de teams wisselen in de rust van kant. Zo spelen beide helften in heatmaps en teamvorm dezelfde kant op. Vink uit als je in de rust zelf naar de andere kant van het veld bent gelopen.' },
+            h('input', { type: 'checkbox', checked: c.flip != null ? !!c.flip : c.period === 2,
+              onchange: e => { c.flip = e.target.checked ? 1 : 0; patch(c, { flip: c.flip }); } }), ' omdraaien')),
           h('td', {}, h('span', { className: `badge ${badge}` }, c.status),
             c.status === 'klaar' && (c.analysis_version || 0) < 2
               ? h('div', { className: 'badge err', title: 'Deze video is geanalyseerd met een oudere versie die de tijden van iPhone-video\'s verkeerd las. Klik op "Opnieuw".' }, 'opnieuw analyseren aanbevolen') : null,
@@ -68,10 +73,15 @@ export async function render(root, ctx) {
           h('td', {}, c.n_keyframes ? h('span', { className: 'badge ok' }, `${c.n_keyframes} sleutelframe(s)`)
             : h('a', { href: `#/match/${match.id}/kalibratie?clip=${c.id}` }, 'Kalibreren')),
           h('td', {},
-            h('button', { className: busy ? '' : 'primary', disabled: busy, onclick: async () => { await api(`/clips/${c.id}/process`, { method: 'POST' }); draw(); ctx.refreshSteps(); } },
+            h('select', { disabled: busy, title: 'Nauwkeurig: vindt ook spelers ver weg en de bal het best. Snel: ongeveer 2x zo snel, mist vaker verre spelers en de bal.',
+              onchange: e => { c.analysis_mode = e.target.value; } },
+              [['nauwkeurig', 'Nauwkeurig'], ['snel', 'Snel']].map(([v, l]) => h('option', { value: v, selected: (c.analysis_mode || 'nauwkeurig') === v }, l))), ' ',
+            h('button', { className: busy ? '' : 'primary', disabled: busy, onclick: async () => {
+              await api(`/clips/${c.id}/process`, { json: { mode: c.analysis_mode || 'nauwkeurig' } }); draw(); ctx.refreshSteps();
+            } },
               c.status === 'klaar' ? 'Opnieuw' : 'Analyseer'), ' ',
             h('button', { disabled: busy, onclick: () => openSplit(c), title: 'Lange video in delen knippen, of warming-up/rust eruit halen' }, '✂️ Knippen'), ' ',
-            h('button', { className: 'danger', onclick: async () => {
+            h('button', { className: 'danger', disabled: busy, title: busy ? 'Wacht tot de analyse klaar is' : '', onclick: async () => {
               if (!confirm(`${c.filename} verwijderen?`)) return;
               await api(`/clips/${c.id}`, { method: 'DELETE' }); draw(); ctx.refreshSteps();
             } }, 'Verwijder')));

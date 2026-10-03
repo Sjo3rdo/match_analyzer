@@ -36,7 +36,7 @@ def shirt_color(frame: np.ndarray, box: np.ndarray) -> np.ndarray | None:
     """
     x1, y1, x2, y2 = [int(v) for v in box]
     h, w = y2 - y1, x2 - x1
-    if h < 20 or w < 8:
+    if h < 12 or w < 5:  # ook verre spelers (ca. 15 px hoog) krijgen zo een kleur
         return None
     crop = frame[max(0, y1 + int(0.15 * h)):max(0, y1 + int(0.5 * h)),
                  max(0, x1 + int(0.15 * w)):max(0, x2 - int(0.15 * w))]
@@ -88,40 +88,94 @@ def kmeans(x: np.ndarray, k: int, weights: np.ndarray | None = None, iters: int 
     return labels, c
 
 
-_W = np.array([0.5, 1.0, 1.0])  # Lab-weging: helderheid telt minder (zon/schaduw)
+# Lab-weging. OpenCV-Lab heeft helderheid op een schaal van 0..255 en kleur rond 128; de
+# helderheid verschilt binnen één team enorm (zon tegenover schaduw: een donkerblauw shirt in de
+# zon is bijna grijs), de kleurtint veel minder. Daarom telt helderheid maar licht mee: genoeg om
+# wit en zwart uit elkaar te houden, niet zoveel dat zon en schaduw twee 'teams' worden.
+_W = np.array([0.15, 1.0, 1.0])
+JOIN = 0.4  # hoe dicht een kleur bij een team moet liggen (deel van de afstand tussen de teams)
 
 
-def assign_teams(colors: np.ndarray, n_frames: np.ndarray) -> np.ndarray:
+def hex_to_lab(color: str | None) -> np.ndarray | None:
+    """'#rrggbb' -> Lab (OpenCV-schaal); terug van lab_to_hex."""
+    if not color or len(color) != 7:
+        return None
+    bgr = np.uint8([[[int(color[5:7], 16), int(color[3:5], 16), int(color[1:3], 16)]]])
+    return cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)[0, 0].astype(np.float64)
+
+
+def color_distance(a: np.ndarray, b: np.ndarray) -> float:
+    return float(np.linalg.norm((np.asarray(a, float) - np.asarray(b, float)) * _W))
+
+
+def team_centers(colors: np.ndarray, weights: np.ndarray, labels: np.ndarray) -> list[np.ndarray | None]:
+    """Gewogen gemiddelde kleur van team 0 en team 1 (None als een team leeg is)."""
+    out = []
+    for team in (0, 1):
+        m = labels == team
+        out.append(np.average(colors[m], axis=0, weights=weights[m]) if m.any() and weights[m].sum() > 0 else None)
+    return out
+
+
+def assign_teams(colors: np.ndarray, n_frames: np.ndarray, exclude: np.ndarray | None = None) -> np.ndarray:
     """Teamlabel per track: 0, 1 of TEAM_OTHER.
 
-    k-means met meer groepen dan nodig (teams, scheidsrechter, keepers, publiek). De twee
-    groepen met de meeste speeltijd zijn de teams; een track hoort bij het dichtstbijzijnde
-    team als zijn kleur daar duidelijk genoeg op lijkt, anders is hij 'overig'.
+    1. Toeschouwers (`exclude`, bijv. wie stilstaat) doen niet mee: anders vormen donkere jassen
+       langs de lijn een eigen 'team'.
+    2. k-means met meer groepen dan nodig (twee teams, maar ook zon/schaduw-varianten,
+       scheidsrechter, keepers).
+    3. De teams zijn het paar groepen dat groot is én duidelijk van kleur verschilt (twee
+       tinten van hetzelfde groene shirt zijn geen twee teams).
+    4. Elke track gaat naar het team waar zijn kleur het dichtst bij ligt, als die duidelijk
+       genoeg lijkt; anders 'overig' (scheidsrechter, keeper, publiek).
     """
-    colors = np.asarray(colors, dtype=np.float64)
+    colors = np.asarray(colors, dtype=np.float64).reshape(-1, 3)
     n = len(colors)
+    out = np.full(n, TEAM_OTHER, dtype=int)
     if n == 0:
         return np.zeros(0, dtype=int)
-    if n < 3:
-        return np.zeros(n, dtype=int)
-    w = np.asarray(n_frames, dtype=np.float64)
-    x = colors * _W
-    k = min(5, n)
-    best, best_cost, best_c = None, np.inf, None
+    use = np.ones(n, bool) if exclude is None else ~np.asarray(exclude, bool)
+    if use.sum() < 3:
+        out[use] = 0
+        return out
+    w = np.asarray(n_frames, dtype=np.float64)[use]
+    w = np.where(w > 0, w, 1.0)
+    x = colors[use] * _W
+    k = min(6, len(x))
+    best = None
     for seed in range(10):  # meerdere starts: k-means kan in een slecht lokaal optimum belanden
         labels, centers = kmeans(x, k, weights=w, seed=seed)
         cost = float((w * ((x - centers[labels]) ** 2).sum(1)).sum())
-        if cost < best_cost:
-            best, best_cost, best_c = labels, cost, centers
-    size = np.array([w[best == j].sum() for j in range(k)])
-    t0, t1 = np.argsort(-size)[:2]
-    team_c = best_c[[t0, t1]]
+        if best is None or cost < best[0]:
+            best = (cost, labels, centers)
+    _, labels, c = best
+    size = np.array([w[labels == j].sum() for j in range(k)])
+    pair, score = (0, 1), -1.0
+    for i in range(k):
+        for j in range(i + 1, k):
+            s = min(size[i], size[j]) * min(1.0, np.linalg.norm(c[i] - c[j]) / 30.0)
+            if s > score:
+                pair, score = (i, j), s
+    team_c = c[list(pair)]
+    if size[pair[1]] > size[pair[0]]:  # team 0 = de grootste groep
+        team_c = team_c[::-1]
+    # De centra zijn nu die van twee (deel)groepen; verfijn ze met alle tracks die er duidelijk
+    # bij horen, zodat een team dat in zon en schaduw is gesplitst één gemiddelde kleur krijgt.
+    for _ in range(2):
+        sep = np.linalg.norm(team_c[0] - team_c[1])
+        d = np.linalg.norm(x[:, None, :] - team_c[None], axis=2)
+        lab = np.where(d.min(axis=1) < JOIN * sep, np.argmin(d, axis=1), -1)
+        new_c = [np.average(x[lab == t], axis=0, weights=w[lab == t]) if np.any(lab == t) else team_c[t]
+                 for t in (0, 1)]
+        team_c = np.array(new_c)
     sep = np.linalg.norm(team_c[0] - team_c[1])
-    # overige groepen: bij een team als ze er duidelijk op lijken (bijv. hetzelfde shirt in de
-    # schaduw), anders scheidsrechter/keeper/publiek
-    mapping = {}
-    for j in range(k):
-        dj = np.linalg.norm(best_c[j] - team_c, axis=1)
-        mapping[j] = int(np.argmin(dj)) if dj.min() < 0.45 * sep else TEAM_OTHER
-    mapping[t0], mapping[t1] = 0, 1
-    return np.array([mapping[l] for l in best])
+    # Wie stilstond telde niet mee voor de teamkleuren, maar kan best een speler zijn (een keeper,
+    # een verdediger die even wacht): die hoort bij een team als zijn shirt er sprekend op lijkt.
+    d = np.linalg.norm((colors * _W)[:, None, :] - team_c[None], axis=2)
+    near, far = d.min(axis=1), d.max(axis=1)
+    limit = np.where(use, JOIN, 0.35) * sep
+    # Iets verder van het teamgemiddelde (fel zonlicht, ver weg) maar overduidelijk niet het andere
+    # team: hoort er ook bij. (Een scheidsrechter in het zwart zit dichter bij het donkerste team,
+    # maar niet drie keer zo dicht als bij het andere.)
+    clear = (near < 0.45 * sep) & (far > 3.0 * near)
+    return np.where((near < limit) | clear, np.argmin(d, axis=1), TEAM_OTHER).astype(int)

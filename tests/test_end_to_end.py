@@ -119,6 +119,7 @@ def test_full_flow(env):
     # gezette punten bewegen mee met het veld (vaste camera: blijven staan)
     w = client.post(f"/api/clips/{clip['id']}/warp", json={"from_t": 0, "to_t": 3, "points": [[100, 200]]}).json()
     assert w["ok"] and abs(w["points"][0][0] - 100) < 2 and abs(w["points"][0][1] - 200) < 2
+    assert client.get(f"/api/matches/{m['id']}/highlights").json() == []  # nepvideo zonder geluid
     # zonder camerapositie geen automatisch voorstel
     assert client.get(f"/api/clips/{clip['id']}/propose?t=1").status_code == 400
     assert client.post(f"/api/clips/{clip['id']}/autocalib/accept", json={}).json()["ok"]
@@ -217,3 +218,82 @@ def test_camera_position_via_gps_and_minimal_calibration(env, monkeypatch):
     prev = client.post(f"/api/clips/{clip['id']}/calibrate-preview", json={"points": pts}).json()
     assert prev["ok"] and prev["error_m"] < 0.5 and prev["camera"]["h"] > 1
     assert client.post(f"/api/clips/{clip['id']}/keyframes", json={"t": 0, "points": pts}).status_code == 200
+
+
+def test_pitch_size_moves_calibration(env):
+    """Andere veldmaten: punten (op naam) en camerapositie schuiven mee."""
+    main, client, tmp = env
+    m = client.post("/api/matches", json={"name": "Klein veld"}).json()
+    cid = main.store.run("INSERT INTO clips (match_id, filename, path, width, height, cam_x, cam_y, cam_h, cam_source) "
+                         "VALUES (?, 'v.mp4', '', 1920, 1080, 52.5, 72, 1.6, 'hand')", (m["id"],))
+    pts = [{"name": "Hoekvlag rechtsonder", "img": [100, 200], "pitch": [105, 68]},
+           {"name": "Middenstip", "img": [300, 200], "pitch": [52.5, 34]},
+           {"name": "Zijlijn onder", "img": [500, 300], "line": [[0, 68], [105, 68]]}]
+    import json
+    main.store.run("INSERT INTO keyframes (clip_id, t, points) VALUES (?, 0, ?)", (cid, json.dumps(pts)))
+    assert client.patch(f"/api/matches/{m['id']}", json={"pitch_length": 30, "pitch_width": 20}).status_code == 400
+    r = client.patch(f"/api/matches/{m['id']}", json={"pitch_length": 100, "pitch_width": 64})
+    assert r.status_code == 200 and r.json()["pitch_length"] == 100
+    kf = main.store.keyframes(cid)[0]["points"]
+    assert kf[0]["pitch"] == [100, 64] and kf[1]["pitch"] == [50, 32] and kf[2]["line"] == [[0, 64], [100, 64]]
+    c = client.get(f"/api/matches/{m['id']}").json()["clips"][0]
+    assert c["cam_x"] == 50 and c["cam_y"] == 68  # 4 m buiten de zijlijn blijft 4 m buiten de zijlijn
+    p = client.get(f"/api/pitch?match_id={m['id']}").json()
+    assert p["length"] == 100 and {"name": "Doelpaal rechts boven", "x": 100, "y": 28.34} in p["landmarks"]
+
+
+def test_squads_reused_between_matches(env):
+    main, client, tmp = env
+    m1 = client.post("/api/matches", json={"name": "Week 1", "team0_name": "JO17-1"}).json()
+    for nr, nm in (("1", "Kees"), ("9", "Ali"), ("10", "Sam")):
+        client.post(f"/api/matches/{m1['id']}/players", json={"name": nm, "number": nr, "team": 0})
+    sq = client.post(f"/api/matches/{m1['id']}/save-squad", json={"team": 0}).json()
+    assert sq["name"] == "JO17-1" and len(sq["players"]) == 3
+    # nieuwe wedstrijd met dezelfde teamnaam: spelers staan er meteen in (aan de kant van team 1)
+    m2 = client.post("/api/matches", json={"name": "Week 2", "team0_name": "VV Ander", "team1_name": "jo17-1"}).json()
+    ps = client.get(f"/api/matches/{m2['id']}").json()["players"]
+    assert sorted(p["name"] for p in ps if p["team"] == 1) == ["Ali", "Kees", "Sam"]
+    # nogmaals laden voegt geen dubbele toe; uit een eerdere wedstrijd overnemen kan ook
+    r = client.post(f"/api/matches/{m2['id']}/load-squad", json={"team": 1, "squad_id": sq["id"]}).json()
+    assert r["added"] == 0
+    m3 = client.post("/api/matches", json={"name": "Week 3"}).json()
+    r = client.post(f"/api/matches/{m3['id']}/load-squad", json={"team": 0, "from_match": m1["id"], "from_team": 0}).json()
+    assert r["added"] == 3 and r["match"]["team0_name"] == "JO17-1"
+
+
+def test_link_assistant_suggests_continuation(env):
+    """Na het koppelen van een stuk stelt de assistent het stuk voor dat er logisch op volgt."""
+    main, client, tmp = env
+    import json
+    m = client.post("/api/matches", json={"name": "Assistent"}).json()
+    mid = m["id"]
+    st = main.store
+    cid = st.run("INSERT INTO clips (match_id, filename, path, width, height, status) VALUES (?, 'v', '', 1280, 720, 'klaar')", (mid,))
+    from app.storage import clip_dir
+    n = 100
+    st.tx  # noqa
+    for i in range(n):
+        st.run("INSERT INTO frames VALUES (?,?,?)", (cid, i, i / 10))
+    np.save(clip_dir(cid) / "motion.npy", np.tile(np.eye(3), (n, 1, 1)))
+    # speler A loopt naar rechts: track 1 (0-3 s), dan weg, dan track 2 (3,5-9 s) verder op dezelfde lijn.
+    # Teamgenoot B (track 3) loopt ergens anders.
+    def box(x, y):
+        return (x - 8, y - 40, x + 8, y)
+    rows = []
+    for i in range(n):
+        t = i / 10
+        if t <= 3.0:
+            rows.append((cid, i, 1, *box(100 + 40 * t, 400), 0.9))
+        if t >= 3.5:
+            rows.append((cid, i, 2, *box(100 + 40 * t, 400), 0.9))
+        rows.append((cid, i, 3, *box(900 - 30 * t, 200), 0.9))
+    with st.tx() as c:
+        c.executemany("INSERT INTO detections VALUES (?,?,?,?,?,?,?,?)", rows)
+        for tid in (1, 2, 3):
+            c.execute("INSERT INTO tracks (clip_id, track_id, n_frames, team, team_auto, color) VALUES (?,?,?,?,?,?)",
+                      (cid, tid, 40, 0, 0, "#d03030"))
+    pa = client.post(f"/api/matches/{mid}/players", json={"name": "A", "team": 0}).json()
+    client.patch(f"/api/clips/{cid}/tracks/1", json={"player_id": pa["id"]})
+    sug = client.get(f"/api/players/{pa['id']}/suggestions?clip_id={cid}").json()
+    assert sug and sug[0]["track_id"] == 2, sug
+    assert all(s["track_id"] != 1 for s in sug)

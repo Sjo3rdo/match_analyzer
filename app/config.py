@@ -16,10 +16,13 @@ STATIC_DIR = ROOT / "static"
 # op een MacBook; kies yolo11l/x voor meer precisie of yolo11s/n voor snelheid.
 YOLO_MODEL = os.environ.get("MATCH_ANALYZER_MODEL", "yolo11m.pt")
 MODELS_DIR = DATA_DIR / "models"
-PERSON_CONF = 0.25
 BALL_CONF = 0.10
 DETECT_IMGSZ = 1280  # groot, zodat verre spelers en de bal nog gevonden worden
 TARGET_FPS = 10.0  # aantal geanalyseerde frames per seconde video
+# Snelle analyse: kleiner model op een kleiner beeld. Ongeveer 2x zo snel, maar mist vaker
+# spelers ver weg en de bal.
+FAST_MODEL = os.environ.get("MATCH_ANALYZER_FAST_MODEL", "yolo11s.pt")
+FAST_IMGSZ = 960
 
 # Analyse
 MAX_SPEED_MS = 11.0  # alles sneller is een meetfout (~40 km/u)

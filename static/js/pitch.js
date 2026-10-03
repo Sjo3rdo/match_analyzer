@@ -1,5 +1,10 @@
 // Het veld tekenen op een canvas. Meters -> pixels met een eenvoudige schaal.
-export const L = 105, W = 68;
+// Lengte en breedte verschillen per veld; de wedstrijd zet ze met setPitchSize.
+export let L = 105, W = 68;
+export function setPitchSize(length, width) {
+  L = Number(length) || 105;
+  W = Number(width) || 68;
+}
 
 export class PitchView {
   constructor(canvas, { margin = 4 } = {}) {

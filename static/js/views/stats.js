@@ -34,7 +34,7 @@ export async function render(root, ctx) {
   const heatTitle = h('h3', {}, 'Heatmap');
   root.append(tablePanel, h('div', { className: 'grid-cols' },
     h('div', { className: 'panel' }, heatTitle, heatCanvas, h('div', { className: 'small muted', style: { marginTop: '6px' } },
-      'Klik op een speler in de tabel. Speelrichting zoals gefilmd; teams wisselen in de rust van kant.')),
+      'Klik op een speler in de tabel. Video\'s met "Richting ⇄ omdraaien" (standaard de 2e helft) zijn gespiegeld, zodat beide helften dezelfde kant op spelen.')),
     h('div', { className: 'panel' }, h('h3', {}, 'Teamvorm (gemiddelde posities)'), shapeCanvas)),
   h('div', { className: 'panel' }, h('div', { className: 'row' }, h('h3', {}, 'Passnetwerk'),
     h('select', { onchange: e => { networkTeam = Number(e.target.value); drawNetwork(); } },
@@ -108,7 +108,8 @@ export async function render(root, ctx) {
     const head = ['speler', 'rugnummer', 'team', 'minuten', 'afstand_m', 'topsnelheid_kmh', 'sprints', 'passes', 'balverlies', 'balcontacten'];
     const lines = [head.join(';'), ...rows().map(p => [p.name, p.number || '', teamName(match, p.team), p.minutes, p.distance_m,
       p.max_speed_kmh, p.sprints, p.passes, p.passes_failed, p.possessions].join(';'))];
-    const a = h('a', { href: URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' })), download: `${match.name}.csv` });
+    // \ufeff vooraan: dan leest Excel de letters met accenten (é, ë) goed
+    const a = h('a', { href: URL.createObjectURL(new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })), download: `${match.name}.csv` });
     a.click();
   }
 

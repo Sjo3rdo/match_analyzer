@@ -2,10 +2,12 @@ import { api, h } from '../util.js';
 
 export async function render(root) {
   const list = await api('/matches');
+  const squads = await api('/squads').catch(() => []);
   const name = h('input', { placeholder: 'Bijv. JO17-1 – VV Voorbeeld', size: 30 });
   const date = h('input', { type: 'date', value: new Date().toISOString().slice(0, 10) });
-  const t0 = h('input', { placeholder: 'Thuisteam', value: 'Thuis' });
-  const t1 = h('input', { placeholder: 'Uitteam', value: 'Uit' });
+  // Teamnaam kiezen uit de vaste selecties: dan worden de spelers meteen overgenomen
+  const t0 = h('input', { placeholder: 'Thuisteam', value: 'Thuis', list: 'squad-names' });
+  const t1 = h('input', { placeholder: 'Uitteam', value: 'Uit', list: 'squad-names' });
   const create = async () => {
     if (!name.value.trim()) return name.focus();
     const m = await api('/matches', { json: { name: name.value, date: date.value, team0_name: t0.value, team1_name: t1.value } });
@@ -15,7 +17,10 @@ export async function render(root) {
     h('h1', {}, 'Wedstrijden'),
     h('div', { className: 'panel' },
       h('h2', {}, 'Nieuwe wedstrijd'),
-      h('div', { className: 'row' }, name, date, t0, t1, h('button', { className: 'primary', onclick: create }, 'Aanmaken'))),
+      h('datalist', { id: 'squad-names' }, squads.map(q => h('option', { value: q.name }))),
+      h('div', { className: 'row' }, name, date, t0, t1, h('button', { className: 'primary', onclick: create }, 'Aanmaken')),
+      squads.length ? h('div', { className: 'small muted', style: { marginTop: '6px' } },
+        `Kies bij een team een opgeslagen naam (${squads.map(q => q.name).join(', ')}): dan staan de spelers er meteen in.`) : null),
     h('div', { className: 'panel' },
       list.length ? h('table', {},
         h('tr', {}, h('th', {}, 'Wedstrijd'), h('th', {}, 'Datum'), h('th', {}, 'Teams'), h('th', {}, "Video's"), h('th')),
