@@ -35,6 +35,8 @@ async def lifespan(_app: FastAPI):
     # Clips die bij afsluiten nog bezig waren, opnieuw in de wachtrij zetten
     for c in store.all("SELECT id FROM clips WHERE status IN ('wachtrij', 'preview', 'analyse')"):
         worker.submit(c["id"])
+    for c in store.all("SELECT id FROM clips WHERE calib_status IN ('wachtrij', 'bezig') AND status = 'klaar'"):
+        worker.submit_autocalib(c["id"])
     yield
 
 
@@ -247,7 +249,11 @@ def get_keyframes(clip_id: int):
     out = []
     prior = camera_prior(_get("clips", clip_id))
     for kf in store.keyframes(clip_id):
-        kf["error_m"] = _calib_error(kf["points"], prior)
+        if kf.get("auto"):
+            kf["score"] = json.loads(kf["score"]) if kf.get("score") else None
+            kf["error_m"] = None
+        else:
+            kf["error_m"] = _calib_error(kf["points"], prior)
         out.append(kf)
     return out
 
@@ -277,6 +283,7 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
         kid = store.run("INSERT INTO keyframes (clip_id, t, points) VALUES (?,?,?)",
                         (clip_id, data["t"], json.dumps(points)))
     analytics.invalidate()
+    _start_autocalib(clip)
     return {"id": kid, "t": data["t"], "error_m": round(err, 2)}
 
 
@@ -344,7 +351,38 @@ def predict(clip_id: int, t: float = 0.0):
 
 @app.delete("/api/keyframes/{kf_id}")
 def delete_keyframe(kf_id: int):
+    kf = store.one("SELECT * FROM keyframes WHERE id = ?", (kf_id,))
     store.run("DELETE FROM keyframes WHERE id = ?", (kf_id,))
+    if kf and not kf["auto"]:
+        if store.one("SELECT 1 AS x FROM keyframes WHERE clip_id = ? AND auto = 0", (kf["clip_id"],)):
+            _start_autocalib(_get("clips", kf["clip_id"]))
+        else:  # geen handmatige kalibratie meer: automatische vervallen ook
+            store.run("DELETE FROM keyframes WHERE clip_id = ? AND auto = 1", (kf["clip_id"],))
+    analytics.invalidate()
+    return {"ok": True}
+
+
+def _start_autocalib(clip: dict) -> None:
+    if worker is not None and clip["status"] == "klaar":
+        worker.submit_autocalib(clip["id"])
+
+
+@app.post("/api/clips/{clip_id}/autocalib")
+def start_autocalib(clip_id: int):
+    """Kalibratie automatisch bijstellen over de hele video (op basis van de veldlijnen)."""
+    c = _get("clips", clip_id)
+    if c["status"] != "klaar":
+        raise HTTPException(409, "Analyseer de video eerst")
+    if not store.one("SELECT 1 AS x FROM keyframes WHERE clip_id = ? AND auto = 0", (clip_id,)):
+        raise HTTPException(400, "Kalibreer eerst één sleutelframe met de hand")
+    worker.submit_autocalib(clip_id)
+    return _get("clips", clip_id)
+
+
+@app.delete("/api/clips/{clip_id}/autocalib")
+def clear_autocalib(clip_id: int):
+    store.run("DELETE FROM keyframes WHERE clip_id = ? AND auto = 1", (clip_id,))
+    store.run("UPDATE clips SET calib_status = NULL, calib_message = NULL WHERE id = ?", (clip_id,))
     analytics.invalidate()
     return {"ok": True}
 

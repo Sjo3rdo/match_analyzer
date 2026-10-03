@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from . import config, pitch
-from .calibration import CameraModel, Keyframe, camera_prior, fit_calibration
+from .calibration import CameraModel, Keyframe, camera_prior, fit_keyframe
 from .storage import Store, clip_dir
 from .teams import TEAM_OTHER
 
@@ -81,10 +81,10 @@ def load_clip(store: Store, clip_id: int) -> ClipData | None:
     motion_path = clip_dir(clip_id) / "motion.npy"
     inter = np.load(motion_path) if Path(motion_path).exists() else np.tile(np.eye(3), (len(t), 1, 1))
     kfs = []
+    prior = camera_prior(clip)
     for kf in store.keyframes(clip_id):
-        pts = kf["points"]
         try:
-            K, _ = fit_calibration(pts, camera=camera_prior(clip))
+            K, _ = fit_keyframe(kf, camera=prior)
         except ValueError:
             continue
         kfs.append(Keyframe(int(np.argmin(np.abs(t - kf["t"]))), K))

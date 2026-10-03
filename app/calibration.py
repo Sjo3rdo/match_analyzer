@@ -66,6 +66,14 @@ def calibration_residuals(K: np.ndarray, points: list[dict]) -> np.ndarray:
     return np.array(out)
 
 
+def fit_keyframe(kf: dict, camera: dict | None = None) -> tuple[np.ndarray, float]:
+    """Kalibratie van een sleutelframe. Automatische sleutelframes bevatten exacte punten
+    (een raster uit de lijnen-fit), daar is geen cameramodel of verfijning voor nodig."""
+    if kf.get("auto"):
+        return _fit_free(kf["points"], refine=False)
+    return fit_calibration(kf["points"], camera=camera)
+
+
 def fit_calibration(points: list[dict], camera: dict | None = None) -> tuple[np.ndarray, float]:
     """Kalibratie; met `camera` (voorkennis over positie/hoogte) via het cameramodel."""
     if camera is not None:
@@ -89,7 +97,7 @@ def fit_calibration(points: list[dict], camera: dict | None = None) -> tuple[np.
     return _fit_free(points)
 
 
-def _fit_free(points: list[dict]) -> tuple[np.ndarray, float]:
+def _fit_free(points: list[dict], refine: bool = True) -> tuple[np.ndarray, float]:
     """Homografie beeld -> veld uit punten én punten-op-een-lijn.
 
     points: [{"img": [x, y], "pitch": [X, Y]}]  (bekend veldpunt), of
@@ -125,7 +133,7 @@ def _fit_free(points: list[dict]) -> tuple[np.ndarray, float]:
                          "of alles op één lijn). Voeg nog een punt of een andere lijn toe.")
     Kn = vt[-1].reshape(3, 3)
     K = np.linalg.inv(Tp) @ Kn @ Ti
-    K = _refine(K / K[2, 2], points)
+    K = _refine(K / K[2, 2], points) if refine else K / K[2, 2]
     if not np.all(np.isfinite(K)):
         raise ValueError("Kalibratie mislukt")
     return K, float(np.mean(calibration_residuals(K, points)))
