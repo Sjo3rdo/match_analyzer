@@ -114,7 +114,13 @@ export function fitCalibration(pairs) {
   const Gn = [[h[0], h[1], h[2]], [h[3], h[4], h[5]], [h[6], h[7], 1]];
   const G = mul(inv(Tp), mul(Gn, Ti));
   if (!G.flat().every(Number.isFinite)) return null;
-  return G.map(r => r.map(v => v / G[2][2]));
+  // Schalen zonder het teken om te draaien: het teken van w zegt of iets vóór of achter de camera
+  // ligt. Aangeklikte punten liggen op het veld, vóór de camera: die moeten w > 0 krijgen.
+  const d = Math.abs(G[2][2]) > 1e-12 ? Math.abs(G[2][2]) : 1;
+  let Gs = G.map(r => r.map(v => v / d));
+  const votes = pairs.reduce((s, p) => s + Math.sign(Gs[2][0] * p.img[0] + Gs[2][1] * p.img[1] + Gs[2][2]), 0);
+  if (votes < 0) Gs = Gs.map(r => r.map(v => -v));
+  return Gs;
 }
 
 // Gemiddelde fout in meters (punt: afstand, lijnpunt: afstand tot de lijn)

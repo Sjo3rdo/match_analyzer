@@ -74,10 +74,17 @@ Zie het als een puzzel in drie lagen: eerst *zien* (wie staat waar in beeld), da
      zoekt het voetbalveld op in OpenStreetMap en zet je positie automatisch op de tekening. Daarvoor
      wordt alleen de coördinaat naar OpenStreetMap gestuurd, en alleen als jij op de knop klikt. De
      iPhone slaat de positie op ongeveer 5 à 10 m nauwkeurig op; klik je plek gerust preciezer aan.
-   - Omdat je uit de hand filmt, voeg je elke 30 tot 60 seconden een *sleutelframe* toe, en ook na
-     elke flinke zwenk of zoom. Tussen de sleutelframes volgt de app de camerabeweging zelf, zoals
-     een lijm die de plattegrond op het beeld vasthoudt. Na de analyse voorspelt de app de punten
-     (de gele stippellijnen), zodat je ze alleen nog hoeft bij te schuiven.
+   - **Eén sleutelframe is genoeg.** Na de analyse volgt de app de camerabeweging, zoals een lijm die
+     de plattegrond op het beeld vasthoudt. Elke seconde zoekt hij daarnaast de witte veldlijnen op
+     en legt hij de plattegrond er opnieuw precies op (**🤖 Automatisch bijgesteld**). Dit start
+     vanzelf zodra je een sleutelframe opslaat, of na de analyse. De gele stippellijnen laten op elk
+     moment zien hoe goed het past.
+   - Het bijstellen werkt het best als je ook hebt ingesteld **waar je stond**: dan houdt de app je
+     zoom en scheefstand vast en kan er niets ongemerkt wegglijden.
+   - Kijk je lang langs alleen de zijlijn, zonder dwarslijnen zoals de 16-meterlijn, middenlijn,
+     doellijn of cirkel? Dan is niet te zien hoeveel je gedraaid hebt. De app slaat die momenten over
+     en overbrugt ze met de camerabeweging tot er weer dwarslijnen in beeld komen. Past het ergens
+     niet, zet daar dan zelf een extra sleutelframe.
 
 3. **Spelers.** Voer de selectie in, met rugnummers. Klik op **Automatisch koppelen** om
    tracks met een leesbaar rugnummer te koppelen. De rest koppel je via de kaartjes of door in

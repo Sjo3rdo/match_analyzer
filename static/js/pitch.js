@@ -83,7 +83,17 @@ export class PitchView {
 // Lijnen van het veld als reeksen punten (meters), voor de controle-overlay bij kalibratie.
 export function pitchPolylines() {
   const lines = [];
-  const seg = (pts) => lines.push(pts);
+  // Rechte stukken opdelen in stappen van 1 m: ligt een uiteinde achter de camera, dan wordt het
+  // zichtbare deel toch getekend (anders valt het hele stuk weg).
+  const seg = (pts) => {
+    const dense = [pts[0]];
+    for (let i = 1; i < pts.length; i++) {
+      const [x0, y0] = pts[i - 1], [x1, y1] = pts[i];
+      const n = Math.max(1, Math.ceil(Math.hypot(x1 - x0, y1 - y0)));
+      for (let k = 1; k <= n; k++) dense.push([x0 + (x1 - x0) * k / n, y0 + (y1 - y0) * k / n]);
+    }
+    lines.push(dense);
+  };
   const rect = (x, y, w, hh) => seg([[x, y], [x + w, y], [x + w, y + hh], [x, y + hh], [x, y]]);
   const circle = (cx, cy, r, a0 = 0, a1 = 2 * Math.PI, n = 48) => {
     const pts = [];

@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import analytics, clips as clip_export, config, geo, pitch, render
-from .calibration import camera_prior, fit_calibration, fit_camera
+from .calibration import camera_prior, fit_calibration, fit_camera, normalize_h
 from .pipeline import Worker, probe, read_frame
 from .storage import Store, clip_dir
 
@@ -300,11 +300,11 @@ def calibrate_preview(clip_id: int, data: dict = Body(...)):
     cam = None
     if prior is not None:
         try:
-            cam = {k: round(v, 1) for k, v in fit_camera(points, prior)[1].items()}
+            cam = {k: round(v, 1) for k, v in fit_camera(points, prior)[1].items() if k != "params"}
         except ValueError:
             pass
     H = np.linalg.inv(K)
-    return {"ok": True, "H": (H / H[2, 2]).tolist(), "error_m": round(err, 2), "camera": cam}
+    return {"ok": True, "H": normalize_h(H).tolist(), "error_m": round(err, 2), "camera": cam}
 
 
 @app.patch("/api/clips/{clip_id}/camera")

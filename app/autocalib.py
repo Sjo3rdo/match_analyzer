@@ -26,7 +26,8 @@ import cv2
 import numpy as np
 
 from . import pitch
-from .calibration import CameraModel, Keyframe, apply_h, camera_prior, cumulative, fit_calibration, fit_camera
+from .calibration import (CameraModel, Keyframe, apply_h, camera_prior, cumulative, fit_calibration, fit_camera,
+                          normalize_h)
 
 log = logging.getLogger(__name__)
 
@@ -34,9 +35,10 @@ WORK_WIDTH = 960
 PRECISION_MIN = 0.85  # deel van de gevonden lijnpixels dat op het model moet vallen
 MAX_ROT_STEP_DEG = 0.8  # grootste toegestane correctie per bijstelling
 MAX_ZOOM_STEP = 0.02
+MIN_SPREAD = 0.08  # lijnrichtingen: 0 = alles evenwijdig, 1 = alle kanten op
 
 
-def pitch_samples(step: float = 0.5) -> np.ndarray:
+def pitch_samples(step: float = 0.5, with_tangents: bool = False):
     """Punten op alle veldlijnen (meters)."""
     L, W, c = pitch.LENGTH, pitch.WIDTH, pitch.HALF_W
     segs = [((0, 0), (L, 0)), ((0, W), (L, W)), ((0, 0), (0, W)), ((L, 0), (L, W)), ((L / 2, 0), (L / 2, W))]
@@ -44,21 +46,25 @@ def pitch_samples(step: float = 0.5) -> np.ndarray:
         for d, half in ((16.5, 20.16), (5.5, 9.16)):
             segs += [((x0, c - half), (x0 + s * d, c - half)), ((x0, c + half), (x0 + s * d, c + half)),
                      ((x0 + s * d, c - half), (x0 + s * d, c + half))]
-    pts = []
+    pts, tans = [], []
     for a, b in segs:
         a, b = np.array(a, float), np.array(b, float)
         n = max(2, int(np.linalg.norm(b - a) / step) + 1)
         pts.append(a + np.linspace(0, 1, n)[:, None] * (b - a))
+        tans.append(np.tile((b - a) / np.linalg.norm(b - a), (n, 1)))
     r = 9.15
     for cx, a0, a1 in ((L / 2, 0, 2 * math.pi), (11, -math.acos(5.5 / r), math.acos(5.5 / r)),
                        (L - 11, math.pi - math.acos(5.5 / r), math.pi + math.acos(5.5 / r))):
         n = max(8, int(r * (a1 - a0) / step))
         t = np.linspace(a0, a1, n)
         pts.append(np.stack([cx + r * np.cos(t), c + r * np.sin(t)], 1))
+        tans.append(np.stack([-np.sin(t), np.cos(t)], 1))
+    if with_tangents:
+        return np.vstack(pts), np.vstack(tans)
     return np.vstack(pts)
 
 
-SAMPLES = pitch_samples()
+SAMPLES, TANGENTS = pitch_samples(with_tangents=True)
 DENSE = pitch_samples(step=0.1)  # om de modellijnen als plaatje te tekenen
 
 
@@ -101,6 +107,23 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
         extent = float(np.hypot(w, h))
         keep[k] = extent >= 15 and extent >= 5 * max(thick, 1.5)
     return np.where(keep[lab_cc], 255, 0).astype(np.uint8)
+
+
+def centerlines(mask: np.ndarray) -> np.ndarray:
+    """Hartlijnen (1 pixel breed) van de gevonden lijnen: morfologisch skelet.
+
+    Brede lijnen vlak bij de camera zouden anders een "speelruimte" van een halve lijnbreedte
+    geven waarbinnen het model ongemerkt kan verschuiven."""
+    img = (mask > 0).astype(np.uint8)
+    skel = np.zeros_like(img)
+    k = cv2.getStructuringElement(cv2.MORPH_CROSS, (3, 3))
+    for _ in range(40):
+        if not img.any():
+            break
+        eroded = cv2.erode(img, k)
+        skel |= img & ~cv2.dilate(eroded, k)
+        img = eroded
+    return skel * 255
 
 
 def pitch_roi(H_work: np.ndarray, size: tuple[int, int], margin: float = 4.0) -> np.ndarray:
@@ -177,90 +200,155 @@ def _line_width_px(H: np.ndarray, pts: np.ndarray, width_m: float = 0.12) -> np.
     return np.minimum(dx, dy)
 
 
+def camera_from_h(H: np.ndarray, cam: dict, size: tuple[int, int], p0: np.ndarray) -> np.ndarray:
+    """Kijkrichting [yaw, tilt, roll, log_f] die bij homografie H past, met vaste camerapositie."""
+    from .calibration import _lm, camera_homography
+
+    xs, ys = np.meshgrid(np.linspace(-5, pitch.LENGTH + 5, 23), np.linspace(-5, pitch.WIDTH + 5, 15))
+    world = np.stack([xs.ravel(), ys.ravel()], 1)
+    hom = np.hstack([world, np.ones((len(world), 1))]) @ H.T
+    ok = hom[:, 2] > 1e-6
+    img = hom[:, :2] / np.where(ok, hom[:, 2], 1)[:, None]
+    W, Hh = size
+    ok &= (img[:, 0] > -0.2 * W) & (img[:, 0] < 1.2 * W) & (img[:, 1] > -0.2 * Hh) & (img[:, 1] < 1.2 * Hh)
+    world, img = world[ok], img[ok]
+    if len(world) < 6:
+        return p0
+
+    def res(q):
+        Hq = camera_homography(np.array([cam["x"], cam["y"], cam["h"], *q]), size)
+        return ((apply_h(Hq, world) - img) / 10.0).ravel()
+
+    return _lm(res, np.asarray(p0, float), iters=30)
+
+
 def refine(frame: np.ndarray, H_pred: np.ndarray, boxes: np.ndarray | None, f_full: float,
-           debug: dict | None = None) -> tuple[np.ndarray, dict] | None:
-    """Stel H (veld -> beeld, volle resolutie) bij op de lijnen in dit beeld. None = niet betrouwbaar."""
+           debug: dict | None = None, camera: dict | None = None) -> tuple[np.ndarray, dict] | None:
+    """Stel H (veld -> beeld, volle resolutie) bij op de lijnen in dit beeld. None = niet betrouwbaar.
+
+    Zonder `camera`: een kleine extra draaiing + zoom bovenop de voorspelling (relatief).
+    Met `camera` ({x, y, h, roll, log_f, q0}): de camera staat stil op een bekende plek en zoomt
+    niet, dus we zoeken de absolute kijkrichting; zoom en scheefstand worden naar de waarden van
+    het handmatige sleutelframe getrokken. Dan is ook één zichtbare lijn genoeg en kan er niets
+    ongemerkt 'langs de lijn' wegglijden."""
+    from .calibration import camera_homography
+
+    full = (frame.shape[1], frame.shape[0])
     s = WORK_WIDTH / frame.shape[1]
     S = np.diag([s, s, 1.0])
     Hw = S @ H_pred
     size = (WORK_WIDTH, int(round(frame.shape[0] * s)))
+    Wd, Hd = size
     lines = detect_lines(frame, boxes, roi=pitch_roi(Hw, size))
     if lines.sum() / 255 < 150:
         return None
+    lines = centerlines(lines)
     dt = cv2.distanceTransform(255 - lines, cv2.DIST_L2, 3)
-    # veldmodel-punten die nu in beeld liggen (en voor de camera)
+    det_y, det_x = np.nonzero(lines)
+    # veldmodel-punten die nu in beeld liggen, voor de camera, en breed genoeg om te zien
     hom = np.hstack([SAMPLES, np.ones((len(SAMPLES), 1))]) @ Hw.T
     front = hom[:, 2] > 1e-6
     proj = hom[:, :2] / np.where(front, hom[:, 2], 1)[:, None]
-    vis = front & (proj[:, 0] > 2) & (proj[:, 0] < size[0] - 3) & (proj[:, 1] > 2) & (proj[:, 1] < size[1] - 3)
-    # alleen stukken lijn die in beeld breed genoeg zijn om gezien te worden (een lijn is ~12 cm)
+    vis = front & (proj[:, 0] > 2) & (proj[:, 0] < Wd - 3) & (proj[:, 1] > 2) & (proj[:, 1] < Hd - 3)
     vis &= _line_width_px(Hw, SAMPLES) >= 1.2
     if vis.sum() < 60:
         return None
-    base = proj[vis]
+    world, world_tip = SAMPLES[vis], SAMPLES[vis] + 0.5 * TANGENTS[vis]
     f = f_full * s
-    Wd, Hd = size
+    deg = math.radians(1.0)
 
-    sig = np.array([math.radians(1.5)] * 3 + [0.02])  # voorkeur: kleine correctie
+    if camera is None:
+        def H_of(p):
+            return correction(p, f, size) @ Hw
+        x0 = np.zeros(4)
+        sig = np.array([math.radians(1.5)] * 3 + [0.02])
+        center = x0
+        steps = [np.array([deg, deg, deg, 0.03]), np.array([deg / 3] * 3 + [0.01]), np.array([deg / 10] * 3 + [0.003])]
+    else:
+        fixed = [camera["x"], camera["y"], camera["h"]]
 
-    def score(params, tau):
-        D = correction(params, f, size)
-        q = apply_h(D, base)
-        inside = (q[:, 0] >= 0) & (q[:, 0] < Wd - 1) & (q[:, 1] >= 0) & (q[:, 1] < Hd - 1)
-        d = np.full(len(q), tau, np.float32)
+        def H_of(p):
+            return S @ camera_homography(np.array([*fixed, *p]), full)
+        x0 = camera_from_h(H_pred, camera, full, camera["q0"])
+        # trek scheefstand en zoom naar die van het handmatige sleutelframe, richting naar de voorspelling
+        center = np.array([x0[0], x0[1], camera["roll"], camera["log_f"]])
+        sig = np.array([math.radians(1.5), math.radians(1.5), math.radians(1.0), 0.02])
+        steps = [np.array([deg, deg, deg, 0.03]), np.array([deg / 3] * 3 + [0.01]), np.array([deg / 10] * 3 + [0.003])]
+
+    def project(Hm, pts):
+        hh = np.hstack([pts, np.ones((len(pts), 1))]) @ Hm.T
+        return hh[:, :2] / np.where(np.abs(hh[:, 2:3]) > 1e-9, hh[:, 2:3], 1e-9), hh[:, 2] > 1e-6
+
+    def dists(p):
+        q, fr = project(H_of(p), world)
+        inside = fr & (q[:, 0] >= 0) & (q[:, 0] < Wd - 1) & (q[:, 1] >= 0) & (q[:, 1] < Hd - 1)
+        d = np.full(len(q), 99.0, np.float32)
         qi = q[inside].astype(np.float32)
-        d[inside] = np.minimum(cv2.remap(dt, qi[:, 0:1], qi[:, 1:2], cv2.INTER_LINEAR).ravel(), tau)
-        # gemiddelde afstand (als fractie van tau) + straf op grote draaiing/zoom
-        return float(np.mean(d)) / tau + 0.02 * float(np.sum((params / sig) ** 2))
+        if len(qi):
+            d[inside] = cv2.remap(dt, qi[:, 0:1], qi[:, 1:2], cv2.INTER_LINEAR).ravel()
+        return d, q
 
-    def inliers(params, px=2.5):
-        q = apply_h(correction(params, f, size), base)
-        inside = (q[:, 0] >= 0) & (q[:, 0] < Wd - 1) & (q[:, 1] >= 0) & (q[:, 1] < Hd - 1)
-        qi = q[inside].astype(np.float32)
-        d = cv2.remap(dt, qi[:, 0:1], qi[:, 1:2], cv2.INTER_LINEAR).ravel()
-        return float((d < px).sum() / len(q))
+    def score(p, tau):
+        d, _ = dists(p)
+        return float(np.mean(np.minimum(d, tau))) / tau + 0.02 * float(np.sum(((p - center) / sig) ** 2))
 
-    det_y, det_x = np.nonzero(lines)
-
-    def precision(params, px=3.0):
+    def precision(p, px=3.0):
         """Deel van de gevonden lijnpixels dat op een modellijn valt (gezien vanaf het beeld)."""
-        Hm = correction(params, f, size) @ Hw
-        hom = np.hstack([DENSE, np.ones((len(DENSE), 1))]) @ Hm.T
-        okp = hom[:, 2] > 1e-6
-        q = (hom[okp, :2] / hom[okp, 2:3])
-        q = q[(q[:, 0] > -50) & (q[:, 0] < Wd + 50) & (q[:, 1] > -50) & (q[:, 1] < Hd + 50)].astype(np.int32)
+        q, fr = project(H_of(p), DENSE)
+        q = q[fr]
+        q = q[(q[:, 0] >= 0) & (q[:, 0] < Wd) & (q[:, 1] >= 0) & (q[:, 1] < Hd)].astype(np.int32)
         model = np.zeros((Hd, Wd), np.uint8)
-        for (u, v) in q:
-            if 0 <= u < Wd and 0 <= v < Hd:
-                model[v, u] = 255
+        model[q[:, 1], q[:, 0]] = 255
         model = cv2.dilate(model, np.ones((3, 3), np.uint8))
         dm = cv2.distanceTransform(255 - model, cv2.DIST_L2, 3)
         return float((dm[det_y, det_x] < px).mean()) if len(det_x) else 0.0
 
-    x = np.zeros(4)
-    before = inliers(x)
-    deg = math.radians(1.0)
-    for tau, st in ((25.0, np.array([deg, deg, deg, 0.03])), (8.0, np.array([deg / 3] * 3 + [0.01])),
-                    (3.0, np.array([deg / 10] * 3 + [0.003]))):
+    x = x0.copy()
+    before = float((dists(x0)[0] < 2.5).mean())
+    for tau, st in zip((25.0, 8.0, 3.0), steps):
         x = _nelder_mead(lambda p: score(p, tau), x, st)
-    after = inliers(x)
-    prec_before, prec = precision(np.zeros(4)), precision(x)
-    info = {"before": round(before, 3), "after": round(after, 3), "n": int(len(base)),
+    d, q = dists(x)
+    hit = d < 2.5
+    after = float(hit.mean())
+    prec_before, prec = precision(x0), precision(x)
+    # lijnrichtingen van de raakpunten (alleen relevant zonder bekende camerapositie)
+    spread = 0.0
+    if hit.sum() >= 10:
+        qt, _ = project(H_of(x), world_tip)
+        tv = qt[hit] - q[hit]
+        tv /= np.linalg.norm(tv, axis=1, keepdims=True) + 1e-9
+        nrm = np.stack([-tv[:, 1], tv[:, 0]], 1)
+        ev = np.linalg.eigvalsh(nrm.T @ nrm / len(nrm))
+        spread = float(ev[0] / max(ev[1], 1e-9))
+    # Alleen evenwijdige lijnen in beeld (bijv. alleen de zijlijn): dan is niet te zien hoeveel de
+    # camera langs die lijn gedraaid is. Overslaan; de camerabeweging overbrugt tot er weer
+    # dwarslijnen (16-meter, middenlijn, doellijn, cirkel) in beeld zijn.
+    one_dir = spread < MIN_SPREAD
+    if camera is None:
+        rot = float(np.linalg.norm(x[:3]))
+        zoom_dev = abs(x[3])
+        max_rot, max_zoom = math.radians(MAX_ROT_STEP_DEG), MAX_ZOOM_STEP
+        ok_extra = True
+    else:
+        rot = float(np.hypot(x[0] - x0[0], x[1] - x0[1]))
+        zoom_dev = abs(x[3] - x0[3])
+        max_rot, max_zoom = math.radians(MAX_ROT_STEP_DEG), MAX_ZOOM_STEP
+        # zoom en scheefstand mogen niet ver van het handmatige sleutelframe liggen
+        ok_extra = abs(x[3] - camera["log_f"]) < 0.06 and abs(x[2] - camera["roll"]) < math.radians(3)
+    info = {"before": round(before, 3), "after": round(after, 3), "n": int(len(world)),
             "precision": round(prec, 3), "precision_before": round(prec_before, 3),
-            "rot_deg": round(math.degrees(float(np.linalg.norm(x[:3]))), 2), "zoom": round(math.exp(x[3]), 3)}
+            "rot_deg": round(math.degrees(rot), 2), "zoom": round(math.exp(zoom_dev), 3),
+            "spread": round(spread, 3), "one_direction": bool(one_dir), "camera_mode": camera is not None}
     if debug is not None:
         debug.update(info)
-    # Acceptatie: alleen kleine correcties. Eén beeld kan dubbelzinnig zijn (het model kan een lijn
-    # opschuiven naar een parallelle lijn); dat vergt een grote correctie. Omdat we elke seconde
-    # bijstellen is de echte correctie klein (gemeten drift ~1-3 px/s), dus "klein" is veilig.
-    n_in = after * len(base)
-    rot = float(np.linalg.norm(x[:3]))
-    if (after < 0.30 or n_in < 50 or prec < PRECISION_MIN or prec < prec_before - 0.02
-            or abs(x[3]) > MAX_ZOOM_STEP or rot > math.radians(MAX_ROT_STEP_DEG)):
+    # Acceptatie: genoeg raak, gevonden lijnen vallen op het model, en alleen een kleine correctie
+    # (één beeld kan dubbelzinnig zijn; omdat we elke seconde bijstellen is de echte correctie klein).
+    if (one_dir or after < 0.30 or after * len(world) < 50 or prec < PRECISION_MIN or prec < prec_before - 0.02
+            or zoom_dev > max_zoom or rot > max_rot or not ok_extra):
         return None
-    D = correction(x, f, size)
-    H_new = np.linalg.inv(S) @ D @ Hw
-    return H_new / H_new[2, 2], info
+    H_new = np.linalg.inv(S) @ H_of(x)
+    info["params"] = [round(float(v), 6) for v in x]
+    return normalize_h(H_new), info
 
 
 def keyframe_points(H: np.ndarray, size: tuple[int, int]) -> list[dict]:
@@ -343,6 +431,20 @@ def run_autocalib(store, clip_id: int, every_s: float = 1.0, progress=None) -> d
     if not accepted:
         raise ValueError("Kalibreer eerst één sleutelframe met de hand")
     f_full = _focal(clip, manual)
+    # Bekende camerapositie (aangeklikt of via GPS)? Dan bijstellen met het cameramodel: vaste plek,
+    # zoom en scheefstand vastgehouden aan het handmatige sleutelframe.
+    cam_mode = None
+    params_of: dict[int, np.ndarray] = {}
+    if prior is not None:
+        for kf in manual:
+            try:
+                _, cam = fit_camera(kf["points"], prior)
+            except ValueError:
+                continue
+            p = np.array(cam["params"])
+            cam_mode = {"x": p[0], "y": p[1], "h": p[2], "roll": p[5], "log_f": p[6]}
+            params_of[int(np.argmin(np.abs(t - kf["t"])))] = p[3:]
+            break
     size = (int(clip["width"]), int(clip["height"]))
     fps = (len(t) - 1) / max(1e-6, t[-1] - t[0])
     step = max(1, int(round(every_s * fps)))
@@ -363,7 +465,13 @@ def run_autocalib(store, clip_id: int, every_s: float = 1.0, progress=None) -> d
         frame = reader.at(float(t[i]))
         if frame is None:
             return False
-        res = refine(frame, H_pred / H_pred[2, 2], np.array(boxes_of.get(i, [])).reshape(-1, 4), f_full)
+        camera = None
+        if cam_mode is not None:
+            near = min(params_of, key=lambda q: abs(q - i)) if params_of else None
+            q0 = params_of[near] if near is not None else np.array([0.0, 0.2, cam_mode["roll"], cam_mode["log_f"]])
+            camera = {**cam_mode, "q0": q0}
+        res = refine(frame, normalize_h(H_pred), np.array(boxes_of.get(i, [])).reshape(-1, 4), f_full,
+                     camera=camera)
         if res is None:
             return False
         H_new, info = res
@@ -371,6 +479,8 @@ def run_autocalib(store, clip_id: int, every_s: float = 1.0, progress=None) -> d
         if len(pts) < 4:
             return False
         accepted[i] = np.linalg.inv(H_new)
+        if camera is not None and "params" in info:
+            params_of[i] = np.array(info["params"])
         store.run("INSERT INTO keyframes (clip_id, t, points, auto, score) VALUES (?,?,?,1,?)",
                   (clip_id, float(t[i]), json.dumps(pts), json.dumps(info)))
         return True

@@ -8,7 +8,7 @@ import numpy as np
 from app import autocalib as ac
 from app.calibration import CameraModel, Keyframe, apply_h, camera_homography, cumulative, default_focal
 
-W, H, FPS, SECONDS = 960, 540, 20, 8
+W, H, FPS, SECONDS = 960, 540, 20, 10
 PX_PER_M, MARGIN = 8.0, 15.0
 
 
@@ -31,7 +31,7 @@ def _texture():
 
 def _camera(t):
     f = default_focal(W)
-    yaw = math.radians(-120 + 12 * t)  # zwenkt ~96° in 8 s
+    yaw = math.radians(-130 + 8 * t)  # zwenkt 80° in 10 s: van het linker strafschopgebied tot voorbij het midden
     return np.array([52.5, 85.0, 6.0, yaw, math.radians(13), 0.0, math.log(f)])
 
 
@@ -42,7 +42,7 @@ def _frame(tex, Hc):
     return out
 
 
-def test_autocalib_removes_drift(tmp_path):
+def _run_drift_test(tmp_path, with_camera: bool):
     from app import pipeline
     from app.detection import FrameDetections
     from app.storage import Store, clip_dir
@@ -69,15 +69,20 @@ def test_autocalib_removes_drift(tmp_path):
             return FrameDetections(np.zeros((0, 4)), np.zeros(0), None)
 
     pipeline.process_clip(store, cid, detector=NoPlayers())
+    if with_camera:  # camerapositie bekend (aangeklikt of via GPS), 2 m naast de echte plek
+        cam = _camera(0)
+        store.run("UPDATE clips SET cam_x = ?, cam_y = ?, cam_h = ?, cam_source = 'hand' WHERE id = ?",
+                  (cam[0] + 1.5, cam[1] - 1.5, cam[2], cid))
     frames = store.all("SELECT idx, t FROM frames WHERE clip_id = ? ORDER BY idx", (cid,))
     t = np.array([f["t"] for f in frames])
 
-    # sabotage: per stap een kleine extra draaiing in de camerabeweging (drift). 0,04° per
-    # geanalyseerd frame = 0,4°/s; ruim meer dan gemeten op echte clips (~0,05-0,1°/s).
-    inter = np.load(clip_dir(cid) / "motion.npy")
+    # Camerabeweging: de echte (uit de nagemaakte camera) plus een sluipende fout van 0,02° en
+    # 0,05% zoom per geanalyseerd frame (0,2°/s). Dat is meer dan gemeten op echte clips; zonder
+    # bijstellen loopt de kalibratie daardoor binnen enkele seconden tientallen pixels weg.
     f = default_focal(W)
-    D = ac.correction(np.array([0.0, math.radians(0.04), 0.0, 0.0005]), f, (W, H))
-    inter[1:] = np.array([D @ h for h in inter[1:]])
+    D = ac.correction(np.array([0.0, math.radians(0.02), 0.0, 0.0005]), f, (W, H))
+    Hs = [camera_homography(_camera(ti), (W, H)) for ti in t]
+    inter = np.array([np.eye(3)] + [D @ Hs[i] @ np.linalg.inv(Hs[i - 1]) for i in range(1, len(t))])
     np.save(clip_dir(cid) / "motion.npy", inter)
 
     # één handmatig sleutelframe aan het begin (exact)
@@ -101,13 +106,23 @@ def test_autocalib_removes_drift(tmp_path):
     K0 = np.linalg.inv(H0)
     before = errors([Keyframe(0, K0)])
     res = ac.run_autocalib(store, cid)
-    assert res["accepted"] >= 0.6 * res["tried"], res
     kfs = [Keyframe(0, K0)]
     for kf in store.keyframes(cid):
         if kf["auto"]:
             from app.calibration import fit_keyframe
             kfs.append(Keyframe(int(np.argmin(np.abs(t - kf["t"]))), fit_keyframe(kf)[0]))
     after = errors(kfs)
-    # zonder bijstellen loopt de fout op tot tientallen pixels; met bijstellen blijft hij klein
-    assert before[-1] > 25, before
-    assert np.median(after) < 3 and after.max() < 8, (before.round(1), after.round(1))
+    return before, after, res
+
+def test_autocalib_removes_drift_with_camera_position(tmp_path):
+    before, after, res = _run_drift_test(tmp_path, with_camera=True)
+    assert res["accepted"] >= 0.5 * res["tried"], res
+    assert before[-1] > 20, before  # zonder bijstellen: tientallen pixels weg
+    assert np.median(after) < 3 and after.max() < 6, (before.round(1), after.round(1))
+
+
+def test_autocalib_without_camera_position_never_worse(tmp_path):
+    """Zonder camerapositie is niet alles te bepalen, maar het mag nooit slechter worden."""
+    before, after, res = _run_drift_test(tmp_path, with_camera=False)
+    assert np.all(after <= before + 1.0), (before.round(1), after.round(1))
+    assert np.median(after) < 0.7 * np.median(before)

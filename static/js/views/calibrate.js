@@ -39,8 +39,9 @@ export async function render(root, ctx) {
       'strafschopstip, doelpaal, hoekvlag...) of op een plek ergens op een veldlijn. 3) Klik hetzelfde punt of dezelfde lijn aan ' +
       'in de veldtekening rechts (lijnen worden rood als je erop klikt). Een punt telt 2, een lijn telt mee met hoogstens 2 punten; ' +
       'je hebt samen 8 nodig, bijv. 4 punten, of 1 punt + 3 lijnen (handig vanaf de zijlijn: zijlijn, 16-meterlijn, doellijn). ' +
-      'De witte lijnen laten zien of het klopt. Omdat je camera beweegt: voeg elke 30–60 seconden en na flinke zwenks een nieuw ' +
-      'sleutelframe toe. Na de analyse voorspelt de app punten en lijnen (geel); dan hoef je ze alleen bij te schuiven.'),
+      'De witte lijnen laten zien of het klopt. Eén sleutelframe is genoeg: daarna legt de app het veld elke seconde zelf ' +
+      'opnieuw op de witte lijnen (🤖 hieronder). De gele lijnen tonen op elk moment hoe goed het past; past het ergens niet, ' +
+      'zet daar dan een extra sleutelframe.'),
     h('div', { className: 'row', style: { marginBottom: '12px' } }, 'Video:', clipSel),
     h('div', { className: 'grid2' },
       h('div', { className: 'panel' },
@@ -310,7 +311,8 @@ export async function render(root, ctx) {
 
   async function loadKeyframes() {
     keyframes = await api(`/clips/${clip.id}/keyframes`);
-    kfList.replaceChildren(...(keyframes.length ? keyframes.map(kf => h('div', { className: 'list-item', onclick: () => {
+    const manual = keyframes.filter(k => !k.auto), autos = keyframes.filter(k => k.auto);
+    const rows = manual.map(kf => h('div', { className: 'list-item', onclick: () => {
       t = kf.t; slider.value = t; pairs = kf.points.map(p => ({ ...p })); editingId = kf.id; loadFrame();
     } },
       h('b', {}, fmtTime(kf.t)), h('span', { style: { flex: 1 } }, `${kf.points.length} punten`),
@@ -321,7 +323,50 @@ export async function render(root, ctx) {
         await api(`/keyframes/${kf.id}`, { method: 'DELETE' });
         if (editingId === kf.id) editingId = null;
         loadKeyframes();
-      } }, '×'))) : [h('div', { className: 'muted small' }, 'Nog geen sleutelframes. Zonder kalibratie kan de app geen meters berekenen.')]));
+      } }, '×')));
+    kfList.replaceChildren(...(rows.length ? rows : [h('div', { className: 'muted small' },
+      'Nog geen sleutelframes. Kalibreer er één; daarna stelt de app de rest van de video automatisch bij.')]), autoPanel(autos, manual));
+  }
+
+  // Automatisch bijstellen: status, aantal automatische sleutelframes, opnieuw/wissen
+  let calibTimer;
+  function autoPanel(autos, manual) {
+    const st = clip.calib_status, busy = st === 'wachtrij' || st === 'bezig';
+    const box = h('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid var(--border)' } },
+      h('div', { className: 'row', style: { justifyContent: 'space-between' } },
+        h('b', {}, '🤖 Automatisch bijgesteld'),
+        h('span', { className: `badge ${busy ? 'busy' : st === 'fout' ? 'err' : autos.length ? 'ok' : ''}` },
+          busy ? `bezig ${Math.round(100 * (clip.calib_progress || 0))}%` : `${autos.length} sleutelframes`)),
+      h('div', { className: 'small muted', style: { margin: '4px 0' } },
+        st === 'fout' ? clip.calib_message
+          : busy ? 'De app zoekt elke seconde de witte lijnen en legt het veld er opnieuw op.'
+          : clip.status !== 'klaar' ? 'Start na de analyse vanzelf.'
+          : !manual.length ? 'Start vanzelf zodra je één sleutelframe hebt opgeslagen.'
+          : (clip.calib_message || '') + (hasCam() ? '' : ' Tip: stel in waar je stond; dan werkt het bijstellen veel nauwkeuriger.')),
+      manual.length && clip.status === 'klaar' ? h('div', { className: 'row' },
+        h('button', { disabled: busy, onclick: async () => {
+          await api(`/clips/${clip.id}/autocalib`, { method: 'POST' }); refreshClip();
+        } }, 'Opnieuw bijstellen'),
+        autos.length ? h('button', { disabled: busy, onclick: async () => {
+          await api(`/clips/${clip.id}/autocalib`, { method: 'DELETE' }); await refreshClip(); loadKeyframes();
+        } }, 'Wis automatische') : null) : null);
+    clearTimeout(calibTimer);
+    if (busy) calibTimer = setTimeout(refreshClip, 2000);
+    return box;
+  }
+
+  async function refreshClip() {
+    const m = await api(`/matches/${ctx.match.id}`);
+    const fresh = m.clips.find(c => c.id === clip.id);
+    if (!fresh) return;
+    const wasBusy = clip.calib_status === 'wachtrij' || clip.calib_status === 'bezig';
+    Object.assign(clip, fresh);
+    const nowBusy = clip.calib_status === 'wachtrij' || clip.calib_status === 'bezig';
+    await loadKeyframes();
+    if (wasBusy && !nowBusy && clip.status === 'klaar') {  // klaar: voorspelling (geel) bijwerken
+      predicted = await api(`/clips/${clip.id}/predict?t=${t}`);
+      drawFrame();
+    }
   }
 
   async function save() {
@@ -330,7 +375,8 @@ export async function render(root, ctx) {
     const res = await api(`/clips/${clip.id}/keyframes`, { json: { id: editingId, t, points: pairs } });
     editingId = res.id;
     t = res.t;
-    toast(`Sleutelframe opgeslagen (afwijking ${res.error_m} m)`);
+    toast(`Sleutelframe opgeslagen (afwijking ${res.error_m} m)${clip.status === 'klaar' ? ' – de app stelt nu de rest van de video automatisch bij' : ''}`);
+    setTimeout(refreshClip, 500);
     await loadKeyframes();
     predicted = clip.status === 'klaar' ? await api(`/clips/${clip.id}/predict?t=${t}`) : [];
     drawFrame();
@@ -366,5 +412,5 @@ export async function render(root, ctx) {
   await loadClip();
   const onResize = () => { pv.resize(); drawPitch(); };
   window.addEventListener('resize', onResize);
-  return () => { window.removeEventListener('mouseup', onUp); window.removeEventListener('resize', onResize); };
+  return () => { clearTimeout(calibTimer); window.removeEventListener('mouseup', onUp); window.removeEventListener('resize', onResize); };
 }

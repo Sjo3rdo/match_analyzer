@@ -145,3 +145,24 @@ def test_camera_fit_estimates_zoom_with_more_clicks():
     K, err = fit_calibration(pts, camera={**PRIOR, "f": default_focal(1920)})
     e = _probe_error(H, K)
     assert np.median(e) < 1.2 and e.max() < 5
+
+
+def test_front_back_sign_when_pitch_corner_is_behind_camera():
+    """Camera langs de zijlijn die naar rechts kijkt: hoek (0, 0) ligt achter de camera. Punten in
+    beeld moeten dan nog steeds als 'vóór de camera' (w > 0) herkend worden."""
+    import math
+    from app.calibration import camera_homography, default_focal, fit_calibration, fit_camera
+    from app.autocalib import keyframe_points
+    size = (1920, 1080)
+    p = np.array([60.0, 76.0, 1.8, math.radians(-30), math.radians(5), 0.0, math.log(default_focal(1920))])
+    H = camera_homography(p, size)
+    assert (H @ np.array([0.0, 0.0, 1.0]))[2] < 0  # hoek (0,0) ligt echt achter de camera
+    pts = keyframe_points(H, size)
+    assert len(pts) >= 4
+    for K in (fit_calibration(pts)[0],
+              fit_camera(pts, {"x": 60, "y": 76, "h": 1.8, "f": default_focal(1920), "sigma_pos": 3,
+                               "width": 1920, "height": 1080})[0]):
+        w = np.array([q["img"] + [1.0] for q in pts]) @ K[2]
+        assert np.all(w > 0)
+        Hb = np.linalg.inv(K)
+        assert (Hb @ np.array([pts[0]["pitch"][0], pts[0]["pitch"][1], 1.0]))[2] > 0
