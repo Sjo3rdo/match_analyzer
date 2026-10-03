@@ -71,7 +71,7 @@ export async function render(root, ctx) {
             h('button', { className: busy ? '' : 'primary', disabled: busy, onclick: async () => { await api(`/clips/${c.id}/process`, { method: 'POST' }); draw(); ctx.refreshSteps(); } },
               c.status === 'klaar' ? 'Opnieuw' : 'Analyseer'), ' ',
             h('button', { disabled: busy, onclick: () => openSplit(c), title: 'Lange video in delen knippen, of warming-up/rust eruit halen' }, '✂️ Knippen'), ' ',
-            h('button', { className: 'danger', onclick: async () => {
+            h('button', { className: 'danger', disabled: busy, title: busy ? 'Wacht tot de analyse klaar is' : '', onclick: async () => {
               if (!confirm(`${c.filename} verwijderen?`)) return;
               await api(`/clips/${c.id}`, { method: 'DELETE' }); draw(); ctx.refreshSteps();
             } }, 'Verwijder')));

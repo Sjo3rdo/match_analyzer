@@ -10,6 +10,7 @@ import logging
 import queue
 import subprocess
 import threading
+import time
 import traceback
 from collections import defaultdict
 from pathlib import Path
@@ -20,7 +21,7 @@ import numpy as np
 from . import config, jersey, teams
 from .calibration import MotionEstimator, apply_h, cumulative
 from .storage import Store, clip_dir
-from .tracking import Tracker, stitch_tracks
+from .tracking import Tracker, stationary_ids, stitch_tracks
 
 log = logging.getLogger(__name__)
 
@@ -39,7 +40,7 @@ def ffmpeg_exe() -> str:
 
 # Versie van de analyse; clips die met een oudere versie zijn verwerkt, krijgen in de
 # interface het advies om opnieuw te analyseren.
-ANALYSIS_VERSION = 2
+ANALYSIS_VERSION = 3  # 3: nieuwe teamindeling (zon/schaduw, toeschouwers, gelijk tussen video's)
 
 
 def probe(path: Path) -> dict:
@@ -74,12 +75,36 @@ def probe(path: Path) -> dict:
     return info
 
 
-def make_preview(src: Path, dst: Path) -> None:
-    """H.264-versie (720p) die elke browser afspeelt, ook als het origineel HEVC is."""
-    cmd = [ffmpeg_exe(), "-y", "-loglevel", "error", "-i", str(src),
+def make_preview(src: Path, dst: Path, duration: float | None = None, progress=None) -> None:
+    """H.264-versie (720p) die elke browser afspeelt, ook als het origineel HEVC is.
+
+    progress(fractie) wordt tussendoor aangeroepen (ffmpeg meldt hoe ver hij is)."""
+    tmp = dst.with_suffix(".tmp.mp4")
+    cmd = [ffmpeg_exe(), "-y", "-loglevel", "error", "-nostats", "-progress", "pipe:1", "-i", str(src),
            "-vf", "scale=-2:'min(720,ih)'", "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-           "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(dst)]
-    subprocess.run(cmd, check=True)
+           "-c:a", "aac", "-b:a", "96k", "-movflags", "+faststart", str(tmp)]
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+    last = 0.0
+    for line in proc.stdout:
+        key, _, val = line.strip().partition("=")
+        if key in ("out_time_us", "out_time_ms") and duration and progress and val.isdigit():
+            frac = min(1.0, int(val) / 1e6 / duration)  # (ffmpeg geeft bij beide microseconden)
+            if frac - last >= 0.02:
+                last = frac
+                progress(frac)
+    err = proc.stderr.read()
+    if proc.wait() != 0:
+        tmp.unlink(missing_ok=True)
+        raise RuntimeError(f"Preview maken mislukt: {err[-300:]}")
+    tmp.replace(dst)  # pas als hij af is: een half bestand blijft nooit staan
+
+
+def _eta(seconds: float) -> str:
+    if seconds < 90:
+        return "nog minder dan 2 min"
+    if seconds < 3600:
+        return f"nog ca. {round(seconds / 60)} min"
+    return f"nog ca. {seconds / 3600:.1f} uur".replace(".", ",")
 
 
 def read_frame(path: Path, t: float) -> tuple[np.ndarray, float]:
@@ -158,7 +183,8 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
     store.set_clip_status(clip_id, "preview", 0.0, "Preview-video maken")
     preview = out_dir / "preview.mp4"
     if not preview.exists():
-        make_preview(src, preview)
+        make_preview(src, preview, clip.get("duration"),
+                     lambda f: store.set_clip_status(clip_id, "preview", f, f"Preview-video maken ({round(100 * f)}%)"))
 
     if detector is None:
         from .detection import get_detector
@@ -185,6 +211,7 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
         frame_rows.clear(), det_rows.clear(), ball_rows.clear()
 
     frame_no, idx = 0, 0
+    started = time.time()
     while True:
         if frame_no % stride:
             if not cap.grab():
@@ -211,8 +238,10 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
         frame_no += 1
         if idx % 50 == 0:
             flush()
-            store.set_clip_status(clip_id, "analyse", 0.05 + 0.9 * frame_no / total,
-                                  f"Frame {frame_no} van {total}")
+            frac = min(1.0, frame_no / total)
+            eta = (time.time() - started) / frac * (1 - frac) if frac > 0.02 else None
+            store.set_clip_status(clip_id, "analyse", 0.05 + 0.9 * frac,
+                                  f"Frame {frame_no} van {total}" + (f" · {_eta(eta)}" if eta is not None else ""))
     cap.release()
     flush()
     np.save(out_dir / "motion.npy", np.array(inter) if inter else np.zeros((0, 3, 3)))
@@ -253,8 +282,6 @@ def _finish_tracks(store: Store, clip_id: int, stats: dict[int, _TrackStats], ou
     thumbs.mkdir(exist_ok=True)
     ids = [tid for tid, s in stats.items() if s.colors]
     colors = np.array([np.median(stats[t].colors, axis=0) for t in ids]) if ids else np.zeros((0, 3))
-    weights = np.array([stats[t].n for t in ids])
-    team_of = dict(zip(ids, teams.assign_teams(colors, weights).tolist()))
     color_of = {t: teams.lab_to_hex(c) for t, c in zip(ids, colors)}
     use_ocr = jersey.available()
     rows = []
@@ -262,11 +289,75 @@ def _finish_tracks(store: Store, clip_id: int, stats: dict[int, _TrackStats], ou
         if s.best:
             cv2.imwrite(str(thumbs / f"{tid}.jpg"), s.best[0][1])
         number, nconf = jersey.read_number([c for _, c in s.best]) if use_ocr and s.n >= 10 else (None, 0.0)
-        team = team_of.get(tid, teams.TEAM_UNKNOWN)
-        rows.append((clip_id, tid, s.n, s.t0, s.t1, color_of.get(tid), team, team, number, nconf))
+        rows.append((clip_id, tid, s.n, s.t0, s.t1, color_of.get(tid), teams.TEAM_UNKNOWN, teams.TEAM_UNKNOWN,
+                     number, nconf))
     with store.tx() as c:
         c.executemany("INSERT INTO tracks (clip_id, track_id, n_frames, t_start, t_end, color, team, "
                       "team_auto, jersey_guess, jersey_conf) VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
+    assign_clip_teams(store, clip_id, keep_manual=False)
+
+
+def assign_clip_teams(store: Store, clip_id: int, keep_manual: bool = True) -> dict:
+    """Teams van een video (opnieuw) bepalen uit de shirtkleuren, en gelijktrekken met de andere
+    video's van dezelfde wedstrijd (anders kan 'Thuis' in de 2e helft ineens 'Uit' heten).
+
+    keep_manual: tracks waarvan de gebruiker het team zelf heeft aangepast, blijven zo."""
+    tracks = store.all("SELECT track_id, color, n_frames, team, team_auto FROM tracks WHERE clip_id = ?", (clip_id,))
+    clip = store.one("SELECT * FROM clips WHERE id = ?", (clip_id,))
+    if not tracks or clip is None:
+        return {"swapped": False}
+    t = np.array([r[0] for r in store.rows("SELECT t FROM frames WHERE clip_id = ? ORDER BY idx", (clip_id,))])
+    det = np.array(store.rows("SELECT idx, track_id, x1, y1, x2, y2 FROM detections WHERE clip_id = ?", (clip_id,)),
+                   dtype=np.float64).reshape(-1, 6)
+    still: set[int] = set()
+    motion = clip_dir(clip_id) / "motion.npy"
+    if len(det) and len(t) and motion.exists():
+        A = cumulative(np.load(motion)[:len(t)])
+        if len(A) == len(t):
+            feet = np.stack([(det[:, 2] + det[:, 4]) / 2, det[:, 5]], 1)
+            still = stationary_ids(t, det[:, 0].astype(int), det[:, 1].astype(int), feet, det[:, 5] - det[:, 3], A)
+    have = [r for r in tracks if teams.hex_to_lab(r["color"]) is not None]
+    labels: dict[int, int] = {}
+    swapped = False
+    if have:
+        lab = np.array([teams.hex_to_lab(r["color"]) for r in have])
+        w = np.array([r["n_frames"] or 1 for r in have], float)
+        new = teams.assign_teams(lab, w, exclude=np.array([r["track_id"] in still for r in have]))
+        ref = _reference_team_colors(store, clip["match_id"], exclude_clip=clip_id)
+        mine = teams.team_centers(lab, w, new)
+        if all(c is not None for c in ref) and all(c is not None for c in mine):
+            same = teams.color_distance(mine[0], ref[0]) + teams.color_distance(mine[1], ref[1])
+            cross = teams.color_distance(mine[0], ref[1]) + teams.color_distance(mine[1], ref[0])
+            if cross < same:
+                new = np.where(new == 0, 1, np.where(new == 1, 0, new))
+                swapped = True
+        labels = {r["track_id"]: int(v) for r, v in zip(have, new)}
+    rows = []
+    for r in tracks:
+        auto = labels.get(r["track_id"], teams.TEAM_UNKNOWN)
+        manual = keep_manual and r["team"] != r["team_auto"]
+        rows.append((auto, r["team"] if manual else auto, clip_id, r["track_id"]))
+    with store.tx() as c:
+        c.executemany("UPDATE tracks SET team_auto = ?, team = ? WHERE clip_id = ? AND track_id = ?", rows)
+    return {"swapped": swapped, "stationary": len(still)}
+
+
+def _reference_team_colors(store: Store, match_id: int, exclude_clip: int) -> list[np.ndarray | None]:
+    """Kleur van team 0 en 1 volgens de andere video's van de wedstrijd (of de opgeslagen teamkleuren)."""
+    rows = store.all(
+        "SELECT t.color, t.n_frames, COALESCE(p.team, t.team) AS team FROM tracks t "
+        "JOIN clips c ON c.id = t.clip_id LEFT JOIN players p ON p.id = t.player_id "
+        "WHERE c.match_id = ? AND c.id != ? AND c.status = 'klaar' AND t.color IS NOT NULL", (match_id, exclude_clip))
+    out: list[np.ndarray | None] = [None, None]
+    for team in (0, 1):
+        sel = [(teams.hex_to_lab(r["color"]), r["n_frames"] or 1) for r in rows if r["team"] == team]
+        sel = [(c, w) for c, w in sel if c is not None]
+        if sel:
+            out[team] = np.average([c for c, _ in sel], axis=0, weights=[w for _, w in sel])
+    if out[0] is None or out[1] is None:  # nog geen andere video: dan de opgeslagen teamkleuren
+        m = store.one("SELECT * FROM matches WHERE id = ?", (match_id,)) or {}
+        out = [teams.hex_to_lab(m.get("team0_color")), teams.hex_to_lab(m.get("team1_color"))]
+    return out
 
 
 class Worker:
@@ -292,6 +383,10 @@ class Worker:
         self.store.set_clip_status(clip_id, "wachtrij", 0.0, "In de wachtrij")
         self._put(("process", clip_id))
 
+    def submit_teams(self, clip_id: int) -> None:
+        """Teams opnieuw indelen met de huidige methode (zonder opnieuw te analyseren)."""
+        self._put(("teams", clip_id))
+
     def submit_autocalib(self, clip_id: int) -> None:
         if self._put(("autocalib", clip_id)):
             self.store.run("UPDATE clips SET calib_status = 'wachtrij', calib_progress = 0, "
@@ -309,9 +404,21 @@ class Worker:
                     log.error("Verwerking clip %s mislukt\n%s", clip_id, traceback.format_exc())
                     self.store.set_clip_status(clip_id, "fout", None, str(e))
                     continue
+                from . import analytics
+
+                analytics.invalidate(clip_id=clip_id)
                 # bestaande handmatige kalibratie automatisch doortrekken over de hele video
                 if self.store.one("SELECT 1 AS x FROM keyframes WHERE clip_id = ? AND auto = 0", (clip_id,)):
                     self.submit_autocalib(clip_id)
+            elif kind == "teams":
+                from . import analytics
+
+                try:
+                    assign_clip_teams(self.store, clip_id, keep_manual=True)
+                    self.store.run("UPDATE clips SET analysis_version = ? WHERE id = ?", (ANALYSIS_VERSION, clip_id))
+                except Exception:  # noqa: BLE001
+                    log.error("Teams indelen clip %s mislukt\n%s", clip_id, traceback.format_exc())
+                analytics.invalidate(geometry=False)
             else:
                 self._autocalib(clip_id)
 
@@ -330,4 +437,4 @@ class Worker:
         except Exception as e:  # noqa: BLE001
             log.error("Automatisch bijstellen clip %s mislukt\n%s", clip_id, traceback.format_exc())
             self.store.run("UPDATE clips SET calib_status = 'fout', calib_message = ? WHERE id = ?", (str(e), clip_id))
-        analytics.invalidate()
+        analytics.invalidate(clip_id=clip_id)

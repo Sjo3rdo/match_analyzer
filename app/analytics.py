@@ -14,7 +14,7 @@ Stap voor stap:
 from __future__ import annotations
 
 import threading
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,18 +24,44 @@ from . import config, pitch
 from .calibration import CameraModel, Keyframe, apply_h, camera_prior, fit_keyframe
 from .storage import Store, clip_dir
 from .teams import TEAM_OTHER
+from .tracking import stationary_ids
 
-_cache: dict[tuple[int, int], "ClipData"] = {}
-_cache_lock = threading.Lock()
-_version = 0
+# Twee lagen cache, zoals een kast met twee planken:
+# - onder de zware spullen (detecties ingelezen en naar het veld geprojecteerd). Die veranderen
+#   alleen als de analyse, de kalibratie, de camerapositie of de veldmaten veranderen;
+# - boven de lichte spullen (welke track bij welke speler en welk team hoort). Die veranderen
+#   bij elke klik in "Spelers", maar zijn in een oogwenk opnieuw gemaakt.
+_lock = threading.RLock()
+_geo: dict[int, tuple[tuple[int, int], "ClipGeo"]] = {}
+_geo_epoch = 0
+_clip_epoch: dict[int, int] = defaultdict(int)
+_meta_epoch = 0
+_data: OrderedDict = OrderedDict()
+_stats: OrderedDict = OrderedDict()
 
 
-def invalidate() -> None:
-    """Aanroepen na elke wijziging die de analyse beïnvloedt."""
-    global _version
-    with _cache_lock:
-        _version += 1
-        _cache.clear()
+def invalidate(geometry: bool = True, clip_id: int | None = None) -> None:
+    """Aanroepen na elke wijziging.
+
+    geometry=True: analyse, kalibratie, camerapositie of veldmaten veranderd (zwaar).
+    geometry=False: alleen koppelingen, teams, namen of de speelrichting (licht).
+    clip_id: alleen die video (anders alles)."""
+    global _geo_epoch, _meta_epoch
+    with _lock:
+        _meta_epoch += 1
+        if geometry:
+            if clip_id is None:
+                _geo_epoch += 1
+                _geo.clear()
+            else:
+                _clip_epoch[clip_id] += 1
+                _geo.pop(clip_id, None)
+        _data.clear()
+        _stats.clear()
+
+
+def _epoch(clip_id: int) -> tuple[int, int]:
+    return (_geo_epoch, _clip_epoch[clip_id])
 
 
 @dataclass
@@ -44,7 +70,7 @@ class ClipData:
     t: np.ndarray  # tijd (s) per geanalyseerd frame
     fps: float  # geanalyseerde frames per seconde
     calibrated: bool
-    # detecties (rijen)
+    # detecties (rijen, gesorteerd op frame)
     idx: np.ndarray
     track: np.ndarray
     boxes: np.ndarray
@@ -58,28 +84,57 @@ class ClipData:
     entity: dict[int, str] = field(default_factory=dict)  # track -> entiteit
     team: dict[int, int] = field(default_factory=dict)  # track -> team
     valid_tracks: set[int] = field(default_factory=set)
+    groups: dict[int, np.ndarray] | None = None  # track -> rijnummers (op volgorde van tijd)
+    geom: pitch.Geometry = pitch.DEFAULT
+    stationary: set[int] = field(default_factory=set)
+
+    def rows_of(self, tid: int) -> np.ndarray:
+        if self.groups is None:
+            self.groups = group_rows(self.track)
+        return self.groups.get(int(tid), np.zeros(0, int))
 
 
 def entity_key(clip_id: int, track_id: int, player_id: int | None) -> str:
     return f"p{player_id}" if player_id else f"c{clip_id}t{track_id}"
 
 
-def load_clip(store: Store, clip_id: int) -> ClipData | None:
-    with _cache_lock:
-        cached = _cache.get((clip_id, _version))
-    if cached is not None:
-        return cached
+def group_rows(track: np.ndarray) -> dict[int, np.ndarray]:
+    """Rijnummers per track in één keer (in plaats van per track de hele tabel te doorzoeken)."""
+    if len(track) == 0:
+        return {}
+    order = np.argsort(track, kind="stable")  # stabiel: binnen een track blijft de tijdsvolgorde
+    cuts = np.flatnonzero(np.diff(track[order])) + 1
+    return {int(track[g[0]]): g for g in np.split(order, cuts)}
+
+
+def flipped(clip: dict) -> bool:
+    """Speelrichting omdraaien voor de statistieken? Standaard bij de 2e helft."""
+    f = clip.get("flip")
+    return bool(f) if f is not None else clip.get("period") == 2
+
+
+def _load_geo(store: Store, clip_id: int) -> ClipData | None:
+    """Het zware deel: detecties inlezen, naar het veld projecteren, toeschouwers herkennen."""
+    with _lock:
+        hit = _geo.get(clip_id)
+        if hit is not None and hit[0] == _epoch(clip_id):
+            return hit[1]
+        epoch = _epoch(clip_id)
     clip = store.one("SELECT * FROM clips WHERE id = ?", (clip_id,))
     if clip is None or clip["status"] != "klaar":
         return None
-    frames = store.all("SELECT idx, t FROM frames WHERE clip_id = ? ORDER BY idx", (clip_id,))
-    t = np.array([f["t"] for f in frames], dtype=np.float64)
+    match = store.one("SELECT * FROM matches WHERE id = ?", (clip["match_id"],))
+    geom = pitch.of_match(match)
+    frames = store.rows("SELECT t FROM frames WHERE clip_id = ? ORDER BY idx", (clip_id,))
+    t = np.array([f[0] for f in frames], dtype=np.float64)
     if len(t) == 0:
         return None
     fps = (len(t) - 1) / (t[-1] - t[0]) if len(t) > 1 and t[-1] > t[0] else config.TARGET_FPS
 
     motion_path = clip_dir(clip_id) / "motion.npy"
     inter = np.load(motion_path) if Path(motion_path).exists() else np.tile(np.eye(3), (len(t), 1, 1))
+    if len(inter) < len(t):
+        inter = np.concatenate([inter, np.tile(np.eye(3), (len(t) - len(inter), 1, 1))])
     kfs = []
     prior = camera_prior(clip)
     for kf in store.keyframes(clip_id):
@@ -90,44 +145,92 @@ def load_clip(store: Store, clip_id: int) -> ClipData | None:
         kfs.append(Keyframe(int(np.argmin(np.abs(t - kf["t"]))), K))
     cam = CameraModel(inter[:len(t)], kfs)
 
-    rows = store.all("SELECT idx, track_id, x1, y1, x2, y2 FROM detections WHERE clip_id = ? "
-                     "ORDER BY idx", (clip_id,))
-    idx = np.array([r["idx"] for r in rows], dtype=int)
-    track = np.array([r["track_id"] for r in rows], dtype=int)
-    boxes = np.array([[r["x1"], r["y1"], r["x2"], r["y2"]] for r in rows]).reshape(-1, 4)
-    feet = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, boxes[:, 3]], axis=1) if len(rows) else np.zeros((0, 2))
-    xy = _project_rows(cam, idx, feet)
+    rows = store.rows("SELECT idx, track_id, x1, y1, x2, y2 FROM detections WHERE clip_id = ? ORDER BY idx",
+                      (clip_id,))
+    arr = np.array(rows, dtype=np.float64).reshape(-1, 6)
+    idx, track, boxes = arr[:, 0].astype(int), arr[:, 1].astype(int), arr[:, 2:6]
+    feet = np.stack([(boxes[:, 0] + boxes[:, 2]) / 2, boxes[:, 3]], axis=1)
+    xy = cam.project_rows(idx, feet)
 
-    brows = store.all("SELECT idx, x, y FROM ball WHERE clip_id = ? ORDER BY idx", (clip_id,))
-    ball_idx = np.array([r["idx"] for r in brows], dtype=int)
-    ball_img = np.array([[r["x"], r["y"]] for r in brows]).reshape(-1, 2)
-    ball_xy = _project_rows(cam, ball_idx, ball_img)
+    brows = np.array(store.rows("SELECT idx, x, y FROM ball WHERE clip_id = ? ORDER BY idx", (clip_id,)),
+                     dtype=np.float64).reshape(-1, 3)
+    ball_idx, ball_img = brows[:, 0].astype(int), brows[:, 1:3]
+    ball_xy = clean_ball(t[ball_idx] if len(ball_idx) else np.zeros(0), cam.project_rows(ball_idx, ball_img),
+                         geom) if cam.calibrated else np.full((len(ball_idx), 2), np.nan)
 
-    data = ClipData(clip, t, fps, cam.calibrated, idx, track, boxes, xy, ball_idx, ball_xy, ball_img,
-                    camera=cam)
-    players = {p["id"]: p for p in store.all(
-        "SELECT * FROM players WHERE match_id = ?", (clip["match_id"],))}
+    d = ClipData(clip, t, fps, cam.calibrated, idx, track, boxes, xy, ball_idx, ball_xy, ball_img,
+                 camera=cam, groups=group_rows(track), geom=geom)
+    d.stationary = stationary_tracks(d)
+    d.valid_tracks = _valid_tracks(d)
+    with _lock:
+        if _epoch(clip_id) == epoch:
+            _geo[clip_id] = (epoch, d)
+    return d
+
+
+def load_clip(store: Store, clip_id: int) -> ClipData | None:
+    """Alle gegevens van een geanalyseerde video, inclusief koppelingen aan spelers en teams."""
+    geo = _load_geo(store, clip_id)
+    if geo is None:
+        return None
+    key = (clip_id, _epoch(clip_id), _meta_epoch)
+    with _lock:
+        hit = _data.get(key)
+        if hit is not None:
+            return hit
+    clip = store.one("SELECT * FROM clips WHERE id = ?", (clip_id,)) or geo.clip
+    d = ClipData(clip, geo.t, geo.fps, geo.calibrated, geo.idx, geo.track, geo.boxes, geo.xy,
+                 geo.ball_idx, geo.ball_xy, geo.ball_img, camera=geo.camera, valid_tracks=geo.valid_tracks,
+                 groups=geo.groups, geom=geo.geom, stationary=geo.stationary)
+    players = {p["id"]: p for p in store.all("SELECT * FROM players WHERE match_id = ?", (clip["match_id"],))}
     for tr in store.all("SELECT * FROM tracks WHERE clip_id = ?", (clip_id,)):
         tid = tr["track_id"]
-        data.tracks[tid] = tr
+        d.tracks[tid] = tr
         pid = tr["player_id"]
-        data.entity[tid] = entity_key(clip_id, tid, pid)
-        data.team[tid] = players[pid]["team"] if pid in players else tr["team"]
-    data.valid_tracks = _valid_tracks(data)
-    with _cache_lock:
-        _cache[(clip_id, _version)] = data
-    return data
+        d.entity[tid] = entity_key(clip_id, tid, pid)
+        d.team[tid] = players[pid]["team"] if pid in players else tr["team"]
+    with _lock:
+        _data[key] = d
+        while len(_data) > 16:
+            _data.popitem(last=False)
+    return d
 
 
 def _project_rows(cam: CameraModel, idx: np.ndarray, pts: np.ndarray) -> np.ndarray:
-    out = np.full((len(idx), 2), np.nan)
-    if not cam.calibrated or len(idx) == 0:
-        return out
-    order = np.argsort(idx, kind="stable")
-    bounds = np.flatnonzero(np.diff(idx[order])) + 1
-    for group in np.split(order, bounds):
-        out[group] = cam.project(int(idx[group[0]]), pts[group])
-    return out
+    return cam.project_rows(idx, pts)
+
+
+def clean_ball(t: np.ndarray, xy: np.ndarray, geom: pitch.Geometry, margin: float = 2.0,
+               max_speed: float = 40.0) -> np.ndarray:
+    """Onmogelijke balposities weggooien (NaN):
+    - buiten het veld: een reservebal of pion langs de lijn, of een hoge bal (de projectie gaat
+      ervan uit dat de bal op de grond ligt, dus een bal in de lucht komt ver buiten het veld uit);
+    - losse uitschieters: een 'bal' die ineens 30 m verderop ligt en direct weer terug is."""
+    xy = np.array(xy, dtype=np.float64, copy=True)
+    if len(xy) == 0:
+        return xy
+    x, y = xy[:, 0], xy[:, 1]
+    off = ~((x >= -margin) & (x <= geom.length + margin) & (y >= -margin) & (y <= geom.width + margin))
+    xy[off] = np.nan
+    ok = np.flatnonzero(~np.isnan(xy).any(axis=1))
+    for k in range(1, len(ok) - 1):
+        a, b, c = ok[k - 1], ok[k], ok[k + 1]
+        dt1, dt2 = max(1e-3, t[b] - t[a]), max(1e-3, t[c] - t[b])
+        if dt1 > 1.0 or dt2 > 1.0:
+            continue
+        v1 = np.linalg.norm(xy[b] - xy[a]) / dt1
+        v2 = np.linalg.norm(xy[c] - xy[b]) / dt2
+        if v1 > max_speed and v2 > max_speed and np.linalg.norm(xy[c] - xy[a]) / (dt1 + dt2) < max_speed:
+            xy[b] = np.nan
+    return xy
+
+
+def stationary_tracks(d: ClipData) -> set[int]:
+    """Tracks van mensen die stilstaan ten opzichte van de achtergrond (zie tracking.stationary_ids)."""
+    if d.camera is None or len(d.camera.A) == 0 or len(d.track) == 0:
+        return set()
+    feet = np.stack([(d.boxes[:, 0] + d.boxes[:, 2]) / 2, d.boxes[:, 3]], 1)
+    return stationary_ids(d.t, d.idx, d.track, feet, d.boxes[:, 3] - d.boxes[:, 1], d.camera.A)
 
 
 def _valid_tracks(d: ClipData, min_frames: int = 10, min_on_pitch: float = 0.6) -> set[int]:
@@ -135,41 +238,32 @@ def _valid_tracks(d: ClipData, min_frames: int = 10, min_on_pitch: float = 0.6) 
 
     - Kort in beeld (< min_frames): weg.
     - Voeten meestal onder de rand van het beeld: iemand vlak voor de camera, niet op het veld.
-    - Staat de hele tijd op dezelfde plek (gemeten tegen de achtergrond, dus los van het zwenken):
-      een toeschouwer. Na kalibratie geldt dat alleen langs de zijlijnen of buiten het veld, zodat
-      een keeper die even stilstaat blijft meetellen.
+    - Staat stil ten opzichte van de achtergrond (stationary_tracks): een toeschouwer. Na
+      kalibratie geldt dat alleen langs de zijlijnen of buiten het veld, zodat een keeper die even
+      stilstaat blijft meetellen.
     - Na kalibratie: meestal buiten het veld."""
-    valid = set()
+    valid: set[int] = set()
     if not len(d.track):
         return valid
     H_img = float(d.clip.get("height") or 0)
-    feet = np.stack([(d.boxes[:, 0] + d.boxes[:, 2]) / 2, d.boxes[:, 3], np.ones(len(d.boxes))], 1)
-    A = d.camera.A if d.camera is not None and len(d.camera.A) else None
-    if A is not None:  # voetpunt in het referentiebeeld (camerabeweging eruit)
-        ref = np.einsum("nij,nj->ni", A[np.clip(d.idx, 0, len(A) - 1)], feet)
-        ref = ref[:, :2] / np.where(np.abs(ref[:, 2:3]) > 1e-9, ref[:, 2:3], 1e-9)
-    else:
-        ref = feet[:, :2]
-    height = d.boxes[:, 3] - d.boxes[:, 1]
-    for tid in np.unique(d.track):
-        m = d.track == tid
-        if m.sum() < min_frames:
+    still = d.stationary if d.stationary else stationary_tracks(d)
+    W = d.geom.width
+    groups = d.groups if d.groups is not None else group_rows(d.track)
+    for tid, rows in groups.items():
+        if len(rows) < min_frames:
             continue
-        if H_img and (d.boxes[m, 3] >= H_img - 3).mean() > 0.5:
+        if H_img and (d.boxes[rows, 3] >= H_img - 3).mean() > 0.5:
             continue
-        span = d.t[d.idx[m]].max() - d.t[d.idx[m]].min()
-        r = ref[m]
-        dev = np.linalg.norm(r - np.median(r, axis=0), axis=1)
-        stationary = span >= 6.0 and np.percentile(dev, 90) < 0.5 * max(1.0, float(np.median(height[m])))
+        st = tid in still
         if d.calibrated:
-            x, y = d.xy[m, 0], d.xy[m, 1]
-            ok = (x >= -1.5) & (x <= pitch.LENGTH + 1.5) & (y >= -1.5) & (y <= pitch.WIDTH + 1.5)
+            x, y = d.xy[rows, 0], d.xy[rows, 1]
+            ok = (x >= -1.5) & (x <= d.geom.length + 1.5) & (y >= -1.5) & (y <= W + 1.5)
             if ok.mean() < min_on_pitch:
                 continue
             my = float(np.nanmedian(y)) if np.isfinite(y).any() else 0.0
-            if stationary and (my < 4.0 or my > pitch.WIDTH - 4.0):
+            if st and (my < 4.0 or my > W - 4.0):
                 continue
-        elif stationary:
+        elif st:
             continue
         valid.add(int(tid))
     return valid
@@ -223,14 +317,18 @@ def movement_stats(segments: list[tuple[np.ndarray, np.ndarray]]) -> dict:
     return {"distance_m": dist, "max_speed_ms": max_speed, "seconds": seconds, "sprints": sprints}
 
 
-def heatmap(points: np.ndarray, fps: float) -> list[list[float]]:
-    """Seconden per veldcel (rijen = y, kolommen = x)."""
+def heatmap(points: np.ndarray, fps: float | np.ndarray, geom: pitch.Geometry = pitch.DEFAULT) -> list[list[float]]:
+    """Seconden per veldcel (rijen = y, kolommen = x).
+
+    fps: geanalyseerde frames per seconde, of per punt (video's kunnen verschillen: bij 25 fps
+    analyseren we 12,5 beelden per seconde, bij 30 fps 10)."""
     nx, ny = config.HEATMAP_BINS
     if len(points) == 0:
         return np.zeros((ny, nx)).tolist()
+    w = 1.0 / np.broadcast_to(np.asarray(fps, dtype=np.float64), (len(points),))
     h, _, _ = np.histogram2d(points[:, 1], points[:, 0], bins=[ny, nx],
-                             range=[[0, pitch.WIDTH], [0, pitch.LENGTH]])
-    return (h / fps).round(2).tolist()
+                             range=[[0, geom.width], [0, geom.length]], weights=w)
+    return h.round(2).tolist()
 
 
 # --- balbezit en passes ------------------------------------------------------------------
@@ -247,14 +345,15 @@ class Possession:
 def possession_segments(d: ClipData) -> list[Possession]:
     if not d.calibrated or len(d.ball_idx) == 0:
         return []
-    by_idx: dict[int, list[int]] = defaultdict(list)
-    for row in range(len(d.idx)):
-        if int(d.track[row]) in d.valid_tracks:
-            by_idx[int(d.idx[row])].append(row)
+    vrows = np.flatnonzero(np.isin(d.track, np.fromiter(d.valid_tracks, int, len(d.valid_tracks)))
+                           & ~np.isnan(d.xy).any(axis=1))
+    vrows = vrows[np.argsort(d.idx[vrows], kind="stable")]
+    vidx = d.idx[vrows]
     owners: list[tuple[int, int | None]] = []  # (frame, track)
     for bi, bxy in zip(d.ball_idx, d.ball_xy):
-        rows = by_idx.get(int(bi), [])
-        if not rows or np.isnan(bxy).any():
+        lo, hi = np.searchsorted(vidx, bi), np.searchsorted(vidx, bi, side="right")
+        rows = vrows[lo:hi]
+        if not len(rows) or np.isnan(bxy).any():
             owners.append((int(bi), None))
             continue
         dist = np.linalg.norm(d.xy[rows] - bxy, axis=1)
@@ -304,12 +403,28 @@ def passes(segs: list[Possession]) -> list[dict]:
 # --- wedstrijdniveau ---------------------------------------------------------------------
 
 def match_stats(store: Store, match_id: int) -> dict:
+    """Statistieken van de hele wedstrijd (alle video's). Bewaard tot er iets verandert."""
+    key = (match_id, _geo_epoch, _meta_epoch)
+    with _lock:
+        if key in _stats:
+            return _stats[key]
+    out = _match_stats(store, match_id)
+    with _lock:
+        _stats[key] = out
+        while len(_stats) > 4:
+            _stats.popitem(last=False)
+    return out
+
+
+def _match_stats(store: Store, match_id: int) -> dict:
     match = store.one("SELECT * FROM matches WHERE id = ?", (match_id,))
+    geom = pitch.of_match(match)
     players = {f"p{p['id']}": p for p in store.all("SELECT * FROM players WHERE match_id = ?", (match_id,))}
     clips = store.all("SELECT * FROM clips WHERE match_id = ? ORDER BY order_idx, id", (match_id,))
 
     seg_by_entity: dict[str, list] = defaultdict(list)
     pts_by_entity: dict[str, list] = defaultdict(list)
+    fps_by_entity: dict[str, list] = defaultdict(list)
     sec_by_entity: dict[str, float] = defaultdict(float)
     team_of: dict[str, int] = {}
     label_of: dict[str, str] = {}
@@ -325,15 +440,20 @@ def match_stats(store: Store, match_id: int) -> dict:
                        "calibrated": bool(d and d.calibrated)})
         if d is None or not d.calibrated:
             continue
-        for tid in d.valid_tracks:
+        flip = flipped(clip)  # 2e helft: zelfde speelrichting als de 1e (alleen voor posities)
+        for tid in sorted(d.valid_tracks):
             ent = d.entity[tid] if tid in d.entity else entity_key(clip["id"], tid, None)
             if ent not in players and d.team.get(tid, -1) == TEAM_OTHER:
                 continue
-            m = d.track == tid
-            ts, xy = d.t[d.idx[m]], d.xy[m]
+            rows = d.rows_of(tid)
+            ts, xy = d.t[d.idx[rows]], d.xy[rows]
             seg_by_entity[ent].extend(smooth_series(ts, xy))
             on = ~np.isnan(xy).any(axis=1)
-            pts_by_entity[ent].append(xy[on])
+            pos = xy[on]
+            if flip:
+                pos = np.stack([geom.length - pos[:, 0], geom.width - pos[:, 1]], axis=1)
+            pts_by_entity[ent].append(pos)
+            fps_by_entity[ent].append(np.full(len(pos), d.fps))
             sec_by_entity[ent] += on.sum() / d.fps
             team_of.setdefault(ent, d.team.get(tid, -1))
             label_of.setdefault(ent, f"Track {tid} ({clip['filename']})")
@@ -351,12 +471,15 @@ def match_stats(store: Store, match_id: int) -> dict:
             events.append({"kind": "pass" if p["success"] else "balverlies", "clip_id": clip["id"],
                            "t": p["t"], "t_end": p["t_end"], "entity": p["from"], "to": p["to"]})
 
+    passes_ok, passes_bad = defaultdict(int), defaultdict(int)
+    for x in all_passes:
+        (passes_ok if x["success"] else passes_bad)[x["from"]] += 1
     rows = []
     for ent, segs in seg_by_entity.items():
         mv = movement_stats(segs)
         pts = np.concatenate(pts_by_entity[ent]) if pts_by_entity[ent] else np.zeros((0, 2))
+        fps = np.concatenate(fps_by_entity[ent]) if fps_by_entity[ent] else np.zeros(0)
         p = players.get(ent)
-        fps = config.TARGET_FPS
         rows.append({
             "entity": ent,
             "player_id": p["id"] if p else None,
@@ -368,9 +491,9 @@ def match_stats(store: Store, match_id: int) -> dict:
             "max_speed_kmh": round(mv["max_speed_ms"] * 3.6, 1),
             "sprints": len(mv["sprints"]),
             "avg_pos": pts.mean(axis=0).round(1).tolist() if len(pts) else None,
-            "heatmap": heatmap(pts, fps),
-            "passes": sum(1 for x in all_passes if x["from"] == ent and x["success"]),
-            "passes_failed": sum(1 for x in all_passes if x["from"] == ent and not x["success"]),
+            "heatmap": heatmap(pts, fps, geom),
+            "passes": passes_ok.get(ent, 0),
+            "passes_failed": passes_bad.get(ent, 0),
             "possessions": touches.get(ent, 0),
         })
     rows.sort(key=lambda r: (r["player_id"] is None, r["team"], -r["minutes"]))
@@ -393,6 +516,7 @@ def match_stats(store: Store, match_id: int) -> dict:
         if x["success"]:
             network[(x["from"], x["to"])] += 1
     return {
+        "pitch": {"length": geom.length, "width": geom.width},
         "clips": status,
         "players": rows,
         "teams": team_rows,
@@ -408,10 +532,10 @@ def clip_positions(store: Store, clip_id: int, t0: float, t1: float) -> dict:
         return {"calibrated": False, "frames": []}
     lo, hi = np.searchsorted(d.t, t0), np.searchsorted(d.t, t1, side="right")
     frames = []
-    sel = (d.idx >= lo) & (d.idx < hi)
+    r0, r1 = np.searchsorted(d.idx, lo), np.searchsorted(d.idx, hi)  # rijen staan op volgorde van frame
     rows_by_idx: dict[int, list[int]] = defaultdict(list)
-    for r in np.flatnonzero(sel):
-        rows_by_idx[int(d.idx[r])].append(int(r))
+    for r in range(r0, r1):
+        rows_by_idx[int(d.idx[r])].append(r)
     ball = {int(i): xy for i, xy in zip(d.ball_idx, d.ball_xy)}
     for i in range(lo, hi):
         ps = []
@@ -437,7 +561,8 @@ def _to_image(d: ClipData, i: int, world: np.ndarray) -> np.ndarray:
     return img
 
 
-def image_landmarks(to_image, W: int, Hh: int, line_points: bool = True, margin: float = 0.02) -> list[dict]:
+def image_landmarks(to_image, W: int, Hh: int, line_points: bool = True, margin: float = 0.02,
+                    geom: pitch.Geometry = pitch.DEFAULT) -> list[dict]:
     """Veldpunten en -lijnen die in beeld liggen, als kalibratiepunten (beeld <-> veld).
 
     to_image: functie veldpunten (n, 2) -> beeldpunten (n, 2), NaN als achter de camera.
@@ -445,8 +570,8 @@ def image_landmarks(to_image, W: int, Hh: int, line_points: bool = True, margin:
     (handig bij beelden vanaf de zijlijn)."""
     inside = lambda x, y: np.isfinite(x) & np.isfinite(y) & (x >= -margin * W) & (x <= (1 + margin) * W) \
         & (y >= -margin * Hh) & (y <= (1 + margin) * Hh)  # noqa: E731
-    names = list(pitch.LANDMARKS)
-    world = np.array([pitch.LANDMARKS[n] for n in names], dtype=np.float64)
+    names = list(geom.landmarks)
+    world = np.array([geom.landmarks[n] for n in names], dtype=np.float64)
     img = to_image(world)
     out = []
     for n, (x, y), wp in zip(names, img, world):
@@ -454,7 +579,7 @@ def image_landmarks(to_image, W: int, Hh: int, line_points: bool = True, margin:
             out.append({"name": n, "img": [round(float(x), 1), round(float(y), 1)], "pitch": wp.tolist()})
     if not line_points:
         return out
-    for n, (a, b) in pitch.LINES.items():
+    for n, (a, b) in geom.lines.items():
         s = np.linspace(0, 1, 41)[:, None]
         pts = to_image((1 - s) * np.array(a) + s * np.array(b))
         ok = np.flatnonzero(inside(pts[:, 0], pts[:, 1]))
@@ -481,7 +606,7 @@ def predict_landmarks(store: Store, clip_id: int, t: float) -> list[dict]:
     if d is None or not d.calibrated:
         return []
     i = int(np.argmin(np.abs(d.t - t)))
-    return image_landmarks(lambda world: _to_image(d, i, world), d.clip["width"], d.clip["height"])
+    return image_landmarks(lambda world: _to_image(d, i, world), d.clip["width"], d.clip["height"], geom=d.geom)
 
 
 def warp_points(store: Store, clip_id: int, t_from: float, t_to: float, pts: np.ndarray) -> np.ndarray | None:
@@ -503,7 +628,7 @@ def clip_boxes(store: Store, clip_id: int, t0: float, t1: float) -> list[dict]:
         return []
     lo, hi = np.searchsorted(d.t, t0), np.searchsorted(d.t, t1, side="right")
     out = []
-    for r in np.flatnonzero((d.idx >= lo) & (d.idx < hi)):
+    for r in range(np.searchsorted(d.idx, lo), np.searchsorted(d.idx, hi)):
         tid = int(d.track[r])
         out.append({"t": round(float(d.t[d.idx[r]]), 3), "track": tid, "box": d.boxes[r].round(1).tolist(),
                     "entity": d.entity.get(tid), "team": d.team.get(tid, -1),

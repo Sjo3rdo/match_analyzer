@@ -37,6 +37,10 @@ async def lifespan(_app: FastAPI):
         worker.submit(c["id"])
     for c in store.all("SELECT id FROM clips WHERE calib_status IN ('wachtrij', 'bezig') AND status = 'klaar'"):
         worker.submit_autocalib(c["id"])
+    # Video's van een oudere versie: teams opnieuw indelen met de verbeterde methode
+    # (handmatige correcties blijven staan; opnieuw analyseren is niet nodig)
+    for c in store.all("SELECT id FROM clips WHERE status = 'klaar' AND COALESCE(analysis_version, 0) = 2"):
+        worker.submit_teams(c["id"])
     yield
 
 
@@ -50,12 +54,14 @@ def _get(table: str, id_: int) -> dict:
     return row
 
 
-def _update(table: str, id_: int, data: dict, allowed: set[str]) -> dict:
+def _update(table: str, id_: int, data: dict, allowed: set[str], geometry: set[str] = frozenset()) -> dict:
+    """Velden bijwerken. Velden in `geometry` raken de projectie naar het veld (zware herberekening),
+    de rest alleen namen/koppelingen (licht)."""
     fields = {k: v for k, v in data.items() if k in allowed}
     if fields:
         sets = ", ".join(f"{k} = ?" for k in fields)
         store.run(f"UPDATE {table} SET {sets} WHERE id = ?", (*fields.values(), id_))
-        analytics.invalidate()
+        analytics.invalidate(geometry=bool(set(fields) & set(geometry)))
     return _get(table, id_)
 
 
@@ -189,7 +195,8 @@ def update_clip(clip_id: int, data: dict = Body(...)):
 
 @app.delete("/api/clips/{clip_id}")
 def delete_clip(clip_id: int):
-    _get("clips", clip_id)
+    if _get("clips", clip_id)["status"] in ("wachtrij", "preview", "analyse"):
+        raise HTTPException(409, "Deze video wordt nog geanalyseerd; verwijder hem als de analyse klaar is")
     store.run("DELETE FROM clips WHERE id = ?", (clip_id,))
     shutil.rmtree(config.CLIPS_DIR / str(clip_id), ignore_errors=True)
     analytics.invalidate()
@@ -300,7 +307,7 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
     else:
         kid = store.run("INSERT INTO keyframes (clip_id, t, points) VALUES (?,?,?)",
                         (clip_id, data["t"], json.dumps(points)))
-    analytics.invalidate()
+    analytics.invalidate(clip_id=clip_id)
     _start_autocalib(clip)
     return {"id": kid, "t": data["t"], "error_m": round(err, 2)}
 
@@ -338,7 +345,7 @@ def set_camera(clip_id: int, data: dict = Body(...)):
     if fields:
         sets = ", ".join(f"{k} = ?" for k in fields)
         store.run(f"UPDATE clips SET {sets} WHERE id = ?", (*fields.values(), clip_id))
-        analytics.invalidate()
+        analytics.invalidate(clip_id=clip_id)
     return _get("clips", clip_id)
 
 
@@ -358,7 +365,7 @@ def camera_from_gps(clip_id: int):
         raise HTTPException(404, f"{e}. Klik je positie zelf aan op de veldtekening.") from e
     store.run("UPDATE clips SET cam_x = ?, cam_y = ?, cam_h = COALESCE(cam_h, 1.6), cam_source = 'gps' WHERE id = ?",
               (pos["x"], pos["y"], clip_id))
-    analytics.invalidate()
+    analytics.invalidate(clip_id=clip_id)
     return {**pos, "clip": _get("clips", clip_id)}
 
 
@@ -547,6 +554,38 @@ def track_thumb(clip_id: int, track_id: int):
     return FileResponse(p, media_type="image/jpeg")
 
 
+@app.post("/api/clips/{clip_id}/swap-teams")
+def swap_teams(clip_id: int, data: dict = Body(default={})):
+    """Thuis en Uit omwisselen: voor deze video, of (all) voor alle video's van de wedstrijd."""
+    c = _get("clips", clip_id)
+    ids = [r["id"] for r in store.all("SELECT id FROM clips WHERE match_id = ?", (c["match_id"],))] \
+        if data.get("all") else [clip_id]
+    q = ",".join("?" * len(ids))
+    swap = "CASE {0} WHEN 0 THEN 1 WHEN 1 THEN 0 ELSE {0} END"
+    store.run(f"UPDATE tracks SET team = {swap.format('team')}, team_auto = {swap.format('team_auto')} "
+              f"WHERE clip_id IN ({q})", tuple(ids))
+    if data.get("all"):
+        m = store.one("SELECT * FROM matches WHERE id = ?", (c["match_id"],)) or {}
+        if "team0_color" in m:
+            store.run("UPDATE matches SET team0_color = ?, team1_color = ? WHERE id = ?",
+                      (m.get("team1_color"), m.get("team0_color"), c["match_id"]))
+    analytics.invalidate(geometry=False)
+    return {"ok": True, "clips": ids}
+
+
+@app.post("/api/clips/{clip_id}/reassign-teams")
+def reassign_teams(clip_id: int):
+    """Teams van deze video opnieuw automatisch indelen (handmatige correcties blijven staan)."""
+    from .pipeline import assign_clip_teams
+
+    c = _get("clips", clip_id)
+    if c["status"] != "klaar":
+        raise HTTPException(409, "Analyseer de video eerst")
+    res = assign_clip_teams(store, clip_id, keep_manual=True)
+    analytics.invalidate(geometry=False)
+    return res
+
+
 @app.patch("/api/clips/{clip_id}/tracks/{track_id}")
 def update_track(clip_id: int, track_id: int, data: dict = Body(...)):
     fields = {k: data[k] for k in ("team", "player_id") if k in data}
@@ -555,7 +594,7 @@ def update_track(clip_id: int, track_id: int, data: dict = Body(...)):
     sets = ", ".join(f"{k} = ?" for k in fields)
     store.run(f"UPDATE tracks SET {sets} WHERE clip_id = ? AND track_id = ?",
               (*fields.values(), clip_id, track_id))
-    analytics.invalidate()
+    analytics.invalidate(geometry=False)
     return store.one("SELECT * FROM tracks WHERE clip_id = ? AND track_id = ?", (clip_id, track_id))
 
 
@@ -565,7 +604,7 @@ def create_player(match_id: int, data: dict = Body(...)):
         raise HTTPException(400, "Naam is verplicht")
     pid = store.run("INSERT INTO players (match_id, name, number, team) VALUES (?,?,?,?)",
                     (match_id, data["name"], data.get("number"), int(data.get("team", 0))))
-    analytics.invalidate()
+    analytics.invalidate(geometry=False)
     return _get("players", pid)
 
 
@@ -577,7 +616,7 @@ def update_player(player_id: int, data: dict = Body(...)):
 @app.delete("/api/players/{player_id}")
 def delete_player(player_id: int):
     store.run("DELETE FROM players WHERE id = ?", (player_id,))
-    analytics.invalidate()
+    analytics.invalidate(geometry=False)
     return {"ok": True}
 
 
@@ -596,7 +635,7 @@ def auto_assign(match_id: int, data: dict = Body(default={})):
             store.run("UPDATE tracks SET player_id = ? WHERE clip_id = ? AND track_id = ?",
                       (pid, tr["clip_id"], tr["track_id"]))
             n += 1
-    analytics.invalidate()
+    analytics.invalidate(geometry=False)
     return {"assigned": n}
 
 

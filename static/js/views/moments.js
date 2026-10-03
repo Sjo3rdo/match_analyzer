@@ -109,19 +109,30 @@ export async function render(root, ctx) {
   }
 
   // --- editor --------------------------------------------------------------------------
-  let saveTimer;
-  function save(fields) {
-    Object.assign(current, fields);
+  // Wijzigingen verzamelen en na 0,3 s in één keer opslaan. Alle velden die intussen veranderd zijn
+  // gaan mee (eerder ging bij snel achter elkaar wijzigen van verschillende velden de eerste verloren).
+  let saveTimer, pending = {}, pendingFor = null;
+  function flushSave() {
     clearTimeout(saveTimer);
-    const m = current;
-    saveTimer = setTimeout(async () => {
-      try { Object.assign(m, await api(`/moments/${m.id}`, { method: 'PATCH', json: fields })); } catch {}
-      drawList();
-    }, 300);
+    if (!pendingFor || !Object.keys(pending).length) return Promise.resolve();
+    const m = pendingFor, fields = pending;
+    pending = {}; pendingFor = null;
+    return api(`/moments/${m.id}`, { method: 'PATCH', json: fields })
+      .then(r => { for (const [k, v] of Object.entries(r)) if (!(pendingFor === m && k in pending)) m[k] = v; })
+      .catch(() => {}).finally(drawList);
+  }
+  function save(fields) {
+    if (pendingFor && pendingFor !== current) flushSave();
+    Object.assign(current, fields);
+    pendingFor = current;
+    Object.assign(pending, fields);
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(flushSave, 300);
     drawList();
   }
 
   function select(m) {
+    flushSave();
     current = m; stopDraw(); playlist = playlist && playlist.includes(m.id) ? playlist : null;
     ctx.setParam('moment', m.id);
     const c = clipById.get(m.clip_id);
@@ -186,6 +197,7 @@ export async function render(root, ctx) {
         h('span', { style: { flex: 1 } }),
         h('button', { className: 'danger', onclick: async () => {
           if (!confirm('Deze clip verwijderen?')) return;
+          if (pendingFor === m) { pending = {}; pendingFor = null; clearTimeout(saveTimer); }
           await api(`/moments/${m.id}`, { method: 'DELETE' });
           moments = moments.filter(x => x.id !== m.id); current = null;
           visible()[0] ? select(visible()[0]) : (drawEditor(), drawList());
@@ -405,5 +417,5 @@ export async function render(root, ctx) {
   loadSuggestions();
   const onResize = () => (drawMode ? redrawDraw() : drawOverlay());
   window.addEventListener('resize', onResize);
-  return () => { cancelAnimationFrame(raf); clearTimeout(freezeTimer); video.pause(); video.removeAttribute('src'); window.removeEventListener('resize', onResize); };
+  return () => { flushSave(); cancelAnimationFrame(raf); clearTimeout(freezeTimer); video.pause(); video.removeAttribute('src'); window.removeEventListener('resize', onResize); };
 }

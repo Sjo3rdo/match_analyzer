@@ -174,6 +174,16 @@ class Store:
             r = self.conn.execute(sql, args).fetchone()
             return dict(r) if r else None
 
+    def rows(self, sql: str, args: tuple = ()) -> list[tuple]:
+        """Rijen als gewone tuples: veel sneller dan dicts bij grote aantallen (detecties)."""
+        with _lock:
+            cur = self.conn.cursor()
+            cur.row_factory = None
+            try:
+                return cur.execute(sql, args).fetchall()
+            finally:
+                cur.close()
+
     def run(self, sql: str, args: tuple = ()) -> int:
         with _lock:
             cur = self.conn.execute(sql, args)

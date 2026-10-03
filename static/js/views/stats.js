@@ -108,7 +108,8 @@ export async function render(root, ctx) {
     const head = ['speler', 'rugnummer', 'team', 'minuten', 'afstand_m', 'topsnelheid_kmh', 'sprints', 'passes', 'balverlies', 'balcontacten'];
     const lines = [head.join(';'), ...rows().map(p => [p.name, p.number || '', teamName(match, p.team), p.minutes, p.distance_m,
       p.max_speed_kmh, p.sprints, p.passes, p.passes_failed, p.possessions].join(';'))];
-    const a = h('a', { href: URL.createObjectURL(new Blob([lines.join('\n')], { type: 'text/csv' })), download: `${match.name}.csv` });
+    // \ufeff vooraan: dan leest Excel de letters met accenten (é, ë) goed
+    const a = h('a', { href: URL.createObjectURL(new Blob(['\ufeff' + lines.join('\n')], { type: 'text/csv;charset=utf-8' })), download: `${match.name}.csv` });
     a.click();
   }
 

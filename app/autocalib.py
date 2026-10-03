@@ -84,6 +84,21 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
     chroma = np.sqrt(A.astype(np.float32) ** 2 + B.astype(np.float32) ** 2)
     local = cv2.blur(lab[..., 0].astype(np.uint8), (25, 25)).astype(np.int16)
     mask = (th > 22) & (chroma < 22) & (L > local + 15)
+    # 3. op gras: een veldlijn is geschilderd op het gras, dus rondom moet vooral gras liggen.
+    #    Zo vallen een tegelpad, een wit hek, reclameborden en lucht tussen bomen af.
+    #    (We kijken naar de pixels rond de lijn die zelf geen lijn zijn, zodat ook een brede lijn
+    #    vlak voor de camera blijft staan.)
+    hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
+    green = (hsv[..., 0] >= 22) & (hsv[..., 0] <= 85) & (hsv[..., 1] >= 50) & (hsv[..., 2] >= 40)
+    # bladeren zijn ook groen, maar veel donkerder dan het speelveld: gras = groen en ongeveer zo
+    # licht als het meeste groen in de onderste helft van het beeld (daar ligt bijna altijd veld)
+    lower = green[green.shape[0] // 2:]
+    v_field = float(np.median(hsv[green.shape[0] // 2:][..., 2][lower])) if lower.any() else 0.0
+    grass = (green & (hsv[..., 2] >= 0.55 * v_field)).astype(np.float32)
+    not_line = (~mask).astype(np.float32)
+    k = (25, 25)
+    frac = cv2.blur(grass * not_line, k) / np.maximum(cv2.blur(not_line, k), 1e-3)
+    mask &= frac >= 0.45
     out = mask.astype(np.uint8) * 255
     if roi is not None:
         out &= roi
@@ -92,7 +107,7 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
             pad = int(0.1 * (y2 - y1)) + 2
             out[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad] = 0
     out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
-    # 3. alleen dunne, lange stukken (lijnen), geen vlekjes (shirts, schoenen, bal, glinstering).
+    # 4. alleen dunne, lange stukken (lijnen), geen vlekjes (shirts, schoenen, bal, glinstering).
     #    "Dun" = de dikste plek van het stuk is smal; "lang" = het stuk strekt zich ver uit.
     #    (Aan elkaar hangende lijnen vormen één netwerk; dat is dun én lang, dus blijft staan.)
     n, lab_cc, stats, _ = cv2.connectedComponentsWithStats(out, connectivity=8)
