@@ -116,6 +116,14 @@ def test_full_flow(env):
     pos = client.get(f"/api/clips/{clip['id']}/positions?t0=0&t1=2").json()
     assert pos["calibrated"] and len(pos["frames"]) >= 15
     assert client.get(f"/api/clips/{clip['id']}/predict?t=3").json()
+    # gezette punten bewegen mee met het veld (vaste camera: blijven staan)
+    w = client.post(f"/api/clips/{clip['id']}/warp", json={"from_t": 0, "to_t": 3, "points": [[100, 200]]}).json()
+    assert w["ok"] and abs(w["points"][0][0] - 100) < 2 and abs(w["points"][0][1] - 200) < 2
+    # zonder camerapositie geen automatisch voorstel
+    assert client.get(f"/api/clips/{clip['id']}/propose?t=1").status_code == 400
+    assert client.post(f"/api/clips/{clip['id']}/autocalib/accept", json={}).json()["ok"]
+    mm = client.get(f"/api/matches/{m['id']}").json()
+    assert mm["clips"][0]["n_manual_keyframes"] == 1 and mm["n_assigned"] == 1
 
     frame = client.get(f"/api/clips/{clip['id']}/frame?t=1")
     assert frame.headers["content-type"] == "image/jpeg"

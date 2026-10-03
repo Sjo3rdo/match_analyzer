@@ -52,3 +52,39 @@ def test_heatmap_shape():
     hm = analytics.heatmap(np.array([[52.5, 34.0]] * 10), fps=10)
     assert len(hm) == 14 and len(hm[0]) == 21
     assert abs(sum(map(sum, hm)) - 1.0) < 1e-6
+
+
+def _people_clip(calibrated: bool):
+    """Twee tracks: een speler die rondloopt en een toeschouwer die stilstaat (camera zwenkt niet)."""
+    from app.calibration import CameraModel
+    fps, n = 10, 100
+    t = np.arange(n) / fps
+    idx, track, boxes, xy = [], [], [], []
+    for i in range(n):
+        idx += [i, i]
+        track += [1, 2]
+        px = 300 + 4 * i  # speler loopt 400 px
+        boxes += [[px - 10, 300, px + 10, 360], [800, 500, 820, 560]]
+        xy += [[30 + 0.4 * i, 30], [60, 70]]  # toeschouwer: net buiten de zijlijn
+    d = ClipData(clip={"id": 1, "height": 1080}, t=t, fps=fps, calibrated=calibrated, idx=np.array(idx),
+                 track=np.array(track), boxes=np.array(boxes, float), xy=np.array(xy, float),
+                 ball_idx=np.zeros(0, int), ball_xy=np.zeros((0, 2)), ball_img=np.zeros((0, 2)),
+                 camera=CameraModel(np.tile(np.eye(3), (n, 1, 1)), []))
+    return d
+
+
+def test_spectators_filtered():
+    assert analytics._valid_tracks(_people_clip(False)) == {1}
+    d = _people_clip(True)
+    d.xy[d.track == 2] = [60, 66.5]  # op het veld volgens de kalibratie, maar stil langs de zijlijn
+    assert analytics._valid_tracks(d) == {1}
+    d.xy[d.track == 2] = [2, 34]  # stilstaande keeper op de doellijn blijft
+    assert analytics._valid_tracks(d) == {1, 2}
+
+
+def test_people_cut_off_at_bottom_filtered():
+    d = _people_clip(False)
+    d.boxes[d.track == 2] = [800, 900, 900, 1080]
+    d.boxes[d.track == 2, 0] += np.arange(100) * 5  # beweegt wel, maar voeten buiten beeld
+    d.boxes[d.track == 2, 2] += np.arange(100) * 5
+    assert analytics._valid_tracks(d) == {1}

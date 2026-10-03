@@ -33,7 +33,7 @@ export async function render(root, ctx) {
       h('div', { className: 'row' }, fileInput, h('button', { className: 'primary', onclick: upload }, 'Uploaden'), status)),
     panel, splitPanel);
 
-  let timer;
+  let timer, wasBusy = null;
   const draw = async () => {
     const m = await api(`/matches/${match.id}`);
     const clips = m.clips;
@@ -68,16 +68,22 @@ export async function render(root, ctx) {
           h('td', {}, c.n_keyframes ? h('span', { className: 'badge ok' }, `${c.n_keyframes} sleutelframe(s)`)
             : h('a', { href: `#/match/${match.id}/kalibratie?clip=${c.id}` }, 'Kalibreren')),
           h('td', {},
-            h('button', { className: busy ? '' : 'primary', disabled: busy, onclick: async () => { await api(`/clips/${c.id}/process`, { method: 'POST' }); draw(); } },
+            h('button', { className: busy ? '' : 'primary', disabled: busy, onclick: async () => { await api(`/clips/${c.id}/process`, { method: 'POST' }); draw(); ctx.refreshSteps(); } },
               c.status === 'klaar' ? 'Opnieuw' : 'Analyseer'), ' ',
             h('button', { disabled: busy, onclick: () => openSplit(c), title: 'Lange video in delen knippen, of warming-up/rust eruit halen' }, '✂️ Knippen'), ' ',
             h('button', { className: 'danger', onclick: async () => {
               if (!confirm(`${c.filename} verwijderen?`)) return;
-              await api(`/clips/${c.id}`, { method: 'DELETE' }); draw();
+              await api(`/clips/${c.id}`, { method: 'DELETE' }); draw(); ctx.refreshSteps();
             } }, 'Verwijder')));
       })));
     clearTimeout(timer);
-    if (clips.some(c => BUSY.includes(c.status))) timer = setTimeout(draw, 2000);
+    const busyNow = clips.some(c => BUSY.includes(c.status));
+    if (wasBusy && !busyNow) {
+      ctx.refreshSteps();
+      if (clips.every(c => c.status === 'klaar')) toast('Analyse klaar. Volgende stap: kalibreren (knop bovenaan).');
+    }
+    wasBusy = busyNow;
+    if (busyNow) timer = setTimeout(draw, 2000);
   };
   await draw();
   // --- knippen vóór analyse ---------------------------------------------------------------

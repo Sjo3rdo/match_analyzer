@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 from . import config, pitch
-from .calibration import CameraModel, Keyframe, camera_prior, fit_keyframe
+from .calibration import CameraModel, Keyframe, apply_h, camera_prior, fit_keyframe
 from .storage import Store, clip_dir
 from .teams import TEAM_OTHER
 
@@ -131,17 +131,46 @@ def _project_rows(cam: CameraModel, idx: np.ndarray, pts: np.ndarray) -> np.ndar
 
 
 def _valid_tracks(d: ClipData, min_frames: int = 10, min_on_pitch: float = 0.6) -> set[int]:
-    """Tracks die echt op het veld staan; zonder kalibratie alle tracks van voldoende lengte."""
+    """Tracks die echt spelers op het veld zijn (geen toeschouwers, wissels of mensen vlak voor de camera).
+
+    - Kort in beeld (< min_frames): weg.
+    - Voeten meestal onder de rand van het beeld: iemand vlak voor de camera, niet op het veld.
+    - Staat de hele tijd op dezelfde plek (gemeten tegen de achtergrond, dus los van het zwenken):
+      een toeschouwer. Na kalibratie geldt dat alleen langs de zijlijnen of buiten het veld, zodat
+      een keeper die even stilstaat blijft meetellen.
+    - Na kalibratie: meestal buiten het veld."""
     valid = set()
+    if not len(d.track):
+        return valid
+    H_img = float(d.clip.get("height") or 0)
+    feet = np.stack([(d.boxes[:, 0] + d.boxes[:, 2]) / 2, d.boxes[:, 3], np.ones(len(d.boxes))], 1)
+    A = d.camera.A if d.camera is not None and len(d.camera.A) else None
+    if A is not None:  # voetpunt in het referentiebeeld (camerabeweging eruit)
+        ref = np.einsum("nij,nj->ni", A[np.clip(d.idx, 0, len(A) - 1)], feet)
+        ref = ref[:, :2] / np.where(np.abs(ref[:, 2:3]) > 1e-9, ref[:, 2:3], 1e-9)
+    else:
+        ref = feet[:, :2]
+    height = d.boxes[:, 3] - d.boxes[:, 1]
     for tid in np.unique(d.track):
         m = d.track == tid
         if m.sum() < min_frames:
             continue
+        if H_img and (d.boxes[m, 3] >= H_img - 3).mean() > 0.5:
+            continue
+        span = d.t[d.idx[m]].max() - d.t[d.idx[m]].min()
+        r = ref[m]
+        dev = np.linalg.norm(r - np.median(r, axis=0), axis=1)
+        stationary = span >= 6.0 and np.percentile(dev, 90) < 0.5 * max(1.0, float(np.median(height[m])))
         if d.calibrated:
             x, y = d.xy[m, 0], d.xy[m, 1]
             ok = (x >= -1.5) & (x <= pitch.LENGTH + 1.5) & (y >= -1.5) & (y <= pitch.WIDTH + 1.5)
             if ok.mean() < min_on_pitch:
                 continue
+            my = float(np.nanmedian(y)) if np.isfinite(y).any() else 0.0
+            if stationary and (my < 4.0 or my > pitch.WIDTH - 4.0):
+                continue
+        elif stationary:
+            continue
         valid.add(int(tid))
     return valid
 
@@ -408,28 +437,26 @@ def _to_image(d: ClipData, i: int, world: np.ndarray) -> np.ndarray:
     return img
 
 
-def predict_landmarks(store: Store, clip_id: int, t: float) -> list[dict]:
-    """Waar de veldpunten en -lijnen volgens het cameramodel in beeld liggen op tijdstip t.
+def image_landmarks(to_image, W: int, Hh: int, line_points: bool = True, margin: float = 0.02) -> list[dict]:
+    """Veldpunten en -lijnen die in beeld liggen, als kalibratiepunten (beeld <-> veld).
 
-    Lijnen komen terug als twee punten-op-de-lijn, zodat ze bij een nieuw sleutelframe met
-    één klik overgenomen kunnen worden (handig bij beelden vanaf de zijlijn)."""
-    d = load_clip(store, clip_id)
-    if d is None or not d.calibrated:
-        return []
-    i = int(np.argmin(np.abs(d.t - t)))
-    W, Hh = d.clip["width"], d.clip["height"]
-    inside = lambda x, y: np.isfinite(x) & np.isfinite(y) & (x >= -0.02 * W) & (x <= 1.02 * W) \
-        & (y >= -0.02 * Hh) & (y <= 1.02 * Hh)  # noqa: E731
+    to_image: functie veldpunten (n, 2) -> beeldpunten (n, 2), NaN als achter de camera.
+    Lijnen komen terug als twee punten-op-de-lijn, zodat ze met één klik over te nemen zijn
+    (handig bij beelden vanaf de zijlijn)."""
+    inside = lambda x, y: np.isfinite(x) & np.isfinite(y) & (x >= -margin * W) & (x <= (1 + margin) * W) \
+        & (y >= -margin * Hh) & (y <= (1 + margin) * Hh)  # noqa: E731
     names = list(pitch.LANDMARKS)
     world = np.array([pitch.LANDMARKS[n] for n in names], dtype=np.float64)
-    img = _to_image(d, i, world)
+    img = to_image(world)
     out = []
     for n, (x, y), wp in zip(names, img, world):
         if inside(x, y):
             out.append({"name": n, "img": [round(float(x), 1), round(float(y), 1)], "pitch": wp.tolist()})
+    if not line_points:
+        return out
     for n, (a, b) in pitch.LINES.items():
         s = np.linspace(0, 1, 41)[:, None]
-        pts = _to_image(d, i, (1 - s) * np.array(a) + s * np.array(b))
+        pts = to_image((1 - s) * np.array(a) + s * np.array(b))
         ok = np.flatnonzero(inside(pts[:, 0], pts[:, 1]))
         if len(ok) < 4:
             continue
@@ -437,6 +464,36 @@ def predict_landmarks(store: Store, clip_id: int, t: float) -> list[dict]:
             out.append({"name": n, "img": [round(float(pts[k, 0]), 1), round(float(pts[k, 1]), 1)],
                         "line": [list(a), list(b)]})
     return out
+
+
+def h_to_image(H: np.ndarray):
+    """to_image-functie voor een homografie veld -> beeld."""
+    def f(world):
+        hom = np.hstack([world, np.ones((len(world), 1))]) @ H.T
+        hom[hom[:, 2] <= 0, 2] = np.nan
+        return hom[:, :2] / hom[:, 2:3]
+    return f
+
+
+def predict_landmarks(store: Store, clip_id: int, t: float) -> list[dict]:
+    """Waar de veldpunten en -lijnen volgens het cameramodel in beeld liggen op tijdstip t."""
+    d = load_clip(store, clip_id)
+    if d is None or not d.calibrated:
+        return []
+    i = int(np.argmin(np.abs(d.t - t)))
+    return image_landmarks(lambda world: _to_image(d, i, world), d.clip["width"], d.clip["height"])
+
+
+def warp_points(store: Store, clip_id: int, t_from: float, t_to: float, pts: np.ndarray) -> np.ndarray | None:
+    """Beeldpunten op tijdstip t_from verplaatsen naar waar dezelfde plek op t_to in beeld is,
+    via de gemeten camerabeweging. None als de video nog niet geanalyseerd is."""
+    d = load_clip(store, clip_id)
+    if d is None or len(d.t) == 0:
+        return None
+    i, j = int(np.argmin(np.abs(d.t - t_from))), int(np.argmin(np.abs(d.t - t_to)))
+    A = d.camera.A
+    M = np.linalg.inv(A[j]) @ A[i]  # beeld(i) -> referentie -> beeld(j)
+    return apply_h(M, np.asarray(pts, float).reshape(-1, 2))
 
 
 def clip_boxes(store: Store, clip_id: int, t0: float, t1: float) -> list[dict]:

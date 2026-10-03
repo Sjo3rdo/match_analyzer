@@ -59,6 +59,20 @@ def _update(table: str, id_: int, data: dict, allowed: set[str]) -> dict:
     return _get(table, id_)
 
 
+@app.get("/api/version")
+def get_version():
+    """Versie en git-commit, zodat je kunt zien of je de nieuwste versie draait."""
+    from . import __version__
+
+    commit = None
+    try:
+        commit = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=Path(__file__).resolve().parent.parent,
+                                capture_output=True, text=True, timeout=3).stdout.strip() or None
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return {"version": __version__, "commit": commit}
+
+
 # --- veld --------------------------------------------------------------------------------
 
 @app.get("/api/pitch")
@@ -91,8 +105,12 @@ def get_match(match_id: int):
     m = _get("matches", match_id)
     m["clips"] = store.all("SELECT * FROM clips WHERE match_id = ? ORDER BY order_idx, id", (match_id,))
     for c in m["clips"]:
-        c["n_keyframes"] = len(store.keyframes(c["id"]))
+        kfs = store.keyframes(c["id"])
+        c["n_keyframes"] = len(kfs)
+        c["n_manual_keyframes"] = sum(1 for k in kfs if not k.get("auto"))
     m["team_colors"] = _team_colors(match_id)
+    m["n_assigned"] = store.one("SELECT COUNT(*) AS n FROM tracks t JOIN clips c ON c.id = t.clip_id "
+                                "WHERE c.match_id = ? AND t.player_id IS NOT NULL", (match_id,))["n"]
     m["players"] = store.all("SELECT * FROM players WHERE match_id = ? ORDER BY team, "
                              "CAST(number AS INTEGER), name", (match_id,))
     return m
@@ -342,6 +360,129 @@ def camera_from_gps(clip_id: int):
               (pos["x"], pos["y"], clip_id))
     analytics.invalidate()
     return {**pos, "clip": _get("clips", clip_id)}
+
+
+@app.get("/api/clips/{clip_id}/propose")
+def propose_calibration(clip_id: int, t: float = 0.0):
+    """Automatisch voorstel: zoek het veld in dit beeld vanaf de bekende camerapositie."""
+    from .autocalib import propose
+
+    clip = _get("clips", clip_id)
+    prior = camera_prior(clip)
+    if prior is None:
+        raise HTTPException(400, "Stel eerst in waar je stond (📍 of via GPS); dan kan de app het veld zelf zoeken")
+    t = _snap_time(clip_id, t)
+    try:
+        frame, ft = read_frame(Path(clip["path"]), t)
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    boxes = None
+    fr = store.one("SELECT idx FROM frames WHERE clip_id = ? ORDER BY ABS(t - ?) LIMIT 1", (clip_id, ft))
+    if fr:
+        rows = store.all("SELECT x1, y1, x2, y2 FROM detections WHERE clip_id = ? AND idx = ?", (clip_id, fr["idx"]))
+        boxes = np.array([[r["x1"], r["y1"], r["x2"], r["y2"]] for r in rows]).reshape(-1, 4)
+    res = propose(frame, prior, boxes)
+    if res is None:
+        return {"ok": False, "t": ft, "message": "Geen overtuigend voorstel gevonden in dit beeld. Kies een moment met meer "
+                                                  "veldlijnen in beeld, of klik zelf 1 punt + 1 lijn aan."}
+    H, info = res
+    W, Hh = int(clip["width"]), int(clip["height"])
+    to_img = analytics.h_to_image(H)
+    # veldpunten in beeld, plus die net buiten beeld (die tellen gewoon mee en maken de kalibratie
+    # stevig), plus punten op de lijnen die in beeld zijn
+    points = _spread(analytics.image_landmarks(to_img, W, Hh, line_points=False, margin=0.02), 8)
+    if len(points) < 6:
+        names = {p["name"] for p in points}
+        extra = [p for p in analytics.image_landmarks(to_img, W, Hh, line_points=False, margin=0.6) if p["name"] not in names]
+        points += _spread(extra, 6 - len(points))
+    if len(points) < 4:
+        points += [p for p in analytics.image_landmarks(to_img, W, Hh, margin=0.0) if p.get("line")][:6]
+    return {"ok": True, "t": ft, "points": points, "H": normalize_h(H).tolist(), "info": info}
+
+
+def _spread(points: list[dict], n: int) -> list[dict]:
+    """Hoogstens n punten, zo ver mogelijk uit elkaar in beeld (verste-punt-keuze)."""
+    if len(points) <= n:
+        return points
+    xy = np.array([p["img"] for p in points], float)
+    chosen = [int(np.argmax(np.linalg.norm(xy - xy.mean(0), axis=1)))]
+    d = np.linalg.norm(xy - xy[chosen[0]], axis=1)
+    while len(chosen) < n:
+        k = int(np.argmax(d))
+        chosen.append(k)
+        d = np.minimum(d, np.linalg.norm(xy - xy[k], axis=1))
+    return [points[i] for i in sorted(chosen)]
+
+
+@app.post("/api/clips/{clip_id}/warp")
+def warp_points(clip_id: int, data: dict = Body(...)):
+    """Beeldpunten van moment from_t verplaatsen naar moment to_t (ze bewegen mee met het veld).
+
+    data: {from_t, to_t, points: [[x, y], ...]}"""
+    clip = _get("clips", clip_id)
+    pts = np.array(data.get("points") or [], float).reshape(-1, 2)
+    t0, t1 = float(data["from_t"]), float(data["to_t"])
+    if not len(pts):
+        return {"ok": True, "points": []}
+    out = analytics.warp_points(store, clip_id, t0, t1, pts)
+    method = "camerabeweging"
+    if out is None:  # niet geanalyseerd: de twee beelden direct met elkaar vergelijken
+        try:
+            out = _match_frames(Path(clip["path"]), t0, t1, pts)
+            method = "beeldvergelijking"
+        except ValueError as e:
+            return {"ok": False, "message": str(e)}
+    return {"ok": True, "method": method, "points": [[round(float(x), 1), round(float(y), 1)] for x, y in out]}
+
+
+def _match_frames(path: Path, t0: float, t1: float, pts: np.ndarray) -> np.ndarray:
+    """Camerabeweging tussen twee momenten zonder analyse: de beelden ertussen in stapjes van 0,1 s
+    volgen (zoals bij de analyse) en de stapjes aan elkaar rijgen."""
+    from .calibration import MotionEstimator
+
+    lo, hi = min(t0, t1), max(t0, t1)
+    if hi - lo > 30:
+        raise ValueError("Te ver uit elkaar om de camerabeweging te volgen; analyseer de video eerst")
+    cap = cv2.VideoCapture(str(path))
+    cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, lo - 1.0) * 1000)
+    motion = MotionEstimator()
+    M = np.eye(3)  # beeld(lo) -> beeld(huidig)
+    nxt, started = lo, False
+    try:
+        while cap.grab():
+            pos = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
+            if pos < nxt - 0.02:
+                continue
+            ok, frame = cap.retrieve()
+            if not ok:
+                break
+            step = motion.step(frame)
+            if started:
+                M = step @ M
+            started = True
+            if pos >= hi - 0.02:
+                break
+            nxt = min(hi, pos + 0.1)
+    finally:
+        cap.release()
+    if not started:
+        raise ValueError("Beelden konden niet gelezen worden")
+    if t1 < t0:
+        M = np.linalg.inv(M)
+    return cv2.perspectiveTransform(pts.reshape(-1, 1, 2).astype(np.float64), M).reshape(-1, 2)
+
+
+@app.post("/api/clips/{clip_id}/autocalib/accept")
+def accept_autocalib(clip_id: int, data: dict = Body(default={})):
+    """Automatische sleutelframes goedkeuren (data.ids, of allemaal). Goedgekeurde blijven bij
+    opnieuw bijstellen staan."""
+    ids = data.get("ids")
+    if ids:
+        q = ",".join("?" * len(ids))
+        store.run(f"UPDATE keyframes SET accepted = 1 WHERE clip_id = ? AND auto = 1 AND id IN ({q})", (clip_id, *ids))
+    else:
+        store.run("UPDATE keyframes SET accepted = 1 WHERE clip_id = ? AND auto = 1", (clip_id,))
+    return {"ok": True}
 
 
 @app.get("/api/clips/{clip_id}/predict")
@@ -616,4 +757,13 @@ def reveal_export(name: str):
     return {"ok": False, "path": str(p)}
 
 
-app.mount("/", StaticFiles(directory=config.STATIC_DIR, html=True), name="static")
+class NoCacheStatic(StaticFiles):
+    """De interface altijd vers laden, zodat de browser na een update geen oude JavaScript gebruikt."""
+
+    async def get_response(self, path, scope):
+        resp = await super().get_response(path, scope)
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        return resp
+
+
+app.mount("/", NoCacheStatic(directory=config.STATIC_DIR, html=True), name="static")

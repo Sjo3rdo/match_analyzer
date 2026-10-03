@@ -31,8 +31,14 @@ cd match_analyzer
 ```
 
 De eerste keer installeert `run.sh` alles in een eigen map (`.venv`). Dat duurt een paar
-minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000. Het detectiemodel
-(ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
+minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra hij klaar is
+met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
+
+**Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
+in de app staat de versie en de commit (bijv. `versie 0.5 · 9292e3c`); die moet gelijk zijn aan
+`git log -1 --oneline`. De browser haalt de interface na een update altijd vers op. Kwam je van een
+versie zonder versienummer rechtsboven, druk dan één keer op ⌥⌘R in Safari om de oude, bewaarde
+pagina weg te gooien (anders zie je bijv. geen deelknop of krijg je "Method Not Allowed").
 
 Wil je ook rugnummers automatisch laten lezen? Installeer dan:
 
@@ -46,6 +52,10 @@ Alle gegevens (video's, analyses, exports) staan in de map `data/`.
 
 Zie het als een puzzel in drie lagen: eerst *zien* (wie staat waar in beeld), dan *plaatsen*
 (waar is dat op het echte veld) en dan *benoemen* (wie is dat).
+
+Bovenaan elke wedstrijd staat een stappenbalk: **Video's → Kalibratie → Spelers → Bekijken**. Een
+groen vinkje betekent klaar, het gele bolletje is de volgende stap, en de knop **Volgende stap →**
+brengt je erheen.
 
 1. **Video's.** Maak een wedstrijd aan en upload je video's. Dat mogen er meerdere zijn,
    bijvoorbeeld per helft of als de telefoon tussendoor stopte. Geef bij elke video de helft en
@@ -74,11 +84,27 @@ Zie het als een puzzel in drie lagen: eerst *zien* (wie staat waar in beeld), da
      zoekt het voetbalveld op in OpenStreetMap en zet je positie automatisch op de tekening. Daarvoor
      wordt alleen de coördinaat naar OpenStreetMap gestuurd, en alleen als jij op de knop klikt. De
      iPhone slaat de positie op ongeveer 5 à 10 m nauwkeurig op; klik je plek gerust preciezer aan.
+   - **Laat de app het veld zoeken.** Weet de app waar je stond, dan zoekt hij zelf de witte lijnen en
+     legt hij de veldtekening erop, zonder klikken (**🤖 Zoek het veld automatisch**; gebeurt vanzelf
+     als er nog geen sleutelframe is). Zie het als rondkijken met een plattegrond in je hand tot alle
+     lijnen kloppen. Controleer het voorstel: vallen de witte lijnen op het veld? Sleep punten bij waar
+     nodig en klik **✓ Klopt**. Zegt de app **twijfel**, dan zijn er te weinig lijnen te zien (bijv.
+     alleen de zijlijn); kies dan een moment met de 16-meter, middenlijn of cirkel in beeld. Klik je
+     plek zo precies mogelijk aan: een paar meter ernaast maakt het zoeken een stuk lastiger. Alleen de
+     GPS-positie (5 à 10 m nauwkeurig) is vaak niet genoeg.
+   - **Inzoomen.** Knijp op het trackpad (of ⌥ + scrollen) om in te zoomen, bijvoorbeeld om de verre
+     hoekvlag precies aan te klikken. Verschuiven doe je met twee vingers, of Shift + slepen.
+   - **Punten bewegen mee met het veld.** Zet je een punt en schuif je daarna naar een ander moment,
+     dan schuift het punt mee met de camerabeweging. Zo kun je punten van verschillende momenten in één
+     sleutelframe combineren: bijv. de middenstip nu en de verre hoekvlag als de camera daar is.
+     Punten die daardoor buiten beeld vallen, tellen gewoon mee.
    - **Eén sleutelframe is genoeg.** Na de analyse volgt de app de camerabeweging, zoals een lijm die
      de plattegrond op het beeld vasthoudt. Elke seconde zoekt hij daarnaast de witte veldlijnen op
      en legt hij de plattegrond er opnieuw precies op (**🤖 Automatisch bijgesteld**). Dit start
      vanzelf zodra je een sleutelframe opslaat, of na de analyse. De gele stippellijnen laten op elk
-     moment zien hoe goed het past.
+     moment zien hoe goed het past. Onder **🤖 Automatisch bijgesteld** staat de lijst: klik op een tijd
+     om te kijken, ✓ keurt goed, ✗ verwijdert, ✎ zet de punten klaar om zelf bij te stellen, of keur
+     ze met **✓ Alles accepteren** in één keer goed. Goedgekeurde blijven staan als je opnieuw bijstelt.
    - Het bijstellen werkt het best als je ook hebt ingesteld **waar je stond**: dan houdt de app je
      zoom en scheefstand vast en kan er niets ongemerkt wegglijden.
    - Kijk je lang langs alleen de zijlijn, zonder dwarslijnen zoals de 16-meterlijn, middenlijn,
@@ -86,7 +112,10 @@ Zie het als een puzzel in drie lagen: eerst *zien* (wie staat waar in beeld), da
      en overbrugt ze met de camerabeweging tot er weer dwarslijnen in beeld komen. Past het ergens
      niet, zet daar dan zelf een extra sleutelframe.
 
-3. **Spelers.** Voer de selectie in, met rugnummers. Klik op **Automatisch koppelen** om
+3. **Spelers.** Toeschouwers, wissels langs de lijn en mensen vlak voor de camera worden zoveel
+   mogelijk weggefilterd: wie de hele tijd op dezelfde plek staat (gemeten tegen de achtergrond,
+   dus los van het zwenken), of wiens voeten buiten beeld vallen, telt niet als speler. Na de
+   kalibratie valt ook iedereen buiten het veld af. Voer de selectie in, met rugnummers. Klik op **Automatisch koppelen** om
    tracks met een leesbaar rugnummer te koppelen. De rest koppel je via de kaartjes of door in
    **Video + minimap** te pauzeren en op een speler te klikken.
 
@@ -94,7 +123,8 @@ Zie het als een puzzel in drie lagen: eerst *zien* (wie staat waar in beeld), da
    en het passnetwerk, en kun je alles als CSV exporteren.
 
 5. **Clips en delen.** Maak bij **Video + minimap** met één klik een clip van het moment dat je
-   ziet, of zet bij **Clips & delen** een automatische suggestie (sprint, pass) om in een clip. Daar
+   ziet (6 s ervoor tot 4 s erna; hij verschijnt meteen onder "Momenten in deze video" en bij
+   **Clips & delen**), of zet bij **Clips & delen** een automatische suggestie (sprint, pass) om in een clip. Daar
    kun je:
    - begin en eind per seconde verschuiven;
    - een label, spelers en een opmerking toevoegen;
