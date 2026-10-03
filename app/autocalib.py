@@ -107,7 +107,7 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
     #    (We kijken naar de pixels rond de lijn die zelf geen lijn zijn, zodat ook een brede lijn
     #    vlak voor de camera blijft staan.)
     hsv = cv2.cvtColor(small, cv2.COLOR_BGR2HSV)
-    green = (hsv[..., 0] >= 22) & (hsv[..., 0] <= 85) & (hsv[..., 1] >= 50) & (hsv[..., 2] >= 40)
+    green = (hsv[..., 0] >= 22) & (hsv[..., 0] <= 85) & (hsv[..., 1] >= 30) & (hsv[..., 2] >= 40)  # ook dof kunstgras
     # bladeren zijn ook groen, maar veel donkerder dan het speelveld: gras = groen en ongeveer zo
     # licht als het meeste groen in de onderste helft van het beeld (daar ligt bijna altijd veld)
     lower = green[green.shape[0] // 2:]
@@ -128,9 +128,30 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
     # 4. alleen dunne, lange stukken (lijnen), geen vlekjes (shirts, schoenen, bal, glinstering).
     #    "Dun" = de dikste plek van het stuk is smal; "lang" = het stuk strekt zich ver uit.
     #    (Aan elkaar hangende lijnen vormen één netwerk; dat is dun én lang, dus blijft staan.)
-    n, lab_cc, stats, _ = cv2.connectedComponentsWithStats(out, connectivity=8)
-    half_width = cv2.distanceTransform(out, cv2.DIST_L2, 3)
+    #    Een netwerk van een paar lijnen (hoek van het strafschopgebied) heeft een hartlijn van
+    #    hooguit een paar keer de lengte van het stuk; de korrels van kunstgras of glinsterend gras
+    #    vormen een fijnmazig netwerk dat een vlak vult, met een veel langere hartlijn.
+    #    Hangt een echte (dikkere) lijn aan zo'n korrelveld vast, dan pellen we de dunne korrels
+    #    eraf en kijken we nog eens.
+    keep, rest = _line_components(out)
+    if rest.any():
+        peeled = cv2.morphologyEx(rest, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        keep2, _ = _line_components(peeled, max_ratio=1.6)
+        keep = keep | keep2
+    return keep
+
+
+def _line_components(mask: np.ndarray, max_ratio: float | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """(stukken die op lijnen lijken, stukken die afvielen omdat ze een vlak vullen).
+
+    Lengte van de hartlijn gedeeld door de omvang van het stuk: een recht stuk lijn ~1, een hoek of
+    T-kruising ~1,5, de middencirkel of een heel strafschopgebied ~2,5; kronkels van gras ~2-4.
+    Kleine stukken echte lijn zijn vrijwel recht, grote netwerken mogen meer."""
+    n, lab_cc, stats, _ = cv2.connectedComponentsWithStats(mask, connectivity=8)
+    half_width = cv2.distanceTransform(mask, cv2.DIST_L2, 3)
+    skel_len = np.bincount(lab_cc[centerlines(mask) > 0], minlength=n)
     keep = np.zeros(n, bool)
+    dense = np.zeros(n, bool)
     for k in range(1, n):
         x, y, w, h, area = stats[k]
         if area < 10:
@@ -138,8 +159,13 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
         sub = lab_cc[y:y + h, x:x + w] == k
         thick = 2 * float(half_width[y:y + h, x:x + w][sub].max())
         extent = float(np.hypot(w, h))
-        keep[k] = extent >= 15 and extent >= 5 * max(thick, 1.5)
-    return np.where(keep[lab_cc], 255, 0).astype(np.uint8)
+        line_like = extent >= 15 and extent >= 5 * max(thick, 1.5)
+        ratio = skel_len[k] / max(extent, 1.0)
+        limit = max_ratio if max_ratio is not None else (1.6 if extent < 80 else 2.6)
+        keep[k] = line_like and ratio <= limit
+        dense[k] = extent >= 15 and ratio > 4
+    return (np.where(keep[lab_cc], 255, 0).astype(np.uint8),
+            np.where(dense[lab_cc], 255, 0).astype(np.uint8))
 
 
 def centerlines(mask: np.ndarray) -> np.ndarray:
