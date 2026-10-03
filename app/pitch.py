@@ -52,5 +52,30 @@ def _landmarks() -> dict[str, tuple[float, float]]:
 LANDMARKS = _landmarks()
 
 
+def _lines() -> dict[str, tuple[tuple[float, float], tuple[float, float]]]:
+    """Rechte veldlijnen (begin- en eindpunt in meters). Handig bij beelden vanaf de zijlijn,
+    waar je vaak een lijn wel ziet maar geen hoekpunt."""
+    L, W, c = LENGTH, WIDTH, HALF_W
+    lines = {
+        "Zijlijn boven": ((0, 0), (L, 0)),
+        "Zijlijn onder": ((0, W), (L, W)),
+        "Middenlijn": ((L / 2, 0), (L / 2, W)),
+        "Doellijn links": ((0, 0), (0, W)),
+        "Doellijn rechts": ((L, 0), (L, W)),
+    }
+    for side, x0, sign in (("links", 0.0, 1), ("rechts", LENGTH, -1)):
+        xp, xg = x0 + sign * 16.5, x0 + sign * 5.5
+        lines[f"16-meterlijn {side} (voorkant)"] = ((xp, c - _PA_HALF), (xp, c + _PA_HALF))
+        lines[f"16-meterlijn {side} zijkant boven"] = ((x0, c - _PA_HALF), (xp, c - _PA_HALF))
+        lines[f"16-meterlijn {side} zijkant onder"] = ((x0, c + _PA_HALF), (xp, c + _PA_HALF))
+        lines[f"5-meterlijn {side} (voorkant)"] = ((xg, c - _GA_HALF), (xg, c + _GA_HALF))
+        lines[f"5-meterlijn {side} zijkant boven"] = ((x0, c - _GA_HALF), (xg, c - _GA_HALF))
+        lines[f"5-meterlijn {side} zijkant onder"] = ((x0, c + _GA_HALF), (xg, c + _GA_HALF))
+    return {k: (tuple(map(float, a)), tuple(map(float, b))) for k, (a, b) in lines.items()}
+
+
+LINES = _lines()
+
+
 def on_pitch(x: float, y: float, margin: float = 3.0) -> bool:
     return -margin <= x <= LENGTH + margin and -margin <= y <= WIDTH + margin

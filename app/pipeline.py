@@ -18,9 +18,9 @@ import cv2
 import numpy as np
 
 from . import config, jersey, teams
-from .calibration import MotionEstimator
+from .calibration import MotionEstimator, apply_h, cumulative
 from .storage import Store, clip_dir
-from .tracking import Tracker
+from .tracking import Tracker, stitch_tracks
 
 log = logging.getLogger(__name__)
 
@@ -109,16 +109,28 @@ class _TrackStats:
         self.t0 = self.t1 = 0.0
         self.colors: list[np.ndarray] = []
         self.best: list[tuple[float, np.ndarray]] = []  # (hoogte, uitsnede)
+        self.idx: list[int] = []  # voor het achteraf aan elkaar plakken van tracks
+        self.foot: list[tuple[float, float]] = []
+        self.h: list[float] = []
 
-    def add(self, t: float, frame: np.ndarray, box: np.ndarray, sample: bool) -> None:
+    def merge(self, other: "_TrackStats") -> None:
+        self.n += other.n
+        self.t0, self.t1 = min(self.t0, other.t0), max(self.t1, other.t1)
+        self.colors += other.colors
+        self.best = sorted(self.best + other.best, key=lambda p: -p[0])[:OCR_CROPS]
+
+    def add(self, t: float, frame: np.ndarray, box: np.ndarray, color: np.ndarray | None, idx: int = 0) -> None:
         if self.n == 0:
             self.t0 = t
         self.n += 1
         self.t1 = t
-        if sample and len(self.colors) < MAX_COLOR_SAMPLES:
-            c = teams.shirt_color(frame, box)
-            if c is not None:
-                self.colors.append(c)
+        self.idx.append(idx)
+        self.foot.append(((box[0] + box[2]) / 2, box[3]))
+        self.h.append(box[3] - box[1])
+        if color is not None:
+            self.colors.append(color)
+            if len(self.colors) > 2 * MAX_COLOR_SAMPLES:  # geheugen beperken, spreiding houden
+                self.colors = self.colors[::2]
         h = box[3] - box[1]
         if len(self.best) < OCR_CROPS or h > self.best[-1][0]:
             x1, y1, x2, y2 = [int(v) for v in box]
@@ -180,11 +192,13 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
         det = detector(frame)
         H = motion.step(frame, det.boxes)
         inter.append(H)
-        tracked = tracker.update(det.boxes, det.scores, H if idx else None)
+        colors = [teams.shirt_color(frame, b) for b in det.boxes]
+        color_of = {np.asarray(b, np.float64).tobytes(): c for b, c in zip(det.boxes, colors)}
+        tracked = tracker.update(det.boxes, det.scores, H if idx else None, colors)
         frame_rows.append((clip_id, idx, t))
         for tid, box, score in tracked:
             det_rows.append((clip_id, idx, tid, *map(float, box), score))
-            stats[tid].add(t, frame, box, sample=idx % 3 == 0)
+            stats[tid].add(t, frame, box, color_of.get(np.asarray(box, np.float64).tobytes()), idx)
         if det.ball:
             ball_rows.append((clip_id, idx, *map(float, det.ball)))
         idx += 1
@@ -197,10 +211,35 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
     flush()
     np.save(out_dir / "motion.npy", np.array(inter) if inter else np.zeros((0, 3, 3)))
 
+    store.set_clip_status(clip_id, "analyse", 0.95, "Stukjes van dezelfde speler aan elkaar plakken")
+    _stitch(store, clip_id, stats, inter, eff_fps)
     store.set_clip_status(clip_id, "analyse", 0.96, "Teams en rugnummers bepalen")
     _finish_tracks(store, clip_id, stats, out_dir)
     store.run("UPDATE clips SET analysis_version = ? WHERE id = ?", (ANALYSIS_VERSION, clip_id))
     store.set_clip_status(clip_id, "klaar", 1.0, f"{idx} frames geanalyseerd")
+
+
+def _stitch(store: Store, clip_id: int, stats: dict[int, _TrackStats], inter: list, fps: float) -> None:
+    """Tracks die bij dezelfde speler horen samenvoegen (in cameragecorrigeerde coördinaten)."""
+    if not stats or not inter:
+        return
+    A = cumulative(np.array(inter))
+    tracklets = {}
+    for tid, s in stats.items():
+        idx = np.array(s.idx)
+        foot = np.array(s.foot, float).reshape(-1, 2)
+        ref = np.array([apply_h(A[i], f[None])[0] for i, f in zip(idx, foot)]).reshape(-1, 2)
+        tracklets[tid] = {"idx": idx, "foot": ref, "h": np.array(s.h),
+                          "color": np.median(s.colors, axis=0) if s.colors else None}
+    root = stitch_tracks(tracklets, fps)
+    moves = [(r, clip_id, t) for t, r in root.items() if r != t]
+    if not moves:
+        return
+    with store.tx() as c:
+        c.executemany("UPDATE detections SET track_id = ? WHERE clip_id = ? AND track_id = ?", moves)
+    for t, r in sorted(root.items(), key=lambda kv: stats[kv[0]].t0):
+        if r != t:
+            stats[r].merge(stats.pop(t))
 
 
 def _finish_tracks(store: Store, clip_id: int, stats: dict[int, _TrackStats], out_dir: Path) -> None:

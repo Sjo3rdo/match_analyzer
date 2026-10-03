@@ -2,7 +2,7 @@
 // bijbehorende punt op de veldtekening (of andersom). Minstens 4, liefst 6+ punten.
 import { api, h, fmtTime, toast } from '../util.js';
 import { PitchView, pitchPolylines } from '../pitch.js';
-import { fitHomography, apply } from '../homography.js';
+import { apply, inv, fitCalibration, calibrationInfo, calibrationError } from '../homography.js';
 
 export async function render(root, ctx) {
   const { match } = ctx;
@@ -30,10 +30,12 @@ export async function render(root, ctx) {
 
   root.append(
     h('div', { className: 'hint' },
-      'Zo werkt het: 1) Kies met de schuif een moment. 2) Klik in het beeld op een herkenbaar punt (hoek strafschopgebied, middenstip, ' +
-      'snijpunt middenlijn/zijlijn...). 3) Klik op hetzelfde punt in de veldtekening rechts. Herhaal tot je minstens 4 punten hebt, ' +
-      'verspreid over het beeld. De witte lijnen laten zien of het klopt. Omdat je camera beweegt: voeg elke 30–60 seconden en na ' +
-      'flinke zwenks of zooms een nieuw sleutelframe toe. Na de analyse voorspelt de app de punten (geel) en hoef je ze alleen bij te schuiven.'),
+      'Zo werkt het: 1) Kies met de schuif een moment. 2) Klik in het beeld op een herkenbaar punt (hoek strafschopgebied, ' +
+      'strafschopstip, doelpaal, hoekvlag...) of op een plek ergens op een veldlijn. 3) Klik hetzelfde punt of dezelfde lijn aan ' +
+      'in de veldtekening rechts (lijnen worden rood als je erop klikt). Een punt telt 2, een lijn telt mee met hoogstens 2 punten; ' +
+      'je hebt samen 8 nodig, bijv. 4 punten, of 1 punt + 3 lijnen (handig vanaf de zijlijn: zijlijn, 16-meterlijn, doellijn). ' +
+      'De witte lijnen laten zien of het klopt. Omdat je camera beweegt: voeg elke 30–60 seconden en na flinke zwenks een nieuw ' +
+      'sleutelframe toe. Na de analyse voorspelt de app punten en lijnen (geel); dan hoef je ze alleen bij te schuiven.'),
     h('div', { className: 'row', style: { marginBottom: '12px' } }, 'Video:', clipSel),
     h('div', { className: 'grid2' },
       h('div', { className: 'panel' },
@@ -42,7 +44,7 @@ export async function render(root, ctx) {
         h('div', { className: 'row small muted', style: { marginTop: '6px' } },
           'Sleep een punt om het te verschuiven. Rechtsklik op een punt verwijdert het.', predToggle)),
       h('div', {},
-        h('div', { className: 'panel' }, h('h3', {}, 'Veld (klik op een punt)'), pitchCanvas),
+        h('div', { className: 'panel' }, h('h3', {}, 'Veld (klik op een punt of lijn)'), pitchCanvas),
         h('div', { className: 'panel' },
           h('div', { className: 'row', style: { justifyContent: 'space-between' } }, h('h3', {}, 'Punten in dit sleutelframe'), errLabel),
           pairList,
@@ -89,26 +91,45 @@ export async function render(root, ctx) {
   pitchCanvas.addEventListener('click', e => {
     const r = pitchCanvas.getBoundingClientRect();
     const [mx, my] = pv.toM(e.clientX - r.left, e.clientY - r.top);
-    let best = null, bd = 4;
+    let best = null, bd = 2.5;
     for (const lm of pitchInfo.landmarks) {
       const d = Math.hypot(lm.x - mx, lm.y - my);
       if (d < bd) { bd = d; best = lm; }
     }
-    if (!best) return toast('Klik dichter bij een wit punt op het veld');
+    if (!best) {  // geen punt in de buurt: dan een lijn?
+      let ld = 2;
+      for (const ln of pitchInfo.lines) {
+        const d = segDist([mx, my], ln.from, ln.to);
+        if (d < ld) { ld = d; best = { name: ln.name, line: [ln.from, ln.to] }; }
+      }
+    }
+    if (!best) return toast('Klik dichter bij een wit punt of een lijn op het veld');
     if (pendingImg) { addPair(best, pendingImg); pendingImg = null; }
     else pendingPitch = best;
     redraw();
   });
 
   function addPair(lm, p) {
+    if (lm.line) {  // meerdere punten op dezelfde lijn mogen
+      pairs.push({ name: lm.name, img: p, line: lm.line });
+      return;
+    }
     pairs = pairs.filter(q => q.name !== lm.name);
     pairs.push({ name: lm.name, img: p, pitch: [lm.x, lm.y] });
   }
 
-  function currentH() {
-    if (pairs.length < 4) return null;
-    return fitHomography(pairs.map(p => p.pitch), pairs.map(p => p.img));
+  function segDist(p, a, b) {
+    const dx = b[0] - a[0], dy = b[1] - a[1];
+    const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy || 1)));
+    return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy);
   }
+
+  // veld -> beeld (voor het tekenen van de lijnen over het beeld)
+  function toImageH(list) {
+    const G = fitCalibration(list);
+    return G ? inv(G) : null;
+  }
+  function currentH() { return toImageH(pairs); }
 
   function drawFrame() {
     const c = frameCanvas.getContext('2d');
@@ -128,8 +149,8 @@ export async function render(root, ctx) {
       }
       c.restore();
     };
-    if (showPred && predicted.length >= 4) {
-      const Hp = fitHomography(predicted.map(p => p.pitch), predicted.map(p => p.img));
+    if (showPred && predicted.length) {
+      const Hp = toImageH(predicted);
       if (Hp) drawLines(Hp, 'rgba(255,214,0,.85)', [8 * pxPerCss(), 6 * pxPerCss()]);
     }
     const H = currentH();
@@ -148,7 +169,15 @@ export async function render(root, ctx) {
 
   function drawPitch() {
     pv.draw();
-    const used = new Map(pairs.map((p, i) => [p.name, i + 1]));
+    const c = pv.ctx;
+    const usedLines = new Set(pairs.filter(p => p.line).map(p => p.name));
+    for (const ln of pitchInfo.lines) {
+      const on = usedLines.has(ln.name), pend = pendingPitch?.name === ln.name;
+      if (!on && !pend) continue;
+      c.save(); c.strokeStyle = pend ? '#ffd600' : '#ff2d55'; c.lineWidth = 4;
+      c.beginPath(); c.moveTo(...pv.toPx(...ln.from)); c.lineTo(...pv.toPx(...ln.to)); c.stroke(); c.restore();
+    }
+    const used = new Map(pairs.map((p, i) => [p.name, i + 1]).filter(([n]) => !usedLines.has(n)));
     for (const lm of pitchInfo.landmarks) {
       const n = used.get(lm.name);
       if (n) pv.dot(lm.x, lm.y, '#ff2d55', 7, String(n));
@@ -158,15 +187,16 @@ export async function render(root, ctx) {
 
   function drawPairs() {
     pairList.replaceChildren(...pairs.map((p, i) => h('div', { className: 'list-item' },
-      h('b', {}, i + 1), h('span', { style: { flex: 1 } }, p.name),
+      h('b', {}, i + 1), h('span', { style: { flex: 1 } }, p.line ? `op lijn: ${p.name}` : p.name),
       h('button', { onclick: () => { pairs.splice(i, 1); redraw(); } }, '×'))));
     if (!pairs.length) pairList.append(h('div', { className: 'muted small' },
-      pendingImg ? 'Klik nu het bijbehorende punt op het veld.' : pendingPitch ? `Klik nu "${pendingPitch.name}" in het beeld.` : 'Nog geen punten.'));
-    if (pairs.length >= 4) {
-      const H = fitHomography(pairs.map(p => p.img), pairs.map(p => p.pitch));
-      const err = H ? pairs.reduce((s, p) => { const q = apply(H, p.img); return s + Math.hypot(q[0] - p.pitch[0], q[1] - p.pitch[1]); }, 0) / pairs.length : NaN;
+      pendingImg ? 'Klik nu het bijbehorende punt op het veld.' : pendingPitch ? `Klik nu ${pendingPitch.line ? 'een plek op ' : ''}"${pendingPitch.name}" in het beeld.` : 'Nog geen punten.'));
+    const info = calibrationInfo(pairs);
+    const G = info.ok ? fitCalibration(pairs) : null;
+    if (G) {
+      const err = calibrationError(G, pairs);
       errLabel.replaceChildren(h('span', { className: `badge ${err < 1 ? 'ok' : 'err'}` }, `afwijking ${err.toFixed(2)} m`));
-    } else errLabel.replaceChildren(h('span', { className: 'muted small' }, `${pairs.length}/4 punten`));
+    } else errLabel.replaceChildren(h('span', { className: 'muted small' }, `${Math.min(info.dof, 8)}/8 · ${info.hint || 'niet eenduidig'}`));
   }
 
   function redraw() { drawFrame(); drawPitch(); drawPairs(); }
@@ -206,7 +236,8 @@ export async function render(root, ctx) {
   }
 
   async function save() {
-    if (pairs.length < 4) return toast('Minstens 4 punten nodig');
+    const info = calibrationInfo(pairs);
+    if (!info.ok) return toast(`Nog niet genoeg: ${info.hint}`);
     const res = await api(`/clips/${clip.id}/keyframes`, { json: { id: editingId, t, points: pairs } });
     editingId = res.id;
     t = res.t;
