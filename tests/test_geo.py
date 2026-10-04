@@ -47,3 +47,38 @@ def test_x_runs_left_to_right_as_seen_from_camera():
     clon = lon0 + math.degrees(30 / (r * math.cos(math.radians(lat0))))  # 30 m naar het oosten
     pos = geo.camera_on_pitch(clat, clon, [poly])
     assert pos["x"] > 52.5 + 25 and pos["y"] > 68
+
+
+def test_overpass_falls_back_to_other_server_and_explains_problems(monkeypatch):
+    """Is de eerste OpenStreetMap-server druk (429) of de verbinding niet te vertrouwen, dan de volgende;
+    lukt het nergens, dan een melding in gewone woorden."""
+    import io
+    import json
+    import ssl
+    import urllib.error
+    import pytest
+    calls = []
+    answer = {"elements": [{"tags": {"sport": "soccer"},
+                            "geometry": [{"lat": 53.0, "lon": 6.0}, {"lat": 53.001, "lon": 6.0},
+                                         {"lat": 53.001, "lon": 6.0015}, {"lat": 53.0, "lon": 6.0015}]}]}
+
+    def fake(mode):
+        def urlopen(req, timeout=None, context=None):
+            calls.append(req.full_url)
+            assert context is not None and req.get_header("User-agent").startswith("match-analyzer")
+            if mode == "busy-then-ok" and len(calls) == 1:
+                raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+            if mode == "ssl":
+                raise urllib.error.URLError(ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED"))
+            if mode == "busy":
+                raise urllib.error.HTTPError(req.full_url, 504, "Gateway Timeout", {}, None)
+            return io.BytesIO(json.dumps(answer).encode())
+        return urlopen
+    monkeypatch.setattr(geo.urllib.request, "urlopen", fake("busy-then-ok"))
+    assert len(geo.query_pitches(53.0, 6.0)) == 1 and calls[1] == geo.OVERPASS_URLS[1]
+    monkeypatch.setattr(geo.urllib.request, "urlopen", fake("ssl"))
+    with pytest.raises(geo.OsmError, match="certificaten"):
+        geo.query_pitches(53.0, 6.0)
+    monkeypatch.setattr(geo.urllib.request, "urlopen", fake("busy"))
+    with pytest.raises(geo.OsmError, match="druk"):
+        geo.query_pitches(53.0, 6.0)

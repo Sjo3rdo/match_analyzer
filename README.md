@@ -37,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.12 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.13 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. Ziet de app er na een update vreemd uit, druk dan één keer op ⌥⌘R in Safari.
 
 Wil je ook rugnummers automatisch laten lezen? Installeer dan:
@@ -114,7 +114,9 @@ minimap**, **Statistieken** en **Clips & delen**.
      Na **Zoek via GPS** biedt de app aan om de maten uit OpenStreetMap over te nemen.
    - **Zoek via GPS.** iPhone-video's bevatten meestal de GPS-positie. De knop **📡 Zoek via GPS**
      zoekt het voetbalveld op in OpenStreetMap en zet je positie automatisch op de tekening. Daarvoor
-     wordt alleen de coördinaat naar OpenStreetMap gestuurd, en alleen als jij op de knop klikt. De
+     wordt alleen de coördinaat naar OpenStreetMap gestuurd, en alleen als jij op de knop klikt.
+     Is de OpenStreetMap-server druk, dan probeert de app vanzelf een reserveserver. Lukt het toch
+     niet, dan zegt de app in gewone woorden waarom (druk, geen internet of een certificaatprobleem). De
      iPhone slaat de positie op ongeveer 5 à 10 m nauwkeurig op; klik je plek gerust preciezer aan.
    - **Laat de app het veld zoeken.** Weet de app waar je stond, dan zoekt hij zelf de witte lijnen en
      legt hij de veldtekening erop, zonder klikken (**🤖 Zoek het veld automatisch**; gebeurt vanzelf

@@ -15,9 +15,12 @@ gebruiker daarom vraagt.
 from __future__ import annotations
 
 import json
+import logging
 import math
 import re
+import ssl
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
@@ -27,7 +30,55 @@ import numpy as np
 
 from . import pitch
 
-OVERPASS_URL = "https://overpass-api.de/api/interpreter"
+# De gratis OpenStreetMap-zoekservers (Overpass). Is de eerste druk of weigert hij, dan de volgende.
+OVERPASS_URLS = (
+    "https://overpass-api.de/api/interpreter",
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.private.coffee/api/interpreter",
+)
+USER_AGENT = "match-analyzer/0.13 (lokale voetbalanalyse; https://github.com/sjo3rdo/match_analyzer)"
+
+
+class OsmError(RuntimeError):
+    """OpenStreetMap niet bereikbaar; de tekst zegt in gewone woorden waarom."""
+
+
+def _ssl_context() -> ssl.SSLContext:
+    """Beveiligde verbinding met de certificaten van certifi. Python op de Mac heeft soms geen eigen
+    certificaten (dan faalt elke https-verbinding met CERTIFICATE_VERIFY_FAILED)."""
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:  # noqa: BLE001
+        return ssl.create_default_context()
+
+
+def _overpass(query: str, timeout: int) -> dict:
+    body = urllib.parse.urlencode({"data": query}).encode()
+    ctx = _ssl_context()
+    problems = []
+    for url in OVERPASS_URLS:
+        req = urllib.request.Request(url, data=body, headers={
+            "User-Agent": USER_AGENT, "Accept": "application/json",
+            "Content-Type": "application/x-www-form-urlencoded"})
+        try:
+            with urllib.request.urlopen(req, timeout=timeout + 5, context=ctx) as resp:
+                return json.load(resp)
+        except urllib.error.HTTPError as e:  # server bereikt, maar hij wil nu niet (druk, geweigerd)
+            problems.append(("http", e.code))
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            reason = getattr(e, "reason", e)
+            problems.append(("ssl" if isinstance(reason, ssl.SSLError) or "CERTIFICATE" in str(e) else "net", str(reason)))
+        logging.warning("OpenStreetMap via %s mislukt: %s", url, problems[-1])
+    kinds = {k for k, _ in problems}
+    if "http" in kinds:
+        codes = sorted({str(c) for k, c in problems if k == "http"})
+        raise OsmError(f"de OpenStreetMap-servers zijn nu druk of weigeren het verzoek (code {', '.join(codes)}); "
+                       "probeer het over een paar minuten opnieuw")
+    if kinds == {"ssl"}:
+        raise OsmError("de beveiligde verbinding wordt niet vertrouwd (certificaten van Python ontbreken). "
+                       "Installeer ze met: .venv/bin/pip install --upgrade certifi")
+    raise OsmError(f"geen verbinding met internet? ({problems[0][1] if problems else 'onbekend'})")
 _ISO6709 = re.compile(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)?")
 
 
@@ -99,10 +150,7 @@ def query_pitches(lat: float, lon: float, radius: int = 300, timeout: int = 25) 
     """Omtrek (lat, lon) van voetbalvelden in de buurt, uit OpenStreetMap (Overpass)."""
     q = (f"[out:json][timeout:{timeout}];"
          f"(way(around:{radius},{lat},{lon})[\"leisure\"=\"pitch\"];);out geom;")
-    req = urllib.request.Request(OVERPASS_URL, data=urllib.parse.urlencode({"data": q}).encode(),
-                                 headers={"User-Agent": "match-analyzer/1.0"})
-    with urllib.request.urlopen(req, timeout=timeout + 5) as resp:
-        data = json.load(resp)
+    data = _overpass(q, timeout)
     out = []
     for el in data.get("elements", []):
         sport = (el.get("tags") or {}).get("sport", "soccer")
