@@ -28,6 +28,8 @@ export async function render(root, ctx) {
       rosterPanel),
     trackPanel);
   const squads = await api('/squads').catch(() => []);
+  let profiles = await api(`/matches/${match.id}/profiles`).catch(() => ({}));
+  const recogBox = h('div');
   const otherMatches = (await api('/matches').catch(() => [])).filter(m => m.id !== match.id);
 
   function drawRoster() {
@@ -76,6 +78,9 @@ export async function render(root, ctx) {
             onchange: e => api(`/players/${p.id}`, { method: 'PATCH', json: { number: e.target.value || null } }) })),
           h('td', {}, h('input', { value: p.name, onchange: e => api(`/players/${p.id}`, { method: 'PATCH', json: { name: e.target.value } }) })),
           h('td', {}, h('button', { title: 'Koppel-assistent: zoek tracks van deze speler', onclick: () => openAssist(p.id) }, '🔍'), ' ',
+            h('button', { title: profiles[p.id] ? 'De app kent deze speler al. Opnieuw leren (met alles wat nu gekoppeld is)'
+              : 'Leer de app deze speler herkennen (uit de stukken die aan hem gekoppeld zijn)',
+              className: profiles[p.id] ? 'learned' : '', onclick: () => learnPlayer(p) }, '🧠'), ' ',
             h('button', { className: 'danger', onclick: async () => {
             await api(`/players/${p.id}`, { method: 'DELETE' });
             players = players.filter(q => q.id !== p.id); drawRoster(); drawTracks();
@@ -87,7 +92,7 @@ export async function render(root, ctx) {
   let clipId = clips.find(c => c.id === Number(ctx.params.get('clip')))?.id || clips[0]?.id;
   let onlyOpen = true, onlyPitch = true, limit = 48;
   async function drawTracks() {
-    trackPanel.replaceChildren(h('h2', {}, 'Tracks koppelen'), assistBox);
+    trackPanel.replaceChildren(h('h2', {}, 'Tracks koppelen'), recogBox, assistBox);
     if (!clips.length) { trackPanel.append(h('div', { className: 'empty' }, 'Nog geen geanalyseerde video\'s.')); return; }
     const tracks = await api(`/clips/${clipId}/tracks`);
     const shown = tracks.filter(t => (!onlyOpen || !t.player_id) && (!onlyPitch || t.valid));
@@ -110,6 +115,7 @@ export async function render(root, ctx) {
         await api(`/clips/${clipId}/reassign-teams`, { method: 'POST' }); toast('Teams opnieuw ingedeeld'); drawTracks();
       } }, '↻ Opnieuw indelen')));
     trackPanel.append(h('div', { className: 'cards' }, shown.slice(0, limit).map(t => card(t, clip))));
+    drawRecognize();
     if (shown.length > limit) trackPanel.append(h('div', { style: { marginTop: '10px' } },
       h('button', { onclick: () => { limit += 48; drawTracks(); } }, 'Meer tonen')));
   }
@@ -147,6 +153,52 @@ export async function render(root, ctx) {
     markSpectator(t.clip_id, t.track_id, assistBox, () => drawTracks());
   }
 
+  // --- spelers herkennen met hun profiel -----------------------------------------------------
+  async function learnPlayer(p) {
+    const linked = (await api(`/matches/${match.id}`)).n_assigned;
+    if (!linked) return toast(`Koppel eerst een paar stukken aan ${playerLabel(p)}; daarvan leert de app hoe hij eruitziet`, true);
+    const ov = await api('/training').catch(() => null);
+    const est = ov?.matches.find(m => m.id === match.id)?.minutes || 1;
+    if (!confirm(`De app bekijkt alle stukken in de video's van deze wedstrijd om ${playerLabel(p)} te leren herkennen. ` +
+      `Dat duurt ± ${est} min (de eerste keer per wedstrijd; daarna sneller). Nu starten?`)) return;
+    await api('/training/start', { json: { kind: 'players', match_id: match.id, player_id: p.id } });
+    toast('Bezig met leren. Voortgang rechtsboven; als het klaar is, verschijnen hier de voorstellen.');
+    waitForTraining();
+  }
+  let waitTimer = null;
+  async function waitForTraining() {
+    clearTimeout(waitTimer);
+    const st = await api('/training/status').catch(() => null);
+    if (st?.busy) { waitTimer = setTimeout(waitForTraining, 3000); return; }
+    if (st?.last) toast(st.last.message || 'Klaar', !st.last.ok);
+    profiles = await api(`/matches/${match.id}/profiles`).catch(() => ({}));
+    drawRoster(); drawRecognize();
+  }
+  async function drawRecognize() {
+    const list = await api(`/matches/${match.id}/recognize`).catch(() => []);
+    const here = list.filter(r => r.clip_id === clipId);
+    if (!list.length) { recogBox.replaceChildren(); return; }
+    const byId = new Map(players.map(p => [p.id, p]));
+    recogBox.replaceChildren(h('div', { className: 'hint recog' },
+      h('div', { className: 'row', style: { justifyContent: 'space-between' } },
+        h('b', {}, `🧠 Herkend: ${list.length} stuk(ken) lijken op een speler`, here.length < list.length ? ` (${here.length} in deze video)` : ''),
+        here.length ? h('button', { className: 'primary small', onclick: async () => {
+          if (!confirm(`${here.length} voorstel(len) in deze video in één keer koppelen? Controleer ze eerst even hieronder.`)) return;
+          for (const r of here) await api(`/clips/${r.clip_id}/tracks/${r.track_id}`, { method: 'PATCH', json: { player_id: r.player_id } });
+          toast(`${here.length} gekoppeld`); drawTracks();
+        } }, `✓ Alle ${here.length} koppelen`) : null),
+      here.length ? h('div', { className: 'cards', style: { marginTop: '8px' } }, here.slice(0, 24).map(r => h('div', { className: 'card' },
+        h('img', { src: `/api/clips/${r.clip_id}/thumb/${r.track_id}`, loading: 'lazy' }),
+        h('div', { className: 'small' }, h('b', {}, playerLabel(byId.get(r.player_id))), ` · ${Math.round(100 * r.score)}% gelijk`),
+        h('div', { className: 'row' },
+          h('button', { className: 'primary small', onclick: async () => {
+            await api(`/clips/${r.clip_id}/tracks/${r.track_id}`, { method: 'PATCH', json: { player_id: r.player_id } });
+            toast('Gekoppeld'); drawTracks();
+          } }, '✓'),
+          h('button', { className: 'small', title: 'Niet deze speler', onclick: e => e.target.closest('.card').remove() }, '✗')))))
+        : h('div', { className: 'small muted' }, 'Kies een andere video hierboven om de voorstellen te zien.')));
+  }
+
   // --- koppel-assistent ---------------------------------------------------------------------
   // Na het koppelen van één track stelt de app tracks voor die er logisch op aansluiten:
   // niet tegelijk in beeld, beginnend waar het vorige stuk ophield, met hetzelfde shirt.
@@ -182,6 +234,7 @@ export async function render(root, ctx) {
 
   drawRoster();
   await drawTracks();
+  api('/training/status').then(st => { if (st.busy && st.kind === 'players') waitForTraining(); }).catch(() => {});
   const assistParam = Number(ctx.params.get('assist'));
   if (assistParam && players.some(p => p.id === assistParam)) openAssist(assistParam);
 }

@@ -753,9 +753,13 @@ def suggest_tracks(store: Store, player_id: int, clip_id: int | None = None, lim
     """Tracks die waarschijnlijk ook bij deze speler horen, best passend eerst."""
     from .teams import color_distance, hex_to_lab
 
+    from . import learning
+
     p = store.one("SELECT * FROM players WHERE id = ?", (player_id,))
     if p is None:
         return []
+    profile = learning.profile_of(store, p)
+    center = learning.team_centers(store, p["match_id"]).get(p["team"]) if profile is not None else None
     linked = store.all("SELECT t.* FROM tracks t JOIN clips c ON c.id = t.clip_id WHERE c.match_id = ? "
                        "AND t.player_id = ?", (p["match_id"], player_id))
     cols = [(hex_to_lab(r["color"]), r["n_frames"] or 1) for r in linked]
@@ -809,6 +813,12 @@ def suggest_tracks(store: Store, player_id: int, clip_id: int | None = None, lim
             de = color_distance(col, my_color) if col is not None and my_color is not None else None
             if de is not None:
                 score *= 0.15 + 0.85 * float(np.exp(-0.5 * (de / 12.0) ** 2))
+            look = None
+            if profile is not None:
+                emb = learning.track_embedding(store, cid, tid)
+                if emb is not None:
+                    look = learning.similarity(emb, profile, center)
+                    score *= 0.5 + 1.0 * float(np.clip((look + 0.1) / 0.6, 0, 1))  # lijkt hij op zijn profiel?
             if tr.get("jersey_guess") and p.get("number") and (tr.get("jersey_conf") or 0) >= 0.4:
                 score *= 1.4 if str(tr["jersey_guess"]) == str(p["number"]).strip() else 0.3
             reason = []
@@ -821,6 +831,9 @@ def suggest_tracks(store: Store, player_id: int, clip_id: int | None = None, lim
                 reason.append("zelfde shirt" if de < 8 else "shirt lijkt erop" if de < 16 else "ander shirt?")
             if rival > pc + 0.2:
                 reason.append("past ook bij een teamgenoot")
+            if look is not None:
+                reason.append("lijkt op zijn profiel" if look >= 0.35 else "lijkt niet op zijn profiel" if look < 0.05 else "")
+                reason = [r for r in reason if r]
             out.append({"clip_id": cid, "track_id": tid, "t_start": round(c["t0"], 2), "t_end": round(c["t1"], 2),
                         "n_frames": c["n"], "score": round(min(1.0, score), 3), "reason": ", ".join(reason)})
     out.sort(key=lambda r: -r["score"])

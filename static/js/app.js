@@ -8,6 +8,7 @@ import * as players from './views/players.js';
 import * as video from './views/video.js';
 import * as stats from './views/stats.js';
 import * as moments from './views/moments.js';
+import * as training from './views/training.js';
 
 // Tabbladen; de eerste drie zijn de stappen die je doorloopt (met een ✓ als ze klaar zijn en een
 // geel bolletje bij de volgende stap), de rest is om te bekijken.
@@ -61,6 +62,10 @@ async function route() {
   const [path, query] = location.hash.slice(1).split('?');
   const params = new URLSearchParams(query || '');
   const parts = path.split('/').filter(Boolean);
+  if (parts[0] === 'trainen') {
+    cleanup = await training.render(view);
+    return;
+  }
   if (parts[0] !== 'match') {
     cleanup = await matches.render(view);
     return;
@@ -82,8 +87,11 @@ async function route() {
     },
   };
   const mod = (TABS.find(t => t[0] === tab) || TABS[0])[2];
-  view.append(h('h1', {}, match.name, ' ', h('span', { className: 'muted small' },
-    `${match.team0_name} – ${match.team1_name}${match.date ? ' · ' + match.date : ''}`)));
+  view.append(h('div', { className: 'match-head' },
+    h('div', {}, h('div', { className: 'eyebrow' }, 'Wedstrijd'), h('h1', {}, match.name)),
+    h('span', { className: 'vs' }, h('span', { className: 'dot', style: { background: TEAM_COLORS[0] } }), match.team0_name,
+      ' – ', h('span', { className: 'dot', style: { background: TEAM_COLORS[1], marginLeft: '4px' } }), match.team1_name),
+    match.date ? h('span', { className: 'date' }, match.date) : null));
   cleanup = await mod.render(view, ctx);
 }
 
@@ -91,5 +99,22 @@ api('/version').then(v => {
   document.getElementById('version').textContent = `versie ${v.version}${v.commit ? ' · ' + v.commit : ''}`;
 }).catch(() => {});
 
+training.startIndicator(document.getElementById('train-indicator'));
+
+// licht/donker (standaard donker); de keuze onthouden we in deze browser
+const themeBtn = document.getElementById('theme-toggle');
+function showTheme() {
+  const light = document.documentElement.dataset.theme === 'light';
+  themeBtn.textContent = light ? '☾' : '☀︎';
+  themeBtn.title = light ? 'Donker thema' : 'Licht thema';
+}
+themeBtn.addEventListener('click', () => {
+  const next = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  try { localStorage.setItem('theme', next); } catch {}
+  showTheme();
+  window.dispatchEvent(new Event('resize'));  // canvassen (veld, minimap) opnieuw tekenen
+});
+showTheme();
 window.addEventListener('hashchange', route);
 route();

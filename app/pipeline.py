@@ -208,7 +208,7 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
         with store.tx() as c:
             c.executemany("INSERT INTO frames VALUES (?,?,?)", frame_rows)
             c.executemany("INSERT INTO detections VALUES (?,?,?,?,?,?,?,?)", det_rows)
-            c.executemany("INSERT INTO ball VALUES (?,?,?,?,?)", ball_rows)
+            c.executemany("INSERT INTO ball (clip_id, idx, x, y, conf, src) VALUES (?,?,?,?,?,?)", ball_rows)
         frame_rows.clear(), det_rows.clear(), ball_rows.clear()
 
     # Een lopende band met drie werkers die tegelijk bezig zijn:
@@ -272,7 +272,7 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
                     det_rows.append((clip_id, idx, tid, *map(float, box), score))
                     stats[tid].add(t, frame, box, color_of.get(np.asarray(box, np.float64).tobytes()), idx)
                 if det.ball:
-                    ball_rows.append((clip_id, idx, *map(float, det.ball)))
+                    ball_rows.append((clip_id, idx, *map(float, det.ball[:3]), det.ball[3] if len(det.ball) > 3 else 'det'))
                 idx += 1
                 counter["frame_no"] = frame_no
                 if idx % 50 == 0:
@@ -305,13 +305,14 @@ def process_clip(store: Store, clip_id: int, detector=None) -> None:
         cands = getattr(det, "balls", None)
         if cands is None:  # (eenvoudige detector: alleen de beste bal)
             return
-        pick = tracker_ball.choose(cands)
+        pick, src = tracker_ball.choose(cands), "det"
         if pick is None and zoom is not None:
-            boxes = [tracker_ball.crop_box()] if tracker_ball.crop_box() else tracker_ball.scan_boxes(frame_no)
+            crop = tracker_ball.crop_box()
+            boxes = [crop] if crop else tracker_ball.scan_boxes(frame_no)
             if boxes:
-                pick = tracker_ball.choose(zoom(frame, boxes))
+                pick, src = tracker_ball.choose(zoom(frame, boxes)), "zoom" if crop else "scan"
         tracker_ball.update(pick)
-        det.ball = (pick.x, pick.y, pick.conf) if pick is not None else None
+        det.ball = (pick.x, pick.y, pick.conf, src) if pick is not None else None
 
     batch_size = getattr(detector, "batch_size", 1)
     detect_many = getattr(detector, "detect_batch", None)

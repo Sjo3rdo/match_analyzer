@@ -398,7 +398,7 @@ def test_manual_ball_and_gap_filling(env):
     cid = _synthetic_clip(main.store, mid, {1: (lambda t: (200, 400), "#d03030")}, n=30)
     with main.store.tx() as c:  # bal gevonden in beeld 0-4 en 9-12, ertussen niet
         for i in list(range(0, 5)) + list(range(9, 13)):
-            c.execute("INSERT INTO ball VALUES (?,?,?,?,?)", (cid, i, 100 + 10 * i, 300, 0.5))
+            c.execute("INSERT INTO ball (clip_id, idx, x, y, conf) VALUES (?,?,?,?,?)", (cid, i, 100 + 10 * i, 300, 0.5))
     corners = [(0, 0), (105, 0), (105, 68), (0, 68)]
     pts = [{"name": str(k), "img": [100 + k[0] * 10, 100 + k[1] * 8], "pitch": list(k)} for k in corners]
     assert client.post(f"/api/clips/{cid}/keyframes", json={"t": 0, "points": pts}).status_code == 200

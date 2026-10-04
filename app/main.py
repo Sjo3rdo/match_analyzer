@@ -16,7 +16,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics, clips as clip_export, config, geo, pitch, render, teams
+from . import analytics, clips as clip_export, config, geo, learning, pitch, render, teams, training
 from .calibration import camera_prior, fit_calibration, fit_camera, normalize_h
 from .pipeline import Worker, probe, read_frame
 from .storage import Store, clip_dir
@@ -400,7 +400,9 @@ def _store_probe(cid: int, path: Path, info: dict, inherit: dict | None = None) 
 def update_clip(clip_id: int, data: dict = Body(...)):
     if "flip" in data and data["flip"] is not None:
         data = {**data, "flip": 1 if data["flip"] else 0}
-    return _update("clips", clip_id, data, {"order_idx", "period", "start_minute", "flip"})
+    if "train_ok" in data:
+        data = {**data, "train_ok": 1 if data["train_ok"] else 0}
+    return _update("clips", clip_id, data, {"order_idx", "period", "start_minute", "flip", "train_ok"})
 
 
 @app.delete("/api/clips/{clip_id}")
@@ -975,6 +977,84 @@ def set_ball(clip_id: int, data: dict = Body(...)):
                   (clip_id, t, None if x is None else float(x), None if y is None else float(y)))
     analytics.invalidate(clip_id=clip_id)
     return {"ok": True, "t": t}
+
+
+# --- de app slimmer maken (trainen op je eigen beelden) ------------------------------------------
+
+trainer = training.Trainer()
+
+
+def _after_training(kind: str, res: dict) -> None:
+    if kind == "field":
+        learning._field_cache.clear()
+    analytics.invalidate(geometry=kind == "field")
+
+
+trainer.on_done.append(_after_training)
+
+
+@app.get("/api/training")
+def training_overview():
+    return {**training.overview(store), "status": trainer.status()}
+
+
+@app.get("/api/training/status")
+def training_status():
+    return trainer.status()
+
+
+@app.post("/api/training/start")
+def training_start(data: dict = Body(...)):
+    """data: {kind: 'detector'|'field'|'players', quick?: bool, match_id?, player_id?}"""
+    kind = data.get("kind")
+    if kind not in ("detector", "field", "players"):
+        raise HTTPException(400, "Onbekende soort training")
+    opts = {"quick": bool(data.get("quick", True))}
+    if kind == "players":
+        if not data.get("match_id"):
+            raise HTTPException(400, "Kies een wedstrijd")
+        opts["match_id"] = int(data["match_id"])
+        if data.get("player_id"):
+            opts["player_id"] = int(data["player_id"])
+    try:
+        return trainer.start(kind, opts)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@app.post("/api/training/stop")
+def training_stop():
+    trainer.stop()
+    return {"ok": True}
+
+
+@app.post("/api/training/{kind}/activate")
+def training_activate(kind: str, data: dict = Body(default={})):
+    """Een getrainde versie gebruiken (file), of terug naar het standaardmodel (file: null)."""
+    if kind not in learning.KINDS:
+        raise HTTPException(400, "Onbekende soort")
+    try:
+        learning.set_active(kind, data.get("file"))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    _after_training(kind, {})
+    return {"ok": True, "active": learning.registry()[kind]["active"]}
+
+
+@app.get("/api/matches/{match_id}/recognize")
+def recognize_players(match_id: int):
+    """Ongekoppelde stukken die volgens de spelerprofielen bij een speler horen."""
+    _get("matches", match_id)
+    return learning.recognize(store, match_id)
+
+
+@app.get("/api/matches/{match_id}/profiles")
+def match_profiles(match_id: int):
+    """Welke spelers van deze wedstrijd al een profiel hebben."""
+    out = {}
+    for p in store.all("SELECT * FROM players WHERE match_id = ?", (match_id,)):
+        out[p["id"]] = learning.profile_of(store, p) is not None
+    return out
 
 
 @app.get("/api/clips/{clip_id}/positions")

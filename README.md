@@ -37,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.7 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.8 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. De browser haalt de interface na een update altijd vers op. Kwam je van een
 versie zonder versienummer rechtsboven, druk dan één keer op ⌥⌘R in Safari om de oude, bewaarde
 pagina weg te gooien (anders zie je bijv. geen deelknop of krijg je "Method Not Allowed").
@@ -55,7 +55,7 @@ Alle gegevens (video's, analyses, exports) staan in de map `data/`.
 Zie het als een puzzel in drie lagen: eerst *zien* (wie staat waar in beeld), dan *plaatsen*
 (waar is dat op het echte veld) en dan *benoemen* (wie is dat).
 
-Bovenaan staan de tabbladen. De eerste drie zijn de stappen die je doorloopt: **Video's →
+Rechtsboven wissel je met ☀︎/☾ tussen het donkere en het lichte thema. Bovenaan staan de tabbladen. De eerste drie zijn de stappen die je doorloopt: **Video's →
 Kalibratie → Spelers**. Een groen vinkje betekent klaar en het gele bolletje is de volgende stap
 (houd de muis erop om te zien wat er nog moet). Daarna bekijk je het resultaat bij **Video +
 minimap**, **Statistieken** en **Clips & delen**.
@@ -195,6 +195,37 @@ aftrap en **Einde deel** bij het eindsignaal, en doe hetzelfde voor de tweede he
 (warming-up, rust) valt weg. Het knippen is binnen seconden klaar en kost geen kwaliteit. Een deel kan
 wel tot ongeveer 1 seconde eerder beginnen dan je koos.
 
+## De app slimmer maken (trainen)
+
+Zie de app als een stagiair die meekijkt: alles wat jij verbetert, schrijft hij op. Pas als jij op
+een knop drukt, gaat hij daarmee oefenen. Dat kost tijd en rekenkracht, dus jij kiest het moment.
+
+1. **Video's klaarzetten.** Klopt de kalibratie in een video (de gele lijnen liggen op de witte
+   lijnen) en heb je de bal en toeschouwers waar nodig verbeterd? Klik dan bij **Kalibratie** op
+   **✓ Gebruik voor training**. Er gebeurt nog niets; de video staat alleen klaar.
+2. **Trainen wanneer het jou uitkomt.** Klik rechtsboven op **🧠 Trainen**. Je ziet hoeveel er
+   klaarstaat en hoe lang het ongeveer duurt. Kies **Snel** of **Grondig**:
+   - **Spelers en bal herkennen.** Het detectiemodel oefent op je eigen beelden. Vooral de bal: wat
+     de app alleen ingezoomd vond of wat jij aanwees, leert hij in het gewone beeld te zien. Op een
+     MacBook met Apple-chip is de schatting 5 à 15 minuten per honderd beelden (Snel); de app laat
+     vooraf zien hoe lang het ongeveer duurt en past dat tijdens het trainen aan.
+   - **Het veld herkennen.** Een klein netwerk leert uit goed gekalibreerde beelden welke pixels
+     veldlijn zijn, zodat het automatisch kalibreren ook lukt op velden met slechte lijnen.
+   - **Spelers herkennen.** Per speler leert de app hoe hij eruitziet (houding, haar, schoenen,
+     kleur) uit de stukken die je aan hem hebt gekoppeld. Dat kan ook per speler: klik op **🧠**
+     achter zijn naam bij **Spelers**. Het profiel wordt bewaard bij je vaste selectie, zodat de app
+     hem in een volgende wedstrijd zelf voorstelt (**🧠 Herkend** boven de tracks, en in de
+     koppel-assistent). Het is een hulp, geen zekerheid: teamgenoten in hetzelfde shirt lijken veel
+     op elkaar. Controleer de voorstellen; hoe meer je koppelt, hoe beter het profiel.
+3. **Alleen als het beter is.** Na het oefenen vergelijkt de app het nieuwe model met het oude op
+   beelden die het niet heeft gezien (ongeveer 1 op de 7 stukjes van 10 seconden houdt de app
+   apart). Alleen als het duidelijk beter is, gebruikt de app voortaan het nieuwe. Bij **Eerdere
+   trainingen** zie je de cijfers en kun je zelf een versie kiezen, of **↺ Terug naar standaard**.
+
+Tijdens het trainen kun je de app gewoon gebruiken (iets trager). Rechtsboven zie je hoe ver het is;
+met **■ Stoppen** breek je het af. Laat de laptop aan de lader en zet hem niet in slaap. Alles blijft
+op je eigen laptop.
+
 ## Wat de app onthoudt
 
 Zoals een trainer die een veld al kent, hoef je sommige dingen maar één keer in te stellen:
@@ -256,6 +287,9 @@ een vaste 180°-camera.
 - **Teams.** K-means op shirtkleur in de Lab-kleurruimte, waarbij graspixels worden weggefilterd
   (`app/teams.py`).
 - **Statistieken.** Te vinden in `app/analytics.py`.
+- **Bal volgen.** `app/ball.py`: kandidaten kiezen op het spoor, inzoomen en zoeken als hij kwijt is.
+- **Trainen.** `app/learning.py` (voorbeelden verzamelen, modelversies, veldnetwerk, spelerprofielen)
+  en `app/train.py` (draait als apart proces). Eigen modellen staan in `data/models/custom/`.
 - **Interface.** Gewone HTML en JavaScript zonder build-stap (`static/`).
 
 Instellingen, zoals het model, de analyse-fps en de sprintgrens, staan in `app/config.py`. Je

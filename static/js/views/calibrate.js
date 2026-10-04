@@ -521,7 +521,26 @@ export async function render(root, ctx) {
         loadKeyframes();
       } }, '×')));
     kfList.replaceChildren(...(rows.length ? rows : [h('div', { className: 'muted small' },
-      'Nog geen sleutelframes. Kalibreer er één; daarna stelt de app de rest van de video automatisch bij.')]), autoPanel(autos, manual));
+      'Nog geen sleutelframes. Kalibreer er één; daarna stelt de app de rest van de video automatisch bij.')]), autoPanel(autos, manual),
+      trainPanel(manual));
+  }
+
+  // Klopt alles? Dan mag de app van deze video leren (pas trainen als jij dat kiest, bij Trainen).
+  function trainPanel(manual) {
+    if (clip.status !== 'klaar' || !manual.length) return null;
+    const on = !!clip.train_ok;
+    return h('div', { className: 'train-box' },
+      h('div', { className: 'row', style: { justifyContent: 'space-between' } },
+        h('div', {}, h('b', {}, on ? '🧠 Klaargezet om van te leren' : '🧠 Laat de app hiervan leren'),
+          h('div', { className: 'small muted' }, on
+            ? 'Bij de volgende training leert de app van deze video: het veld, de spelers en de bal (ook wat jij hebt aangewezen).'
+            : 'Klopt de kalibratie in de hele video (gele lijnen op de witte lijnen) en heb je de bal en toeschouwers waar nodig verbeterd? Zet de video dan klaar. Het trainen zelf start pas als jij dat kiest.')),
+        h('button', { className: on ? '' : 'primary', onclick: async () => {
+          const c = await api(`/clips/${clip.id}`, { method: 'PATCH', json: { train_ok: !on } });
+          Object.assign(clip, c);
+          toast(on ? 'Niet meer klaargezet' : 'Klaargezet. Start het trainen wanneer het jou uitkomt via 🧠 Trainen (rechtsboven).');
+          loadKeyframes();
+        } }, on ? 'Toch niet' : '✓ Gebruik voor training')));
   }
 
   // Automatisch bijstellen: status, aantal automatische sleutelframes, opnieuw/wissen

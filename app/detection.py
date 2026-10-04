@@ -117,7 +117,19 @@ class Detector:
         return self.detect_batch([frame])[0]
 
 
-@lru_cache(maxsize=2)
 def get_detector(mode: str = "nauwkeurig") -> Detector:
+    """De detector voor deze analysekeuze. Bij 'nauwkeurig' het zelf bijgetrainde model als dat
+    actief is (zie learning.py), anders het standaardmodel."""
     model, imgsz = MODES.get(mode, MODES["nauwkeurig"])
+    if mode != "snel":
+        from . import learning
+
+        custom = learning.active_model("detector")
+        if custom is not None:
+            model = str(custom)
+    return _load(model, imgsz)
+
+
+@lru_cache(maxsize=3)
+def _load(model: str, imgsz: int) -> Detector:
     return Detector(model, imgsz)

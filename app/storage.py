@@ -50,7 +50,7 @@ CREATE INDEX IF NOT EXISTS det_clip_track ON detections(clip_id, track_id);
 CREATE TABLE IF NOT EXISTS ball (
     clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
     idx INTEGER NOT NULL,
-    x REAL, y REAL, conf REAL,
+    x REAL, y REAL, conf REAL, src TEXT,
     PRIMARY KEY (clip_id, idx)
 );
 CREATE TABLE IF NOT EXISTS tracks (
@@ -122,6 +122,21 @@ CREATE TABLE IF NOT EXISTS ball_manual (
     y REAL,
     PRIMARY KEY (clip_id, t)
 );
+CREATE TABLE IF NOT EXISTS player_profiles (
+    id INTEGER PRIMARY KEY,
+    squad_id INTEGER REFERENCES squads(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    match_player_id INTEGER REFERENCES players(id) ON DELETE CASCADE,
+    emb BLOB NOT NULL,
+    n INTEGER DEFAULT 0,
+    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS track_embeds (
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    track_id INTEGER NOT NULL,
+    emb BLOB NOT NULL,
+    PRIMARY KEY (clip_id, track_id)
+);
 CREATE TABLE IF NOT EXISTS markers (
     id INTEGER PRIMARY KEY,
     match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
@@ -176,6 +191,12 @@ class Store:
         for col, typ in (("analysis_mode", "TEXT"), ("flip", "INTEGER")):
             if col not in cols:
                 self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
+        # Door de gebruiker goedgekeurd om de app mee te trainen
+        if "train_ok" not in cols:
+            self.run("ALTER TABLE clips ADD COLUMN train_ok INTEGER DEFAULT 0")
+        bcols = {r["name"] for r in self.all("PRAGMA table_info(ball)")}
+        if "src" not in bcols:  # hoe de bal gevonden is: 'det' (gewoon beeld), 'zoom' (ingezoomd), 'scan'
+            self.run("ALTER TABLE ball ADD COLUMN src TEXT")
         mcols = {r["name"] for r in self.all("PRAGMA table_info(matches)")}
         # Veldmaten per wedstrijd, en de shirtkleur per team (om video's gelijk te trekken)
         for col, typ in (("pitch_length", "REAL"), ("pitch_width", "REAL"), ("team0_color", "TEXT"),
@@ -240,7 +261,7 @@ class Store:
 
     def clear_clip_results(self, clip_id: int) -> None:
         with self.tx() as c:
-            for table in ("frames", "detections", "ball", "tracks"):
+            for table in ("frames", "detections", "ball", "tracks", "track_embeds"):
                 c.execute(f"DELETE FROM {table} WHERE clip_id = ?", (clip_id,))
 
     # --- kalibratie ------------------------------------------------------
