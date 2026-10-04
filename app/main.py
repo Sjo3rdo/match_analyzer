@@ -493,7 +493,10 @@ def get_keyframes(clip_id: int):
             kf["score"] = json.loads(kf["score"]) if kf.get("score") else None
             kf["error_m"] = None
         else:
-            kf["error_m"] = _calib_error(kf["points"], prior)
+            try:
+                kf["error_m"] = round(fit_calibration(kf["points"], camera=prior)[1], 2)
+            except ValueError as e:  # bijv. een oude kalibratie die gespiegeld bleek: zeg wat er mis is
+                kf["error_m"], kf["problem"] = None, str(e)
         out.append(kf)
     return out
 
@@ -632,6 +635,8 @@ def propose_calibration(clip_id: int, t: float = 0.0):
         boxes = np.array([[r["x1"], r["y1"], r["x2"], r["y2"]] for r in rows]).reshape(-1, 4)
     geom = pitch.of_match(_get("matches", clip["match_id"]))
     res = propose(frame, prior, boxes, geom=geom)
+    if res is None:  # lastig beeld (versleten lijnen, fel zonlicht): ook naar zwakke lijnen zoeken
+        res = propose(frame, prior, boxes, geom=geom, enhance=True)
     if res is None:
         return {"ok": False, "t": ft, "message": "Geen overtuigend voorstel gevonden in dit beeld. Kies een moment met meer "
                                                   "veldlijnen in beeld, of klik zelf 1 punt + 1 lijn aan."}
@@ -1078,8 +1083,14 @@ def _moment_payload(data: dict) -> dict:
     for k in ("label", "comment"):
         if k in data:
             out[k] = data[k]
-    if "spotlight_player_id" in data:
-        out["spotlight_player_id"] = int(data["spotlight_player_id"]) if data["spotlight_player_id"] else None
+    if "spotlights" in data:  # spotlight op een of meer spelers
+        ids = list(dict.fromkeys(int(p) for p in data["spotlights"] or []))
+        out["spotlights"] = json.dumps(ids)
+        out["spotlight_player_id"] = ids[0] if ids else None
+    elif "spotlight_player_id" in data:
+        pid = int(data["spotlight_player_id"]) if data["spotlight_player_id"] else None
+        out["spotlight_player_id"] = pid
+        out["spotlights"] = json.dumps([pid] if pid else [])
     if "players" in data:
         out["players"] = json.dumps([int(p) for p in data["players"] or []])
     if "drawings" in data:

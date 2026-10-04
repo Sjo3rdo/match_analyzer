@@ -1,6 +1,6 @@
 """Hoogtepunten vinden in het geluid: gejuich en fluitsignalen.
 
-Zoals Veo hoogtepunten voorstelt, luisteren we hier naar de video:
+Om hoogtepunten voor te stellen luisteren we hier naar de video:
 - Gejuich: het wordt ineens een stuk luider dan wat in die fase van de wedstrijd normaal is, en
   dat houdt even aan (minstens anderhalve seconde; een losse roep van een speler is korter). We meten alleen het stemgebied (300 - 4000 Hz), zodat
   windgeruis in de microfoon van de telefoon niet als gejuich telt. Het moment zelf (de kans of

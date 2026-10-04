@@ -23,8 +23,24 @@ export async function render(root, ctx) {
   const ballBtn = h('button', { title: 'Pauzeer, klik hierop en klik daarna op de bal in de video. De app gebruikt dat voor balbezit en passes.',
     onclick: () => { placingBall = !placingBall; video.pause(); ballBtn.className = placingBall ? 'primary' : ''; ballBtn.textContent = placingBall ? 'Klik nu op de bal…' : '⚽ Bal aanwijzen'; } },
     '⚽ Bal aanwijzen');
-  const markerPlayer = h('select', {}, h('option', { value: '' }, '– speler (optioneel) –'),
-    match.players.map(p => h('option', { value: p.id }, playerLabel(p))));
+  // Spelers in deze actie: klik ze aan in de (gepauzeerde) video, of kies ze uit de lijst.
+  // Ze komen allemaal in de clip, elk met een spotlight (gele ring met naam).
+  const actionPlayers = new Set();
+  const actionBox = h('div', { className: 'row small', style: { gap: '6px', marginTop: '8px', flexWrap: 'wrap' } });
+  const addPlayer = h('select', { onchange: e => { if (e.target.value) toggleAction(Number(e.target.value)); e.target.value = ''; } });
+  function drawAction() {
+    addPlayer.replaceChildren(h('option', { value: '' }, '＋ speler…'),
+      ...match.players.filter(p => !actionPlayers.has(p.id)).map(p => h('option', { value: p.id }, playerLabel(p))));
+    actionBox.replaceChildren(h('span', { className: 'muted' }, 'Spelers in deze actie:'),
+      ...[...actionPlayers].map(id => playerById.get(`p${id}`)).filter(Boolean).map(p => h('span', { className: 'chip on' }, '🔦 ', playerLabel(p),
+        h('button', { className: 'chip-x', title: 'Weghalen', onclick: () => toggleAction(p.id) }, '×'))),
+      actionPlayers.size ? null : h('span', { className: 'muted' }, 'klik spelers aan in de video (gepauzeerd)'),
+      match.players.length ? addPlayer : null);
+  }
+  function toggleAction(pid) {
+    actionPlayers.has(pid) ? actionPlayers.delete(pid) : actionPlayers.add(pid);
+    drawAction(); draw();
+  }
 
   root.append(
     h('div', { className: 'row', style: { marginBottom: '12px' } }, 'Video:',
@@ -38,10 +54,11 @@ export async function render(root, ctx) {
       h('div', {},
         h('div', { className: 'video-wrap' }, video, overlay),
         h('div', { className: 'panel', style: { marginTop: '12px' } },
-          h('div', { className: 'row' }, label, markerPlayer,
+          h('div', { className: 'row' }, label,
             h('button', { className: 'primary', onclick: addMoment, title: 'Maakt een clip van 6 s vóór tot 4 s na dit moment' }, '✂️ Maak clip')),
+          actionBox,
           h('div', { className: 'small muted', style: { marginTop: '6px' } },
-            'Pauzeer bij een kans of goal, geef een label en klik "Maak clip" (6 s ervoor tot 4 s erna). Je clips staan hieronder bij ',
+            'Pauzeer bij een kans of goal, klik de spelers aan die erbij betrokken zijn, geef een label en klik "Maak clip" (6 s ervoor tot 4 s erna). Je clips staan hieronder bij ',
             '"Momenten in deze video" en bij ', h('a', { href: `#/match/${match.id}/momenten` }, 'Clips & delen'),
             ', waar je ze kunt bijknippen, tekenen en delen.'),
           labelList())),
@@ -114,7 +131,8 @@ export async function render(root, ctx) {
     if (!showBoxes) return;
     for (const b of lastBoxes) {
       const [x1, y1, x2, y2] = b.px;
-      const sel = b.track === selectedTrack;
+      const inAction = String(b.entity || '').startsWith('p') && actionPlayers.has(Number(b.entity.slice(1)));
+      const sel = b.track === selectedTrack || inAction;
       c.strokeStyle = sel ? '#ffd600' : b.valid ? (TEAM_COLORS[b.team] || '#aaa') : 'rgba(200,200,200,.4)';
       c.lineWidth = sel ? 3 : 1.5;
       c.strokeRect(x1, y1, x2 - x1, y2 - y1);
@@ -154,6 +172,9 @@ export async function render(root, ctx) {
     if (!hit) { video.paused ? video.play() : video.pause(); return; }
     video.pause();
     selectedTrack = hit.track;
+    const pid = String(hit.entity || '').startsWith('p') ? Number(hit.entity.slice(1)) : null;
+    if (pid && playerById.has(`p${pid}`)) toggleAction(pid);
+    else if (match.players.length) toast('Koppel deze speler eerst aan een naam (rechts) om hem in de clip te zetten');
     drawSide();
     draw();
   });
@@ -203,10 +224,11 @@ export async function render(root, ctx) {
   }
 
   async function addMoment() {
-    const t = video.currentTime, pid = markerPlayer.value ? Number(markerPlayer.value) : null;
+    const t = video.currentTime, ids = [...actionPlayers];
     const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: clip.id, start: Math.max(0, t - 6), end: t + 4,
-      label: label.value || 'Moment', players: pid ? [pid] : [], spotlight_player_id: pid } });
+      label: label.value || 'Moment', players: ids, spotlights: ids } });
     label.value = '';
+    actionPlayers.clear(); drawAction(); draw();
     toast('✓ Clip gemaakt. Hij staat bij "Momenten in deze video" en bij "Clips & delen".');
     loadEvents();
     return m;
@@ -235,7 +257,7 @@ export async function render(root, ctx) {
     posCache.clear(); boxCache.clear(); ballCache.clear();
     video.src = `/api/clips/${clip.id}/video`;
     video.addEventListener('loadedmetadata', () => { video.currentTime = t0 || 0; }, { once: true });
-    drawSide(); loadEvents();
+    drawSide(); loadEvents(); drawAction();
   }
   loadClip(Number(ctx.params.get('t')) || 0);
   const onResize = () => { pv.resize(); draw(); };

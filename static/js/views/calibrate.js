@@ -290,7 +290,7 @@ export async function render(root, ctx) {
       const G = info.ok ? fitCalibration(pairs) : null;
       fit = { H: G ? inv(G) : null, err: G ? calibrationError(G, pairs) : null, cam: null, msg: needInfo().hint };
       drawFrame(); drawErr();
-      if (!G) return;
+      if (!info.ok) return;
     }
     fitTimer = setTimeout(async () => {
       const seq = ++fitSeq, info = needInfo();
@@ -517,7 +517,8 @@ export async function render(root, ctx) {
       t = kf.t; slider.value = t; pairs = kf.points.map(p => ({ ...p })); editingId = kf.id; proposal = null; loadFrame();
     } },
       h('b', {}, fmtTime(kf.t)), h('span', { style: { flex: 1 } }, `${kf.points.length} punten`),
-      kf.error_m != null ? h('span', { className: `badge ${kf.error_m < 1 ? 'ok' : 'err'}` }, `${kf.error_m} m`) : null,
+      kf.error_m != null ? h('span', { className: `badge ${kf.error_m < 1 ? 'ok' : 'err'}` }, `${kf.error_m} m`)
+        : kf.problem ? h('span', { className: 'badge err', title: kf.problem }, '⚠ klopt niet') : null,
       editingId === kf.id ? h('span', { className: 'badge busy' }, 'bewerken') : null,
       h('button', { className: 'danger', onclick: async e => {
         e.stopPropagation();
