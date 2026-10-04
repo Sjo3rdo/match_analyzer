@@ -37,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.11 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.12 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. Ziet de app er na een update vreemd uit, druk dan één keer op ⌥⌘R in Safari.
 
 Wil je ook rugnummers automatisch laten lezen? Installeer dan:
@@ -62,6 +62,16 @@ minimap**, **Statistieken** en **Clips & delen**.
    bijvoorbeeld per helft of als de telefoon tussendoor stopte. Geef bij elke video de helft en
    de beginminuut op, en klik op **Analyseer**. De app maakt eerst een afspeelbare kopie en zoekt
    daarna ongeveer 10 keer per seconde naar spelers en de bal. Je ziet hoe lang het nog duurt.
+   - **▶ Analyseer alles** zet in één keer alle video's die nog niet geanalyseerd zijn in de
+     wachtrij. De laptop doet ze één voor één (dat is sneller dan alles door elkaar); je kunt de app
+     intussen gewoon gebruiken.
+   - **🕒 Volgorde uit opnametijd.** Een iPhone-video weet wanneer het filmen begon. Zoals je losse
+     foto's van een dag met de klok van de camera op volgorde legt, sorteert de app zo je video's.
+     Een gat van 8 minuten of meer is de rust; daarna begint de 2e helft. De eerste video van een
+     helft begint op de aftrap (0', of bij de 2e helft de speeltijd van één helft: 30, 40 of 45
+     minuten, kies je erbij); de rest telt daar vanaf door. Je ziet eerst het voorstel en kunt
+     helft en minuten aanpassen voordat je het overneemt. Begon je later met filmen dan de aftrap,
+     zet dan de minuten van die helft even goed.
    - **Nauwkeurig of Snel.** *Nauwkeurig* vindt ook spelers ver weg en de bal het best. *Snel* is
      ongeveer twee keer zo snel, maar mist vaker verre spelers en de bal: handig om eerst snel een
      hele wedstrijd door te nemen.
@@ -211,6 +221,8 @@ minimap**, **Statistieken** en **Clips & delen**.
    sprint, een pass, of iets uit het geluid. **📣 Gejuich** betekent dat het ineens veel luider werd,
    bijvoorbeeld na een goal of grote kans; de clip begint daarom 10 s ervoor. Daarnaast vindt de app
    **🔔 Fluitsignalen**. Bij Clips & delen kun je:
+   - clips verwijderen: met **×** achter een clip in de lijst, of vink er meer aan en klik
+     **🗑️ Verwijder aangevinkte** (de app vraagt het eerst);
    - begin en eind per seconde verschuiven;
    - een label, spelers en een opmerking toevoegen;
    - een **spotlight** op een of meer spelers zetten: een gele ring onder de voeten met de naam, die

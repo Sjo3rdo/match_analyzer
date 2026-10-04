@@ -48,6 +48,7 @@ export async function render(root, ctx) {
       h('span', { style: { flex: 1 } }),
       h('button', { onclick: () => { visible().forEach(m => selected.add(m.id)); drawList(); } }, 'Selecteer zichtbare'),
       h('button', { onclick: () => { selected.clear(); drawList(); } }, 'Niets'),
+      h('button', { className: 'danger', onclick: () => removeMoments([...selected]), title: 'Verwijder de aangevinkte clips' }, '🗑️ Verwijder aangevinkte'),
       h('button', { className: 'primary', onclick: () => exportSelection('reel') }, '🎬 Exporteer als één video'),
       h('button', { onclick: () => exportSelection('zip') }, '🗂️ Losse bestanden (zip)')),
     h('div', { className: 'grid2' },
@@ -62,6 +63,21 @@ export async function render(root, ctx) {
             'Gevonden uit de bal (hard richting doel) en het geluid (gejuich, fluitsignaal). Bevestig wat klopt: ',
             'dat telt mee in de statistieken en de stand. Een gemist schot of goal voeg je toe bij "Video + minimap".')),
         h('div', { className: 'panel' }, h('h3', {}, 'Suggesties (automatisch gevonden)'), suggestBox))));
+
+  // --- verwijderen (één clip of de aangevinkte) -----------------------------------------
+  async function removeMoments(ids) {
+    if (!ids.length) return toast('Vink eerst clips aan');
+    if (!confirm(ids.length === 1 ? 'Deze clip verwijderen?' : `${ids.length} clips verwijderen?`)) return;
+    if (pendingFor && ids.includes(pendingFor.id)) { pending = {}; pendingFor = null; clearTimeout(saveTimer); }
+    for (const id of ids) await api(`/moments/${id}`, { method: 'DELETE' });
+    moments = moments.filter(x => !ids.includes(x.id));
+    ids.forEach(id => selected.delete(id));
+    if (current && ids.includes(current.id)) {
+      current = null;
+      visible()[0] ? select(visible()[0]) : (drawEditor(), drawList());
+    } else drawList();
+    toast(ids.length === 1 ? 'Clip verwijderd' : `${ids.length} clips verwijderd`);
+  }
 
   // --- lijst ---------------------------------------------------------------------------
   function visible() {
@@ -86,7 +102,8 @@ export async function render(root, ctx) {
         h('span', { style: { flex: 1 } }, m.label || 'Moment', ' ', h('span', { className: 'muted small' }, names(m.players))),
         m.spotlights.length ? h('span', { title: 'Spotlight' }, '🔦'.repeat(Math.min(3, m.spotlights.length))) : null,
         m.drawings.length ? h('span', { title: 'Tekeningen' }, `✏️${m.drawings.length}`) : null,
-        h('span', { className: 'muted small' }, `${Math.round(m.end - m.start)}s`));
+        h('span', { className: 'muted small' }, `${Math.round(m.end - m.start)}s`),
+        h('button', { className: 'danger small', title: 'Verwijder deze clip', onclick: e => { e.stopPropagation(); removeMoments([m.id]); } }, '×'));
     }) : [h('div', { className: 'muted small' }, 'Nog geen clips. Maak er een met "+ Nieuwe clip" of via een suggestie.')]));
   }
 
@@ -266,13 +283,7 @@ export async function render(root, ctx) {
       h('div', { className: 'row', style: { marginTop: '12px' } },
         h('button', { className: 'primary', onclick: () => exp.run(match.id, { moment_ids: [m.id], name: `${m.label || 'clip'}-${matchMinute(c, m.start)}` }, m.label) }, '📤 Exporteer & deel deze clip'),
         h('span', { style: { flex: 1 } }),
-        h('button', { className: 'danger', onclick: async () => {
-          if (!confirm('Deze clip verwijderen?')) return;
-          if (pendingFor === m) { pending = {}; pendingFor = null; clearTimeout(saveTimer); }
-          await api(`/moments/${m.id}`, { method: 'DELETE' });
-          moments = moments.filter(x => x.id !== m.id); current = null;
-          visible()[0] ? select(visible()[0]) : (drawEditor(), drawList());
-        } }, 'Verwijder clip')));
+        h('button', { className: 'danger', onclick: () => removeMoments([m.id]) }, 'Verwijder clip')));
   }
 
   // --- afspelen: bereik, afspeellijst, tekeningen ----------------------------------------

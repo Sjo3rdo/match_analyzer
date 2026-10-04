@@ -246,7 +246,10 @@ def _team_colors(match_id: int) -> list[str | None]:
 def update_match(match_id: int, data: dict = Body(...)):
     if "pitch_length" in data or "pitch_width" in data:
         set_pitch_size(match_id, data.get("pitch_length"), data.get("pitch_width"))
-    return _update("matches", match_id, data, {"name", "date", "team0_name", "team1_name", "team0_color", "team1_color"})
+    if "half_length" in data and data["half_length"] is not None:
+        data = {**data, "half_length": int(data["half_length"])}
+    return _update("matches", match_id, data, {"name", "date", "team0_name", "team1_name", "team0_color", "team1_color",
+                                                "half_length"})
 
 
 def set_pitch_size(match_id: int, length: float | None, width: float | None) -> pitch.Geometry:
@@ -390,7 +393,7 @@ def _share_camera(match_id: int) -> int:
 
 def _store_probe(cid: int, path: Path, info: dict, inherit: dict | None = None) -> None:
     """Videogegevens opslaan; bij knippen GPS en camerapositie van het origineel overnemen."""
-    extra = {k: info.get(k) for k in ("gps_lat", "gps_lon", "gps_acc", "device")}
+    extra = {k: info.get(k) for k in ("gps_lat", "gps_lon", "gps_acc", "device", "rec_start")}
     if inherit:
         for k in ("gps_lat", "gps_lon", "gps_acc", "device", "cam_x", "cam_y", "cam_h", "cam_source"):
             if extra.get(k) is None:
@@ -1204,6 +1207,25 @@ def delete_moment(moment_id: int):
     return {"ok": True}
 
 
+@app.get("/api/matches/{match_id}/order")
+def order_proposal(match_id: int, half_length: int | None = None):
+    """Voorstel voor volgorde, helft en beginminuut van de video's, uit de opnametijd."""
+    from . import order
+    _get("matches", match_id)
+    return order.propose(store, match_id, half_length)
+
+
+@app.post("/api/matches/{match_id}/order")
+def order_apply(match_id: int, data: dict = Body(...)):
+    from . import order
+    _get("matches", match_id)
+    if data.get("half_length"):
+        store.run("UPDATE matches SET half_length = ? WHERE id = ?", (int(data["half_length"]), match_id))
+    n = order.apply(store, match_id, data.get("items") or [])
+    analytics.invalidate()
+    return {"updated": n}
+
+
 @app.post("/api/clips/{clip_id}/split")
 def split_clip(clip_id: int, data: dict = Body(...)):
     """Knip een video in delen. data: {segments: [{start, end, name?, period?, start_minute?}],
@@ -1237,6 +1259,8 @@ def split_clip(clip_id: int, data: dict = Body(...)):
             shutil.rmtree(dst.parent, ignore_errors=True)
             raise HTTPException(400, str(e)) from e
         _store_probe(cid, dst, info, inherit=c)
+        if c.get("rec_start") is not None:  # het deel begon zoveel later dan de opname
+            store.run("UPDATE clips SET rec_start = ? WHERE id = ?", (c["rec_start"] + float(seg["start"]), cid))
         created.append(_get("clips", cid))
     if data.get("delete_original"):
         delete_clip(clip_id)

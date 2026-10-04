@@ -211,3 +211,6 @@ body.dock-open #toast { bottom: calc(44vh + 30px); }
 .match-head .score { margin: 0 8px; font-size: 1.15em; color: var(--text); letter-spacing: .02em; }
 .scoreline { display: flex; align-items: center; justify-content: center; gap: 18px; font-size: 18px; margin: 4px 0 12px; }
 .scoreline b { font-size: 34px; letter-spacing: .04em; }
+tr.changed td { color: var(--text); }
+tr.changed td:first-child { box-shadow: inset 3px 0 0 var(--accent); }
+td.rust { color: var(--warn); padding: 6px 10px; }

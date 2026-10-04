@@ -7,6 +7,7 @@ export async function render(root, ctx) {
   const { match } = ctx;
   const panel = h('div', { className: 'panel' });
   const splitPanel = h('div');
+  const orderPanel = h('div');
   let splitCleanup = () => {};
   const fileInput = h('input', { type: 'file', accept: 'video/*', multiple: true });
   const status = h('span', { className: 'muted' });
@@ -32,13 +33,21 @@ export async function render(root, ctx) {
       'naar spelers en de bal. Dat kan op een MacBook ongeveer even lang duren als de video zelf.'),
     h('div', { className: 'panel' }, h('h2', {}, 'Video\'s toevoegen'),
       h('div', { className: 'row' }, fileInput, h('button', { className: 'primary', onclick: upload }, 'Uploaden'), status)),
-    panel, splitPanel);
+    panel, orderPanel, splitPanel);
 
   let timer, wasBusy = null;
   const draw = async () => {
     const m = await api(`/matches/${match.id}`);
     const clips = m.clips;
-    panel.replaceChildren(h('h2', {}, 'Video\'s van deze wedstrijd'));
+    const todo = clips.filter(c => c.status !== 'klaar' && !BUSY.includes(c.status));
+    panel.replaceChildren(h('div', { className: 'row', style: { justifyContent: 'space-between' } },
+      h('h2', {}, 'Video\'s van deze wedstrijd'),
+      clips.length ? h('div', { className: 'row' },
+        h('button', { onclick: openOrder, title: 'Sorteer de video\'s op het moment van filmen en stel helft en beginminuut voor' },
+          '🕒 Volgorde uit opnametijd'),
+        h('button', { className: 'primary', disabled: !todo.length, onclick: () => analyzeAll(todo),
+          title: 'Zet alle video\'s die nog niet geanalyseerd zijn in de wachtrij (ze worden één voor één gedaan)' },
+          `▶ Analyseer alles${todo.length ? ` (${todo.length})` : ''}`)) : null));
     if (!clips.length) { panel.append(h('div', { className: 'empty' }, 'Nog geen video\'s.')); return; }
     const patch = (c, data) => api(`/clips/${c.id}`, { method: 'PATCH', json: data });
     const move = async (i, dir) => {
@@ -100,6 +109,51 @@ export async function render(root, ctx) {
     wasBusy = busyNow;
     if (busyNow) timer = setTimeout(draw, 2000);
   };
+  async function analyzeAll(todo) {
+    if (!confirm(`${todo.length} video('s) analyseren? Ze gaan in de wachtrij en worden één voor één gedaan, elk met de keuze ` +
+      'Nauwkeurig/Snel die erbij staat. Je kunt de app intussen gewoon gebruiken.')) return;
+    for (const c of todo) await api(`/clips/${c.id}/process`, { json: { mode: c.analysis_mode || 'nauwkeurig' } });
+    toast(`${todo.length} video('s) in de wachtrij`); draw(); ctx.refreshSteps();
+  }
+
+  // --- volgorde en verloop uit de opnametijd -----------------------------------------------
+  async function openOrder(halfLength) {
+    const p = await api(`/matches/${match.id}/order${typeof halfLength === 'number' ? `?half_length=${halfLength}` : ''}`);
+    const fmt = ts => (ts ? new Date(ts * 1000).toLocaleString('nl-NL', { day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit', second: '2-digit' }) : 'onbekend');
+    const half = h('select', { onchange: e => openOrder(Number(e.target.value)) },
+      [30, 40, 45].map(m => h('option', { value: m, selected: p.half_length === m }, `${m} minuten`)));
+    const rows = p.items.map(it => {
+      const changed = it.old.order_idx !== it.order_idx || it.old.period !== it.period || Math.abs((it.old.start_minute || 0) - it.start_minute) > 0.05;
+      return h('tr', { className: changed ? 'changed' : '' },
+        h('td', {}, it.order_idx + 1), h('td', {}, it.filename), h('td', { className: 'small' }, fmt(it.rec_start)),
+        h('td', {}, h('select', { onchange: e => { it.period = Number(e.target.value); } },
+          [1, 2, 3, 4].map(q => h('option', { value: q, selected: it.period === q }, q <= 2 ? `${q}e helft` : `Verlenging ${q - 2}`)))),
+        h('td', {}, h('input', { type: 'number', min: 0, step: 0.1, value: it.start_minute, style: { width: '80px' },
+          onchange: e => { it.start_minute = Number(e.target.value); } })),
+        h('td', { className: 'small muted' }, changed ? `was ${it.old.order_idx + 1} · ${it.old.period}e · ${it.old.start_minute}'` : 'ongewijzigd'),
+      );
+    });
+    const breakIdx = p.items.findIndex(it => it.clip_id === p.break_after);
+    if (breakIdx >= 0) rows.splice(breakIdx + 1, 0, h('tr', {}, h('td', { colSpan: 6, className: 'small rust' },
+      `☕ Rust: ${p.break_minutes} minuten niet gefilmd. Hierna begint de 2e helft.`)));
+    orderPanel.replaceChildren(h('div', { className: 'panel' },
+      h('div', { className: 'row', style: { justifyContent: 'space-between' } }, h('h2', {}, 'Volgorde uit de opnametijd'),
+        h('label', {}, 'Speeltijd per helft: ', half)),
+      h('div', { className: 'small muted' },
+        'Voorstel: de video\'s op volgorde van filmen. Een gat van 8 minuten of meer is de rust. De eerste video van een helft ',
+        'begint op de aftrap (0\' of de speeltijd van één helft); de rest telt daar vanaf door. Begon je later of eerder met ',
+        'filmen? Pas de minuten aan voordat je het overneemt.',
+        p.n_without_time ? ` ${p.n_without_time} video('s) zonder opnametijd staan achteraan en houden hun helft en minuut.` : ''),
+      h('table', {}, h('tr', {}, ['#', 'Bestand', 'Gefilmd', 'Helft', 'Start (min)', ''].map(t => h('th', {}, t))), rows),
+      h('div', { className: 'row', style: { marginTop: '10px' } },
+        h('button', { className: 'primary', onclick: async () => {
+          await api(`/matches/${match.id}/order`, { json: { items: p.items, half_length: p.half_length } });
+          orderPanel.replaceChildren(); toast('Volgorde, helft en minuten overgenomen'); draw();
+        } }, '✓ Overnemen'),
+        h('button', { onclick: () => orderPanel.replaceChildren() }, 'Annuleren'))));
+    orderPanel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+
   await draw();
   // --- knippen vóór analyse ---------------------------------------------------------------
   function openSplit(c) {
