@@ -604,7 +604,10 @@ def camera_from_gps(clip_id: int, data: dict = Body(default={})):
         raise HTTPException(400, "Deze video bevat geen GPS-positie")
     try:
         polys = geo.query_pitches(c["gps_lat"], c["gps_lon"])
-    except Exception as e:  # noqa: BLE001  (geen internet, server druk, ...)
+    except geo.OsmError as e:
+        raise HTTPException(502, f"OpenStreetMap niet bereikbaar: {e}. Of klik je positie zelf aan.") from e
+    except Exception as e:  # noqa: BLE001
+        logging.exception("OpenStreetMap")
         raise HTTPException(502, f"OpenStreetMap niet bereikbaar ({e}). Klik je positie dan zelf aan.") from e
     match = _get("matches", c["match_id"])
     try:

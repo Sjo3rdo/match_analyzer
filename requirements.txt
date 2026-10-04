@@ -7,3 +7,4 @@ torch>=2.2
 torchvision>=0.17
 ultralytics>=8.2
 imageio-ffmpeg>=0.5
+certifi>=2024.2
