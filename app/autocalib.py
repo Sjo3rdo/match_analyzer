@@ -86,11 +86,113 @@ SAMPLES, TANGENTS = model().samples, model().tangents
 DENSE = model().dense
 
 
-def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.ndarray | None = None) -> np.ndarray:
+# Extra lijnzoeker voor lastige beelden (versleten lijnen, fel zonlicht, korrelig beeld): zie
+# ridge_lines. Trager, dus alleen als het gewone zoeken het veld niet vindt.
+RIDGE_L, RIDGE_C, RIDGE_LOC = 12.0, 4.0, 8  # lichter dan ernaast, grijzer dan ernaast, lichter dan omgeving
+_LINE_KERNELS: dict = {}
+
+
+def _line_kernels(n_angles: int, length: int):
+    """Per richting: (kernel voor het gemiddelde langs een kort lijnstukje, eenheidsnormaal)."""
+    key = (n_angles, length)
+    if key not in _LINE_KERNELS:
+        r = length // 2 + 1
+        out = []
+        for k in range(n_angles):
+            a = np.pi * k / n_angles
+            d = np.array([np.cos(a), np.sin(a)])
+            img = np.zeros((2 * r + 1, 2 * r + 1), np.float32)
+            p, q = r + d * length / 2, r - d * length / 2
+            cv2.line(img, tuple(np.round(p * 16).astype(int)), tuple(np.round(q * 16).astype(int)), 1.0, 1,
+                     cv2.LINE_AA, shift=4)
+            out.append((img / img.sum(), np.array([-d[1], d[0]])))
+        _LINE_KERNELS[key] = out
+    return _LINE_KERNELS[key]
+
+
+def _shifted(img: np.ndarray, dx: float, dy: float) -> np.ndarray:
+    """out(x, y) = img(x + dx, y + dy), met tussenwaarden."""
+    M = np.float32([[1, 0, dx], [0, 1, dy]])
+    return cv2.warpAffine(img, M, (img.shape[1], img.shape[0]), flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP,
+                          borderMode=cv2.BORDER_REPLICATE)
+
+
+def ridge_lines(lum: np.ndarray, chroma: np.ndarray, n_angles: int = 12, length: int = 15,
+                side: int = 3, min_ridge: float = 0.0) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Per pixel: hoeveel lichter een kort lijnstukje door dat pixel is dan twee evenwijdige stukjes
+    ernaast, in de richting waarin dat het meest is, en hoeveel grijzer (minder kleur) het daar is.
+    Geeft (lichter, grijzer, richting) terug; 'grijzer' alleen waar lichter > min_ridge.
+
+    Metafoor: in plaats van naar één steentje in een stoeprand te kijken, kijk je naar een stukje
+    stoeprand van een paar stappen lang. Een versleten of korrelige lijn valt per pixel weg in de ruis,
+    maar gemiddeld over een stukje lijn steekt hij er duidelijk bovenuit; losse lichte sprieten niet."""
+    best = np.full(lum.shape, -1e9, np.float32)
+    angle = np.zeros(lum.shape, np.uint8)
+    kernels = _line_kernels(n_angles, length)
+    for k, (kern, (nx, ny)) in enumerate(kernels):
+        mid = cv2.filter2D(lum, -1, kern)  # gemiddelde langs het lijnstukje
+        # hetzelfde stukje, `side` pixels naar weerskanten verschoven (evenwijdig ernaast);
+        # lichter dan béide kanten: een schaduwrand (licht naast donker) telt dan niet
+        ridge = np.minimum(mid - _shifted(mid, side * nx, side * ny), mid - _shifted(mid, -side * nx, -side * ny))
+        better = ridge > best
+        best[better] = ridge[better]
+        angle[better] = k
+    # Grijzer dan ernaast: alleen uitrekenen waar het op een lijn lijkt (een klein deel van het beeld)
+    grey = np.zeros(lum.shape, np.float32)
+    ys, xs = np.nonzero(best > min_ridge)
+    if len(ys):
+        h, w = lum.shape
+        t = np.arange(length, dtype=np.float32) - (length - 1) / 2
+        dirs = np.array([[np.cos(np.pi * k / n_angles), np.sin(np.pi * k / n_angles)] for k in range(n_angles)], np.float32)
+        d = dirs[angle[ys, xs]]
+        n = np.stack([-d[:, 1], d[:, 0]], 1)
+
+        def mean_along(off):
+            px = xs[:, None] + off * n[:, :1] + t[None] * d[:, :1]
+            py = ys[:, None] + off * n[:, 1:] + t[None] * d[:, 1:]
+            px = np.clip(np.rint(px), 0, w - 1).astype(np.intp)
+            py = np.clip(np.rint(py), 0, h - 1).astype(np.intp)
+            return chroma[py, px].mean(1)
+        grey[ys, xs] = 0.5 * (mean_along(side) + mean_along(-side)) - mean_along(0)
+    return best, grey, angle
+
+
+def _long_straight(cand: np.ndarray, min_len: int = 40) -> np.ndarray:
+    """Alleen de pixels die op een lang, recht stuk liggen (losse sprieten en kluitjes vallen af)."""
+    segs = cv2.HoughLinesP(cand.astype(np.uint8), 1, np.pi / 180, threshold=25,
+                           minLineLength=min_len, maxLineGap=6)
+    on = np.zeros(cand.shape, np.uint8)
+    if segs is not None:
+        for x1, y1, x2, y2 in segs.reshape(-1, 4):
+            cv2.line(on, (int(x1), int(y1)), (int(x2), int(y2)), 1, 3)
+    return on > 0
+
+
+def _bridge_gaps(mask: np.ndarray, angle: np.ndarray, allowed: np.ndarray, n_angles: int = 12,
+                 length: int = 9) -> np.ndarray:
+    """Kleine gaatjes in een lijn dichten, alleen in de richting van de lijn zelf (en alleen waar het
+    beeld daar ook op een lijn lijkt), zodat een onderbroken lijn weer één lang stuk wordt."""
+    out = mask.copy()
+    r = length // 2
+    for k in range(n_angles):
+        sub = np.where((mask > 0) & (angle == k), 255, 0).astype(np.uint8)
+        if not sub.any():
+            continue
+        a = np.pi * k / n_angles
+        se = np.zeros((2 * r + 1, 2 * r + 1), np.uint8)
+        d = np.array([np.cos(a), np.sin(a)]) * r
+        cv2.line(se, tuple(np.round(r - d).astype(int)), tuple(np.round(r + d).astype(int)), 1, 1)
+        out |= cv2.morphologyEx(sub, cv2.MORPH_CLOSE, se) & allowed
+    return out
+
+
+def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.ndarray | None = None,
+                 enhance: bool = False) -> np.ndarray:
     """Masker (0/255, werkschaal) met witte veldlijnen.
 
     roi: optioneel masker (werkschaal) van waar het veld ongeveer ligt; daarbuiten negeren we
-    alles (bomen, hekken, reclameborden, publiek)."""
+    alles (bomen, hekken, reclameborden, publiek).
+    enhance: ook zwakke, versleten of korrelige lijnen zoeken (trager; voor lastige beelden)."""
     s = WORK_WIDTH / frame.shape[1]
     # Heeft de app zelf geleerd veldlijnen te zien (knop "Het veld herkennen" bij Trainen), dan
     # gebruiken we dat netwerk; de vorm-controles hieronder blijven gelden.
@@ -128,6 +230,12 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
     # kleurloze puntjes: op echt gras zijn de lichte sprieten groen en houden we de lage drempel.)
     texture = cv2.medianBlur(np.clip(th * white, 0, 255).astype(np.uint8), 31).astype(np.float32)
     mask = (th > np.maximum(22, 2.2 * texture)) & white & (L > local + 15)
+    if enhance:
+        # Lastig beeld: ook zwakke lijnen zoeken door over een stukje lijn te middelen. Alleen wat op
+        # een lang, recht stuk ligt telt mee, zodat losse lichte sprieten geen lijn worden.
+        rl, rg, ang = ridge_lines(L.astype(np.float32), chroma, min_ridge=RIDGE_L)
+        cand = (rl > RIDGE_L) & (rg > RIDGE_C) & (L > local + RIDGE_LOC) & ~mask
+        mask |= cand & _long_straight(cand)
     # 3. op gras: een veldlijn is geschilderd op het gras, dus rondom moet vooral gras liggen.
     #    Zo vallen een tegelpad, een wit hek, reclameborden en lucht tussen bomen af.
     #    (We kijken naar de pixels rond de lijn die zelf geen lijn zijn, zodat ook een brede lijn
@@ -151,6 +259,8 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
             pad = int(0.1 * (y2 - y1)) + 2
             out[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad] = 0
     out = cv2.morphologyEx(out, cv2.MORPH_CLOSE, np.ones((3, 3), np.uint8))
+    if enhance:
+        out = _bridge_gaps(out, ang, np.where(rl > 0.5 * RIDGE_L, 255, 0).astype(np.uint8))
     # 4. alleen dunne, lange stukken (lijnen), geen vlekjes (shirts, schoenen, bal, glinstering).
     #    "Dun" = de dikste plek van het stuk is smal; "lang" = het stuk strekt zich ver uit.
     #    (Aan elkaar hangende lijnen vormen één netwerk; dat is dun én lang, dus blijft staan.)
@@ -378,7 +488,7 @@ def camera_from_h(H: np.ndarray, cam: dict, size: tuple[int, int], p0: np.ndarra
 
 def refine(frame: np.ndarray, H_pred: np.ndarray, boxes: np.ndarray | None, f_full: float,
            debug: dict | None = None, camera: dict | None = None,
-           geom: pitch.Geometry = pitch.DEFAULT) -> tuple[np.ndarray, dict] | None:
+           geom: pitch.Geometry = pitch.DEFAULT, enhance: bool = False) -> tuple[np.ndarray, dict] | None:
     """Stel H (veld -> beeld, volle resolutie) bij op de lijnen in dit beeld. None = niet betrouwbaar.
 
     Zonder `camera`: een kleine extra draaiing + zoom bovenop de voorspelling (relatief).
@@ -396,7 +506,7 @@ def refine(frame: np.ndarray, H_pred: np.ndarray, boxes: np.ndarray | None, f_fu
     Wd, Hd = size
     mdl = model(geom)
     SAMPLES, TANGENTS, DENSE = mdl.samples, mdl.tangents, mdl.dense
-    lines = detect_lines(frame, boxes, roi=pitch_roi(Hw, size, geom=geom))
+    lines = detect_lines(frame, boxes, roi=pitch_roi(Hw, size, geom=geom), enhance=enhance)
     if lines.sum() / 255 < 150:
         return None
     lines = centerlines(lines)
@@ -637,8 +747,10 @@ def run_autocalib(store, clip_id: int, every_s: float = 1.0, progress=None) -> d
             near = min(params_of, key=lambda q: abs(q - i)) if params_of else None
             q0 = params_of[near] if near is not None else np.array([0.0, 0.2, cam_mode["roll"], cam_mode["log_f"]])
             camera = {**cam_mode, "q0": q0}
-        res = refine(frame, normalize_h(H_pred), np.array(boxes_of.get(i, [])).reshape(-1, 4), f_full,
-                     camera=camera, geom=geom)
+        args = (frame, normalize_h(H_pred), np.array(boxes_of.get(i, [])).reshape(-1, 4), f_full)
+        res = refine(*args, camera=camera, geom=geom)
+        if res is None:  # lastig beeld: nog eens, en dan ook naar zwakke lijnen zoeken
+            res = refine(*args, camera=camera, geom=geom, enhance=True)
         if res is None:
             return False
         H_new, info = res
@@ -837,17 +949,19 @@ def _batch_explained(Hs_work: np.ndarray, det: np.ndarray, tau_m: float,
 
 
 def propose(frame: np.ndarray, prior: dict, boxes: np.ndarray | None = None,
-            debug: dict | None = None, geom: pitch.Geometry = pitch.DEFAULT) -> tuple[np.ndarray, dict] | None:
+            debug: dict | None = None, geom: pitch.Geometry = pitch.DEFAULT,
+            enhance: bool = False) -> tuple[np.ndarray, dict] | None:
     """Zoek de kalibratie (veld -> beeld, volle resolutie) bij een bekende camerapositie.
 
-    prior: camera_prior(clip). None als er geen overtuigende plek gevonden wordt."""
+    prior: camera_prior(clip). None als er geen overtuigende plek gevonden wordt.
+    enhance: ook naar zwakke lijnen zoeken (zie detect_lines)."""
     from .calibration import camera_homography
 
     full = (frame.shape[1], frame.shape[0])
     s = WORK_WIDTH / frame.shape[1]
     S = np.diag([s, s, 1.0])
     size = (WORK_WIDTH, int(round(frame.shape[0] * s)))
-    lines = detect_lines(frame, boxes)
+    lines = detect_lines(frame, boxes, enhance=enhance)
     if lines.sum() / 255 < 150:
         return None
     lines = centerlines(lines)

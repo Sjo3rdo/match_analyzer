@@ -124,3 +124,48 @@ def test_bad_calibration_does_not_hide_everyone():
     assert analytics._valid_tracks(d) == set(range(1, k + 1))
     assert d.calib_suspect
     assert not _people_clip(True).calib_suspect
+
+
+def _shot_clip(vy: float = 0.0, speed: float = 20.0):
+    """Speler 1 dribbelt met de bal naar het rechterdoel en schiet op t = 2 s vanaf (85, 34)."""
+    from app.calibration import CameraModel
+    fps, n = 10, 50
+    t = np.arange(n) / fps
+    idx, track, boxes, xy = [], [], [], []
+    ball_idx, ball_xy = [], []
+    for i in range(n):
+        px = 75 + 5 * min(t[i], 2.0)  # loopt naar (85, 34) en blijft daar
+        idx.append(i)
+        track.append(1)
+        boxes.append([400, 300, 420, 360])
+        xy.append([px, 34.0])
+        if t[i] <= 2.0:
+            ball_idx.append(i)
+            ball_xy.append([px + 0.5, 34.0])
+        elif t[i] <= 2.0 + 19 / speed:  # schot: tot vlak voor de doellijn, daarna kwijt (in het net)
+            ball_idx.append(i)
+            ball_xy.append([85.5 + speed * (t[i] - 2.0), 34.0 + vy * (t[i] - 2.0)])
+    d = ClipData(clip={"id": 1, "height": 1080}, t=t, fps=fps, calibrated=True, idx=np.array(idx),
+                 track=np.array(track), boxes=np.array(boxes, float), xy=np.array(xy, float),
+                 ball_idx=np.array(ball_idx), ball_xy=np.array(ball_xy, float), ball_img=np.zeros((len(ball_idx), 2)),
+                 camera=CameraModel(np.tile(np.eye(3), (n, 1, 1)), []))
+    d.valid_tracks = {1}
+    d.entity = {1: "p7"}
+    d.team = {1: 0}
+    return d
+
+
+def test_shot_on_target_with_shooter_and_goal_chance():
+    shots = analytics.detect_shots(_shot_clip())
+    assert len(shots) == 1
+    s = shots[0]
+    assert abs(s["t"] - 2.0) < 0.15 and s["goal_x"] == 105 and s["on_target"] and s["speed_kmh"] >= 70
+    assert s["entity"] == "p7" and s["team"] == 0 and (s["ball_at_line"] or s["lost_near_goal"])
+    cheer = [{"kind": "gejuich", "t": 3.5}]
+    assert analytics.goal_chance(s, cheer) == "waarschijnlijk"
+    assert analytics.goal_chance({**s, "on_target": False}, cheer) is None
+    # schuin naast het doel: wel een schot richting doel, niet op doel
+    wide = analytics.detect_shots(_shot_clip(vy=8.0))
+    assert len(wide) == 1 and not wide[0]["on_target"]
+    # rustig rollen (een pass) is geen schot
+    assert analytics.detect_shots(_shot_clip(speed=6.0)) == []

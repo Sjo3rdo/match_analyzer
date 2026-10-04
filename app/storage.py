@@ -92,7 +92,25 @@ CREATE TABLE IF NOT EXISTS moments (
     comment TEXT,
     players TEXT DEFAULT '[]',
     spotlight_player_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+    spotlights TEXT,
     drawings TEXT DEFAULT '[]',
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+CREATE TABLE IF NOT EXISTS shots (
+    id INTEGER PRIMARY KEY,
+    match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    t REAL NOT NULL,
+    t_end REAL,
+    status TEXT NOT NULL DEFAULT 'bevestigd',  -- 'bevestigd' of 'afgewezen' (voorstel dat niet klopte)
+    goal INTEGER DEFAULT 0,
+    on_target INTEGER,
+    team INTEGER,
+    player_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+    x REAL,
+    y REAL,
+    goal_x REAL,
+    auto INTEGER DEFAULT 0,
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 CREATE TABLE IF NOT EXISTS squads (
@@ -194,6 +212,9 @@ class Store:
         # Door de gebruiker goedgekeurd om de app mee te trainen
         if "train_ok" not in cols:
             self.run("ALTER TABLE clips ADD COLUMN train_ok INTEGER DEFAULT 0")
+        # Spotlight op meer spelers tegelijk (JSON-lijst); spotlight_player_id blijft de eerste
+        if "spotlights" not in {r["name"] for r in self.all("PRAGMA table_info(moments)")}:
+            self.run("ALTER TABLE moments ADD COLUMN spotlights TEXT")
         bcols = {r["name"] for r in self.all("PRAGMA table_info(ball)")}
         if "src" not in bcols:  # hoe de bal gevonden is: 'det' (gewoon beeld), 'zoom' (ingezoomd), 'scan'
             self.run("ALTER TABLE ball ADD COLUMN src TEXT")
@@ -203,7 +224,7 @@ class Store:
                          ("team1_color", "TEXT"), ("team0_squad", "INTEGER"), ("team1_squad", "INTEGER")):
             if col not in mcols:
                 self.run(f"ALTER TABLE matches ADD COLUMN {col} {typ}")
-        # Oude 'markers' (één tijdstip) worden clips (begin + eind), zoals in de Veo-editor
+        # Oude 'markers' (één tijdstip) worden clips (begin + eind), zoals in een video-editor
         with self.tx() as c:
             for m in c.execute("SELECT * FROM markers").fetchall():
                 players = json.dumps([m["player_id"]] if m["player_id"] else [])
@@ -268,16 +289,14 @@ class Store:
     def moment(self, moment_id: int) -> dict[str, Any] | None:
         m = self.one("SELECT * FROM moments WHERE id = ?", (moment_id,))
         if m:
-            m["players"] = json.loads(m["players"] or "[]")
-            m["drawings"] = json.loads(m["drawings"] or "[]")
+            _parse_moment(m)
         return m
 
     def moments(self, match_id: int) -> list[dict[str, Any]]:
         rows = self.all("SELECT m.* FROM moments m JOIN clips c ON c.id = m.clip_id WHERE m.match_id = ? "
                         "ORDER BY c.order_idx, c.id, m.start", (match_id,))
         for m in rows:
-            m["players"] = json.loads(m["players"] or "[]")
-            m["drawings"] = json.loads(m["drawings"] or "[]")
+            _parse_moment(m)
         return rows
 
     def keyframes(self, clip_id: int) -> list[dict[str, Any]]:
@@ -291,3 +310,12 @@ def clip_dir(clip_id: int) -> Path:
     d = config.CLIPS_DIR / str(clip_id)
     d.mkdir(parents=True, exist_ok=True)
     return d
+
+
+def _parse_moment(m: dict[str, Any]) -> None:
+    m["players"] = json.loads(m["players"] or "[]")
+    m["drawings"] = json.loads(m["drawings"] or "[]")
+    spots = json.loads(m.get("spotlights") or "null")
+    if spots is None:  # clips van vóór de spotlight op meer spelers
+        spots = [m["spotlight_player_id"]] if m.get("spotlight_player_id") else []
+    m["spotlights"] = spots

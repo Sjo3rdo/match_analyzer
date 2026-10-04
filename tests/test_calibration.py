@@ -229,3 +229,35 @@ def test_zoomed_clicks_count_more_and_fit_in_pixels():
     K1, _ = fit_calibration(pts)
     assert max(err_at(K1, k) for k in precise) < max(err_at(K0, k) for k in precise)
     assert max(err_at(K1, k) for k in precise) < 2.5
+
+
+def test_mirrored_field_is_never_chosen():
+    """Een camera ziet het veld nooit in spiegelbeeld. Middenlijn, zijlijn en middenstip vallen bij
+    dubbelvouwen op de middenlijn op zichzelf: dan kiest de app de echte (niet gespiegelde) kant."""
+    import math
+    import pytest
+    from app import calibration as C
+    W, Hh = 1920, 1080
+    f = C.default_focal(W)
+    cam, look = (45.0, 72.0, 1.7), (65.0, 45.0)  # langs de onderste zijlijn, kijkend naar de rechterhelft
+    yaw = math.atan2(look[1] - cam[1], look[0] - cam[0])
+    tilt = math.atan2(cam[2], math.hypot(look[0] - cam[0], look[1] - cam[1]))
+    G = C.camera_homography(np.array([*cam, yaw, tilt, 0, math.log(f)]), (W, Hh))
+    K_true = C.orient_by_points(C.normalize_h(np.linalg.inv(G)), apply_h(G, np.array([look])))
+    assert not C.mirrored(K_true)
+    img = lambda X: apply_h(G, np.array([X], float))[0].tolist()  # noqa: E731
+    pts = [{"img": img((x, 68)), "line": [[0, 68], [105, 68]]} for x in (58, 66, 75, 85)]
+    pts += [{"img": img((52.5, y)), "line": [[52.5, 0], [52.5, 68]]} for y in (25, 40, 55, 62)]
+    pts += [{"img": img((52.5, 68)), "pitch": [52.5, 68]}, {"img": img((52.5, 34)), "pitch": [52.5, 34]}]
+    M = np.array([[-1.0, 0, 105], [0, 1, 0], [0, 0, 1]])  # spiegelen in de middenlijn
+    K_mirror = C.orient_by_points(C.normalize_h(M @ K_true), [p["img"] for p in pts])
+    assert C.mirrored(K_mirror)
+    assert np.mean(C.calibration_residuals(K_mirror, pts)) < 1e-6  # past net zo goed bij de klikken
+    K, err = C._unmirror(K_mirror, 0.0, pts, refine=True)
+    probe = np.array([img((75, 60))])
+    assert not C.mirrored(K) and np.allclose(apply_h(K, probe), [[75, 60]], atol=0.05)
+    # Alles links-rechts verwisseld aangeklikt (bijv. het verkeerde doel): geen echte camera kan dit zien
+    swapped = [{"img": img((x, 68)), "pitch": [105 - x, 68]} for x in (58, 75, 90)]
+    swapped += [{"img": img((88.5, 54.16)), "pitch": [16.5, 54.16]}, {"img": img((94, 34)), "pitch": [11, 34]}]
+    with pytest.raises(ValueError, match="gespiegeld"):
+        C.fit_calibration(swapped)

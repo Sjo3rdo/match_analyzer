@@ -90,7 +90,8 @@ async function route() {
   view.append(h('div', { className: 'match-head' },
     h('div', {}, h('div', { className: 'eyebrow' }, 'Wedstrijd'), h('h1', {}, match.name)),
     h('span', { className: 'vs' }, h('span', { className: 'dot', style: { background: TEAM_COLORS[0] } }), match.team0_name,
-      ' – ', h('span', { className: 'dot', style: { background: TEAM_COLORS[1], marginLeft: '4px' } }), match.team1_name),
+      match.score ? h('b', { className: 'score', title: 'Stand uit de bevestigde goals' }, ` ${match.score[0]} – ${match.score[1]} `) : ' – ',
+      h('span', { className: 'dot', style: { background: TEAM_COLORS[1], marginLeft: '4px' } }), match.team1_name),
     match.date ? h('span', { className: 'date' }, match.date) : null));
   cleanup = await mod.render(view, ctx);
 }

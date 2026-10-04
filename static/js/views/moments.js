@@ -1,5 +1,5 @@
 // Clips & delen: clips maken en inkorten, spelers taggen, tekenen, spotlight, afspeellijst per speler,
-// exporteren en delen. Werkt zoals de Veo-editor, maar dan lokaal op je laptop.
+// exporteren en delen. Alles lokaal op je laptop.
 import { api, h, toast, fmtTime, matchMinute, teamName, playerLabel, labelList, exportPanel } from '../util.js';
 
 const COLORS = ['#ffd600', '#ff3b30', '#ffffff', '#34c759', '#0a84ff'];
@@ -19,7 +19,7 @@ export async function render(root, ctx) {
   let filterPlayer = '', filterLabel = '';
   const selected = new Set();
   let playlist = null, rangePlaying = false, drawMode = null, freezeTimer = null;
-  let spot = null; // { t: [], boxes: [] } voor de spotlight-voorvertoning
+  let spots = []; // [{ pid, t: [], boxes: [] }] voor de spotlight-voorvertoning (een of meer spelers)
   let freezeShapes = null, pinnedShapes = null; // tekening die nu getoond wordt
   let events = [];
 
@@ -30,6 +30,7 @@ export async function render(root, ctx) {
   const editor = h('div');
   const listBox = h('div', { className: 'list', style: { maxHeight: '360px' } });
   const suggestBox = h('div', { className: 'list', style: { maxHeight: '260px' } });
+  const shotBox = h('div', { className: 'list', style: { maxHeight: '300px' } });
   const exp = exportPanel();
   const playerFilter = h('select', { onchange: e => { filterPlayer = e.target.value; drawList(); drawSuggestions(); } },
     h('option', { value: '' }, 'Alle spelers'), match.players.map(p => h('option', { value: p.id }, playerLabel(p))));
@@ -39,8 +40,8 @@ export async function render(root, ctx) {
   root.append(
     labelList(),
     h('div', { className: 'hint' },
-      'Maak clips zoals in Veo: kies een moment (hier, bij "Video + minimap" of uit de suggesties), stel begin en eind in, ' +
-      'tag spelers, zet een spotlight op een speler en teken op het beeld. Exporteer daarna één clip, een reel of losse ' +
+      'Maak clips: kies een moment (hier, bij "Video + minimap" of uit de suggesties), stel begin en eind in, ' +
+      'tag spelers, zet een spotlight op een of meer spelers en teken op het beeld. Exporteer daarna één clip, een reel of losse ' +
       'bestanden en deel ze direct via AirDrop, WhatsApp, Berichten of Mail.'),
     h('div', { className: 'panel row' }, playerFilter, labelFilter,
       h('button', { onclick: playPlaylist }, '▶ Afspeellijst'),
@@ -56,11 +57,15 @@ export async function render(root, ctx) {
           h('h3', {}, 'Clips'), h('button', { onclick: newClipHere }, '+ Nieuwe clip')), listBox),
         h('div', { className: 'panel' }, h('h3', {}, 'Exporteren & delen'), exp.el,
           h('div', { className: 'small muted' }, 'Kies clips met de vinkjes, of exporteer de geopende clip.')),
+        h('div', { className: 'panel' }, h('h3', {}, 'Schoten en goals (voorstellen)'), shotBox,
+          h('div', { className: 'small muted', style: { marginTop: '6px' } },
+            'Gevonden uit de bal (hard richting doel) en het geluid (gejuich, fluitsignaal). Bevestig wat klopt: ',
+            'dat telt mee in de statistieken en de stand. Een gemist schot of goal voeg je toe bij "Video + minimap".')),
         h('div', { className: 'panel' }, h('h3', {}, 'Suggesties (automatisch gevonden)'), suggestBox))));
 
   // --- lijst ---------------------------------------------------------------------------
   function visible() {
-    return moments.filter(m => (!filterPlayer || m.players.includes(Number(filterPlayer)) || m.spotlight_player_id === Number(filterPlayer))
+    return moments.filter(m => (!filterPlayer || m.players.includes(Number(filterPlayer)) || m.spotlights.includes(Number(filterPlayer)))
       && (!filterLabel || (m.label || '').toLowerCase().includes(filterLabel)));
   }
   // Minuut in de wedstrijd, en bij meerdere video's ook welke video en waar daarin
@@ -79,10 +84,47 @@ export async function render(root, ctx) {
           onchange: e => { e.target.checked ? selected.add(m.id) : selected.delete(m.id); } }),
         ...where(c, m.start),
         h('span', { style: { flex: 1 } }, m.label || 'Moment', ' ', h('span', { className: 'muted small' }, names(m.players))),
-        m.spotlight_player_id ? h('span', { title: 'Spotlight' }, '🔦') : null,
+        m.spotlights.length ? h('span', { title: 'Spotlight' }, '🔦'.repeat(Math.min(3, m.spotlights.length))) : null,
         m.drawings.length ? h('span', { title: 'Tekeningen' }, `✏️${m.drawings.length}`) : null,
         h('span', { className: 'muted small' }, `${Math.round(m.end - m.start)}s`));
     }) : [h('div', { className: 'muted small' }, 'Nog geen clips. Maak er een met "+ Nieuwe clip" of via een suggestie.')]));
+  }
+
+  // --- schoten en goals ----------------------------------------------------------------
+  async function loadShots() {
+    const data = await api(`/matches/${match.id}/shots`).catch(() => null);
+    const list = (data?.suggestions || []).filter(s => clipById.has(s.clip_id));
+    shotBox.replaceChildren(...(list.length ? list.map(s => {
+      const who = playerLabel(playerById.get(s.player_id)) || (s.team >= 0 ? teamName(match, s.team) : 'onbekend');
+      const what = s.goal_chance ? `⚽ ${s.goal_chance === 'waarschijnlijk' ? 'Waarschijnlijk' : 'Mogelijk'} goal`
+        : `🎯 Schot ${s.on_target ? 'op doel' : 'naast'}`;
+      const item = h('div', { className: 'list-item' }, ...where(clipById.get(s.clip_id), s.t),
+        h('span', { style: { flex: 1 } }, what, ' ', h('span', { className: 'small muted' }, `${who} · ${s.speed_kmh} km/u`)),
+        h('button', { title: 'Klopt: het was een schot', onclick: () => confirmShot(s, false, item) }, '✓ Schot'),
+        h('button', { title: 'Klopt: het was een goal', onclick: () => confirmShot(s, true, item) }, '⚽ Goal'),
+        h('button', { title: 'Geen schot', onclick: () => rejectShot(s, item) }, '✗'),
+        h('button', { title: 'Maak er een clip van, met de schutter in de spotlight', onclick: () => shotClip(s, !!s.goal_chance) }, '+ clip'));
+      return item;
+    }) : [h('div', { className: 'muted small' }, data ? 'Geen voorstellen (meer). Analyseer en kalibreer eerst, en koppel spelers.'
+      : 'Kon de voorstellen niet laden.')]));
+  }
+  function shotPayload(s, extra) {
+    return { clip_id: s.clip_id, t: s.t, t_end: s.t_end, on_target: s.on_target, team: s.team >= 0 ? s.team : null,
+      player_id: s.player_id, x: s.x, y: s.y, goal_x: s.goal_x, auto: true, ...extra };
+  }
+  async function confirmShot(s, goal, item) {
+    await api(`/matches/${match.id}/shots`, { json: shotPayload(s, { goal, status: 'bevestigd' }) });
+    item.remove(); toast(goal ? '⚽ Goal opgeslagen' : '🎯 Schot opgeslagen'); ctx.refreshSteps?.();
+  }
+  async function rejectShot(s, item) {
+    await api(`/matches/${match.id}/shots`, { json: shotPayload(s, { status: 'afgewezen' }) });
+    item.remove();
+  }
+  async function shotClip(s, goal) {
+    const ids = s.player_id ? [s.player_id] : [];
+    const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: s.clip_id, start: Math.max(0, s.t - 6),
+      end: (s.t_end || s.t) + 3, label: goal ? 'Goal' : 'Schot', players: ids, spotlights: ids } });
+    moments.push(m); select(m); toast('Clip gemaakt');
   }
 
   async function loadSuggestions() {
@@ -118,7 +160,7 @@ export async function render(root, ctx) {
     const players = [pid, String(e.to || '').startsWith('p') ? Number(e.to.slice(1)) : null].filter(Boolean);
     const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: e.clip_id, start: Math.max(0, e.t - 4),
       end: (e.t_end || e.t) + 3, label: { sprint: 'Sprint', pass: 'Pass', balverlies: 'Balverlies' }[e.kind] || 'Moment',
-      players: [...new Set(players)], spotlight_player_id: pid } });
+      players: [...new Set(players)], spotlights: pid ? [pid] : [] } });
     moments.push(m); select(m); toast('Clip gemaakt');
   }
   async function newClipHere() {
@@ -189,7 +231,9 @@ export async function render(root, ctx) {
       match.players.filter(p => p.team === team).map(p => h('label', { className: `chip ${m.players.includes(p.id) ? 'on' : ''}` },
         h('input', { type: 'checkbox', checked: m.players.includes(p.id), onchange: e => {
           const ps = new Set(current.players); e.target.checked ? ps.add(p.id) : ps.delete(p.id);
-          save({ players: [...ps] }); e.target.parentElement.classList.toggle('on', e.target.checked);
+          const sp = current.spotlights.filter(id => ps.has(id));
+          save(sp.length !== current.spotlights.length ? { players: [...ps], spotlights: sp } : { players: [...ps] });
+          drawEditor(); loadSpot();
         } }), playerLabel(p)))));
     editor.replaceChildren(
       h('div', { className: 'row', style: { marginTop: '10px', justifyContent: 'space-between' } },
@@ -200,9 +244,16 @@ export async function render(root, ctx) {
       h('div', { className: 'row', style: { marginTop: '8px', gap: '20px' } }, timeCtl('Begin', 'start'), timeCtl('Eind', 'end'), dur),
       h('div', { className: 'row', style: { marginTop: '10px' } },
         h('input', { value: m.label || '', list: 'moment-labels', placeholder: 'Label', style: { width: '180px' }, oninput: e => save({ label: e.target.value }) }),
-        h('label', {}, '🔦 Spotlight: ', h('select', { onchange: e => { save({ spotlight_player_id: e.target.value ? Number(e.target.value) : null }); loadSpot(); } },
-          h('option', { value: '' }, 'geen'), match.players.map(p => h('option', { value: p.id, selected: m.spotlight_player_id === p.id }, playerLabel(p))))),
         c.status !== 'klaar' ? h('span', { className: 'small muted' }, '(spotlight werkt na analyse en koppelen)') : null),
+      m.players.length ? h('div', { className: 'row small', style: { gap: '6px', marginTop: '8px' } },
+        h('span', { className: 'muted', style: { width: '90px' } }, '🔦 Spotlight'),
+        m.players.map(pid => playerById.get(pid)).filter(Boolean).map(p => h('label', { className: `chip ${m.spotlights.includes(p.id) ? 'on' : ''}`,
+          title: 'Een gele ring met naam die deze speler door de clip volgt' },
+          h('input', { type: 'checkbox', checked: m.spotlights.includes(p.id), onchange: e => {
+            const sp = new Set(current.spotlights); e.target.checked ? sp.add(p.id) : sp.delete(p.id);
+            e.target.parentElement.classList.toggle('on', e.target.checked);
+            save({ spotlights: [...sp] }); loadSpot();
+          } }), playerLabel(p)))) : null,
       match.players.length ? h('div', { style: { marginTop: '8px' } }, h('div', { className: 'small muted' }, 'Spelers in deze clip:'), chips)
         : h('div', { className: 'small muted', style: { marginTop: '8px' } }, 'Voeg spelers toe bij "Spelers" om ze te taggen.'),
       h('textarea', { placeholder: 'Opmerking (bijv. "let op de loopactie van de spits")', rows: 2, style: { width: '100%', marginTop: '8px' },
@@ -271,15 +322,18 @@ export async function render(root, ctx) {
 
   // --- overlay: spotlight en tekeningen ----------------------------------------------
   async function loadSpot() {
-    spot = null;
+    spots = [];
     const m = current;
-    if (!m?.spotlight_player_id || clipById.get(m.clip_id).status !== 'klaar') return;
+    if (!m?.spotlights.length || clipById.get(m.clip_id).status !== 'klaar') return;
     const boxes = await api(`/clips/${m.clip_id}/boxes?t0=${m.start - 1}&t1=${m.end + 1}`);
-    const mine = boxes.filter(b => b.entity === `p${m.spotlight_player_id}`).sort((a, b) => a.t - b.t);
-    if (m === current) spot = { t: mine.map(b => b.t), boxes: mine.map(b => b.box) };
+    if (m !== current) return;
+    spots = m.spotlights.map(pid => {
+      const mine = boxes.filter(b => b.entity === `p${pid}`).sort((a, b) => a.t - b.t);
+      return { pid, t: mine.map(b => b.t), boxes: mine.map(b => b.box) };
+    });
   }
-  function spotBox(t) {
-    if (!spot || !spot.t.length) return null;
+  function spotBox(spot, t) {
+    if (!spot.t.length) return null;
     let i = spot.t.findIndex(x => x > t);
     if (i === -1) i = spot.t.length;
     if (i > 0 && i < spot.t.length && spot.t[i] - spot.t[i - 1] <= 0.6) {
@@ -300,14 +354,15 @@ export async function render(root, ctx) {
     if (!current) return;
     const { c, W, H } = sizeOverlay();
     const clip = clipById.get(current.clip_id);
-    const b = spotBox(video.currentTime);
-    if (b && clip.width) {
+    for (const spot of spots) {
+      const b = spotBox(spot, video.currentTime);
+      if (!b || !clip.width) continue;
       const s = W / clip.width;
       const [x1, y1, x2, y2] = b.map(v => v * s);
       const cx = (x1 + x2) / 2, w = x2 - x1;
       c.beginPath(); c.ellipse(cx, y2, Math.max(8, 0.75 * w), Math.max(4, 0.22 * w), 0, 0, 2 * Math.PI);
       c.fillStyle = 'rgba(255,214,0,.3)'; c.fill(); c.strokeStyle = '#ffd600'; c.lineWidth = 2.5; c.stroke();
-      const p = playerById.get(current.spotlight_player_id);
+      const p = playerById.get(spot.pid);
       if (p) { c.font = '600 13px sans-serif'; c.textAlign = 'center'; c.fillStyle = '#ffd600'; c.fillText(playerLabel(p), cx, y1 - 8); }
     }
     if (shapes) drawShapes(c, shapes, W, H);
@@ -435,6 +490,7 @@ export async function render(root, ctx) {
   drawList(); drawEditor();
   if (current) select(current);
   loadSuggestions();
+  loadShots();
   const onResize = () => (drawMode ? redrawDraw() : drawOverlay());
   window.addEventListener('resize', onResize);
   return () => { flushSave(); cancelAnimationFrame(raf); clearTimeout(freezeTimer); video.pause(); video.removeAttribute('src'); window.removeEventListener('resize', onResize); };

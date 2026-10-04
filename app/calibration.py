@@ -151,7 +151,45 @@ def _fit_free(points: list[dict], refine: bool = True) -> tuple[np.ndarray, floa
     K = orient_by_points(normalize_h(K), [p["img"] for p in points])
     if not np.all(np.isfinite(K)):
         raise ValueError("Kalibratie mislukt")
-    return K, float(np.mean(calibration_residuals(K, points)))
+    err = float(np.mean(calibration_residuals(K, points)))
+    if mirrored(K):
+        K, err = _unmirror(K, err, points, refine)
+    return K, err
+
+
+def mirrored(K: np.ndarray) -> bool:
+    """Ligt het veld in spiegelbeeld over het beeld? (K: beeld -> veld, met w > 0 bij de aangeklikte punten.)
+
+    Een echte camera boven het veld kan het veld nooit gespiegeld zien: van welke kant je ook filmt,
+    links en rechts blijven links en rechts ten opzichte van boven en onder. Wiskundig: de afbeelding
+    houdt de draairichting vast, dus de determinant is positief."""
+    return bool(np.linalg.det(K) < 0)
+
+
+def _unmirror(K: np.ndarray, err: float, points: list[dict], refine: bool) -> tuple[np.ndarray, float]:
+    """Een gespiegelde oplossing terugspiegelen, als dat even goed bij de klikken past.
+
+    Metafoor: vouw je het veld dubbel op de middenlijn, dan vallen de middenlijn, de zijlijnen en de
+    middencirkel precies op zichzelf. Met alleen die lijnen passen dus twee oplossingen: het echte veld
+    en zijn spiegelbeeld. Een camera kan geen spiegelbeeld zien, dus kiezen we de andere. Past geen
+    van beide spiegelingen, dan kloppen de klikken zelf niet (bijv. links en rechts verwisseld)."""
+    feats = [np.asarray(p["pitch"], float) for p in points if p.get("pitch") is not None]
+    feats += [np.asarray(q, float) for p in points if p.get("pitch") is None for q in p["line"]]
+    cx, cy = np.mean(feats, axis=0)
+    best = None
+    for M in (np.array([[-1.0, 0, 2 * cx], [0, 1, 0], [0, 0, 1]]), np.array([[1.0, 0, 0], [0, -1, 2 * cy], [0, 0, 1]])):
+        K2 = M @ K
+        K2 = _refine(K2 / K2[2, 2], points) if refine else K2
+        K2 = orient_by_points(normalize_h(K2), [p["img"] for p in points])
+        if not np.all(np.isfinite(K2)) or mirrored(K2):
+            continue
+        e2 = float(np.mean(calibration_residuals(K2, points)))
+        if best is None or e2 < best[1]:
+            best = (K2, e2)
+    if best is None or best[1] > max(2 * err, err + 0.5):
+        raise ValueError("Deze punten passen alleen bij een gespiegeld veld. Controleer of je links en rechts "
+                         "(of boven en onder) niet hebt verwisseld, bijvoorbeeld bij het doel of de zijlijn.")
+    return best
 
 
 def point_weight(p: dict) -> float:

@@ -207,3 +207,7 @@ body.dock-open main { padding-bottom: 46vh; }
 .warn-hint { border-left-color: var(--warn); }
 
 body.dock-open #toast { bottom: calc(44vh + 30px); }
+.chip-x { background: none; border: none; padding: 0 0 0 4px; color: inherit; cursor: pointer; font-size: 14px; line-height: 1; min-height: 0; box-shadow: none; }
+.match-head .score { margin: 0 8px; font-size: 1.15em; color: var(--text); letter-spacing: .02em; }
+.scoreline { display: flex; align-items: center; justify-content: center; gap: 18px; font-size: 18px; margin: 4px 0 12px; }
+.scoreline b { font-size: 34px; letter-spacing: .04em; }

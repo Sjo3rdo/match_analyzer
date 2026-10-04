@@ -18,7 +18,8 @@ Alles draait op je eigen laptop. Er gaan geen video's of gebruiksgegevens naar i
 | Minimap | Een 2D-bovenaanzicht dat met de video meeloopt. |
 | Knippen | Een lange video vóór de analyse in delen knippen (1e/2e helft), warming-up en rust eruit. |
 | Hoogtepunten | Suggesties uit de analyse (sprints, passes) en uit het geluid (gejuich, fluitsignalen). |
-| Clips en delen | Clips maken: begin/eind, label, spelers taggen, opmerking, tekenen op beeld (beeld bevriest), spotlight die een speler volgt, afspeellijst per speler. Export als mp4, reel of zip, en direct delen via AirDrop, WhatsApp, Berichten of Mail. |
+| Schoten en goals | Voorstellen voor schoten richting doel en mogelijke goals, uit de bal en het geluid. Bevestigd tellen ze mee: stand, tijdlijn, schotenkaart en schoten/goals per speler. |
+| Clips en delen | Clips maken: begin/eind, label, spelers taggen, opmerking, tekenen op beeld (beeld bevriest), spotlight die een of meer spelers volgt, afspeellijst per speler. Export als mp4, reel of zip, en direct delen via AirDrop, WhatsApp, Berichten of Mail. |
 | Zelf leren | Op jouw verzoek oefent de app op je eigen gecorrigeerde beelden, zodat hij spelers, de bal, het veld en je eigen spelers steeds beter herkent. |
 
 ## Installeren en starten (MacBook met Apple Silicon)
@@ -36,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.9 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.11 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. Ziet de app er na een update vreemd uit, druk dan één keer op ⌥⌘R in Safari.
 
 Wil je ook rugnummers automatisch laten lezen? Installeer dan:
@@ -117,13 +118,22 @@ minimap**, **Statistieken** en **Clips & delen**.
      hoekvlag precies aan te klikken. Verschuiven doe je met twee vingers, of Shift + slepen.
      Een punt dat je ingezoomd zet, telt zwaarder mee (tot 4× bij flink inzoomen): de lijn gaat dan
      door jouw precieze stippen, en grovere punten van ver weg geven mee.
+   - **Nooit gespiegeld.** Klik je alleen de middenlijn en de zijlijn aan, dan passen er twee
+     oplossingen: het echte veld en zijn spiegelbeeld (vouw het veld dubbel op de middenlijn en die
+     lijnen vallen op zichzelf). Een camera ziet het veld nooit in spiegelbeeld, dus de app kiest de
+     echte kant. Kan dat niet, omdat de punten zelf alleen gespiegeld kloppen (bijv. het verkeerde
+     doel of de verkeerde zijlijn gekozen), dan zegt de app dat; bij het sleutelframe staat dan
+     **⚠ klopt niet**. Een oude kalibratie die zo gespiegeld was, zet de app vanzelf goed.
    - **Punten bewegen mee met het veld.** Zet je een punt en schuif je daarna naar een ander moment,
      dan schuift het punt mee met de camerabeweging. Zo kun je punten van verschillende momenten in één
      sleutelframe combineren: bijv. de middenstip nu en de verre hoekvlag als de camera daar is.
      Punten die daardoor buiten beeld vallen, tellen gewoon mee.
    - **Eén sleutelframe is genoeg.** Na de analyse volgt de app de camerabeweging, zoals een lijm die
      de plattegrond op het beeld vasthoudt. Elke seconde zoekt hij daarnaast de witte veldlijnen op
-     en legt hij de plattegrond er opnieuw precies op (**🤖 Automatisch bijgesteld**). Dit start
+     en legt hij de plattegrond er opnieuw precies op (**🤖 Automatisch bijgesteld**). Lukt dat niet,
+     bijvoorbeeld bij versleten lijnen, fel zonlicht of een korrelig beeld, dan kijkt de app nog een
+     keer extra goed: hij middelt over een stukje lijn in plaats van per pixel, zoals je een vage
+     stoeprand beter ziet als je een paar stappen ervan bekijkt. Dit start
      vanzelf zodra je een sleutelframe opslaat, of na de analyse. De gele stippellijnen laten op elk
      moment zien hoe goed het past. Onder **🤖 Automatisch bijgesteld** staat de lijst: klik op een tijd
      om te kijken, ✓ keurt goed, ✗ verwijdert, ✎ zet de punten klaar om zelf bij te stellen, of keur
@@ -174,19 +184,37 @@ minimap**, **Statistieken** en **Clips & delen**.
    klik op de bal. Ziet de app iets anders aan voor de bal, klik dan **🚫 Geen bal hier**. Jouw
    aanwijzingen gaan altijd voor en worden gebruikt voor balbezit en passes.
 
-4. **Bekijken.** Bij **Statistieken** zie je de team- en spelerscijfers, heatmaps, de teamvorm
-   en het passnetwerk, en kun je alles als CSV exporteren.
+4. **Schoten en goals.** Zie de app als een grensrechter bij het doel: hij let op een bal die
+   ineens hard (vanaf 40 km/u) richting het doel gaat, van binnen ongeveer 30 m. Dat is een
+   **schot**; gaat hij tussen de palen, dan is het **op doel**. Verdwijnt de bal daarna bij het doel
+   of komt hij bij de doellijn, en hoort de app gejuich en/of een fluitsignaal, dan is het
+   **waarschijnlijk een goal**. De schutter is de laatste speler die de bal had.
+   - Bij **Clips & delen → Schoten en goals (voorstellen)** bevestig je met **✓ Schot** of
+     **⚽ Goal**, of wijs je af met **✗**. Met **+ clip** maak je er een clip van met de schutter in de
+     spotlight.
+   - Mist de app er een (een hard schot is vaak even niet te zien), voeg hem dan zelf toe bij
+     **Video + minimap**: pauzeer, klik de schutter aan (eventueel ook wie de assist gaf) en klik
+     **🎯 Schot** of **⚽ Goal**. Met het vinkje erbij maakt de app er meteen een clip van. Weghalen
+     kan met × bij "Momenten in deze video".
+   - Alleen bevestigde schoten en goals tellen mee: de **stand** bovenaan de wedstrijd, de
+     **tijdlijn** met de goals, de **schotenkaart** en **schoten/goals** per team en per speler bij
+     **Statistieken**.
 
-5. **Clips en delen.** Maak bij **Video + minimap** met één klik een clip van het moment dat je
-   ziet (6 s ervoor tot 4 s erna; hij verschijnt meteen onder "Momenten in deze video" en bij
-   **Clips & delen**), of zet bij **Clips & delen** een automatische suggestie om in een clip: een
+5. **Bekijken.** Bij **Statistieken** zie je de stand, de team- en spelerscijfers, heatmaps, de teamvorm,
+   de schotenkaart en het passnetwerk, en kun je alles als CSV exporteren.
+
+6. **Clips en delen.** Maak bij **Video + minimap** met één klik een clip van het moment dat je
+   ziet (6 s ervoor tot 4 s erna). Pauzeer en klik eerst de spelers in het beeld aan die bij de actie
+   betrokken zijn (of kies ze bij **＋ speler…**): ze komen allemaal in de clip, elk met een spotlight.
+   De clip verschijnt meteen onder "Momenten in deze video" en bij **Clips & delen**. Je kunt ook bij
+   **Clips & delen** een automatische suggestie omzetten in een clip: een
    sprint, een pass, of iets uit het geluid. **📣 Gejuich** betekent dat het ineens veel luider werd,
    bijvoorbeeld na een goal of grote kans; de clip begint daarom 10 s ervoor. Daarnaast vindt de app
    **🔔 Fluitsignalen**. Bij Clips & delen kun je:
    - begin en eind per seconde verschuiven;
    - een label, spelers en een opmerking toevoegen;
-   - een **spotlight** op een speler zetten: een gele ring onder zijn voeten met zijn naam, die hem
-     door de clip volgt;
+   - een **spotlight** op een of meer spelers zetten: een gele ring onder de voeten met de naam, die
+     de speler door de clip volgt (aan of uit per getagde speler);
    - op het beeld **tekenen**: pijlen, lijnen, cirkels, vrije lijnen en tekst. In de export bevriest
      het beeld dan een paar seconden met de tekening erop, zoals bij een tv-analyse;
    - alle clips van één speler als **afspeellijst** afspelen of als reel exporteren.
@@ -270,6 +298,9 @@ Zie de cijfers als een goede indruk, niet als meetwerk.
 - **Teams en publiek.** In fel zonlicht lijkt een donker shirt soms grijs; zo'n speler kan bij
   'overig' terechtkomen. Publiek dat langs de lijn loopt, valt pas na de kalibratie af.
 - **Geluid.** Gejuich en fluitsignalen zijn suggesties; controleer ze even.
+- **Schoten en goals.** De app ziet een schot alleen als hij de bal ziet wegvliegen. Een hoge bal
+  lijkt verder weg dan hij is (de app rekent alsof de bal op de grond ligt). Bevestig daarom zelf, en
+  voeg gemiste schoten en goals met de hand toe.
 - **Spelers buiten beeld** worden niet gemeten. Het aantal minuten is de tijd dat iemand in beeld was.
 
 ## Voor ontwikkelaars

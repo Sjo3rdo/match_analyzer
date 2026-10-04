@@ -143,7 +143,27 @@ def test_full_flow(env):
     assert mo["players"] == [p["id"]] and len(mo["drawings"]) == 1
     mo2 = client.post(f"/api/matches/{m['id']}/moments", json={"clip_id": clip["id"], "start": 4, "end": 5.5}).json()
     assert client.patch(f"/api/moments/{mo2['id']}", json={"end": 4.1}).status_code == 400  # te kort
+    assert mo["spotlights"] == [p["id"]]  # oude manier (één speler) blijft werken
+    p2 = client.post(f"/api/matches/{m['id']}/players", json={"name": "Bo", "team": 0}).json()
+    both = [p["id"], p2["id"]]  # meer spelers in één actie, allemaal in de spotlight
+    r2 = client.patch(f"/api/moments/{mo2['id']}", json={"players": both, "spotlights": both}).json()
+    assert r2["spotlights"] == both and r2["spotlight_player_id"] == p["id"] and r2["players"] == both
     assert len(client.get(f"/api/matches/{m['id']}/moments").json()) == 2
+
+    # schoten en goals: zelf toevoegen (bevestigd), stand en tijdlijn, en weer terugdraaien
+    sh = client.post(f"/api/matches/{m['id']}/shots", json={"clip_id": clip["id"], "t": 2.0, "goal": True,
+                                                           "player_id": p["id"]}).json()
+    assert sh["status"] == "bevestigd" and sh["on_target"] == 1
+    ov = client.get(f"/api/matches/{m['id']}/shots").json()
+    assert ov["score"] == [1, 0] and len(ov["timeline"]) == 1 and ov["teams"][0]["goals"] == 1
+    assert ov["players"][str(p["id"])] == {"shots": 1, "on_target": 1, "goals": 1}
+    assert client.get(f"/api/matches/{m['id']}").json()["score"] == [1, 0]
+    client.post(f"/api/matches/{m['id']}/shots", json={"clip_id": clip["id"], "t": 4.0, "status": "afgewezen"})
+    assert len(client.get(f"/api/matches/{m['id']}/shots").json()["shots"]) == 1  # afgewezen telt niet
+    client.patch(f"/api/shots/{sh['id']}", json={"goal": False})
+    ov = client.get(f"/api/matches/{m['id']}/shots").json()
+    assert ov["score"] == [0, 0] and ov["teams"][0]["shots"] == 1 and ov["teams"][0]["on_target"] == 1
+    assert client.get(f"/api/matches/{m['id']}").json()["score"] is None
 
     r = client.post(f"/api/matches/{m['id']}/export", json={"name": "loper", "moment_ids": [mo["id"]]})
     assert r.status_code == 200, r.text

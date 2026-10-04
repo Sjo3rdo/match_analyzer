@@ -167,3 +167,30 @@ def test_detect_lines_sunny_tinted_line_but_not_the_boards():
     m = ac.detect_lines(img)
     assert m[370:430].sum() / 255 > 500  # de lijn (werkschaal: halve resolutie)
     assert m[195:216].sum() / 255 < 50  # de borden
+
+
+def test_enhanced_line_search_finds_worn_lines_but_not_grass():
+    """Een versleten, vage lijn (de helft van de verf weg) valt per pixel weg in het gras; de extra
+    lijnzoeker middelt over een stukje lijn en vindt hem wel. Gewoon korrelig gras blijft gras."""
+    rng = np.random.default_rng(0)
+
+    def grass():
+        img = np.zeros((1080, 1920, 3), np.uint8)
+        img[:] = (50, 150, 70)
+        n = cv2.GaussianBlur(rng.integers(0, 60, (1080, 1920), dtype=np.uint8), (3, 3), 0)
+        return cv2.add(img, cv2.merge([n, n, n]))
+    g = grass()
+    line = np.zeros(g.shape[:2], np.uint8)
+    cv2.line(line, (100, 700), (1800, 560), 255, 3)
+    a = ((line > 0) & (rng.random(g.shape[:2]) > 0.5))[..., None] * 0.55
+    img = (g * (1 - a) + np.array([225, 230, 228]) * a).astype(np.uint8)
+    gt = cv2.resize(line, (960, 540)) > 0
+    far = ~cv2.dilate(gt.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
+
+    def found(m):
+        near = cv2.dilate((m > 0).astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        return near[gt].mean()
+    base, enh = ac.detect_lines(img), ac.detect_lines(img, enhance=True)
+    assert found(enh) > 0.8 and found(enh) > found(base) + 0.3
+    assert ((enh > 0) & far).sum() == 0
+    assert (ac.detect_lines(grass(), enhance=True) > 0).sum() == 0

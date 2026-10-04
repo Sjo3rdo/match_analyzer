@@ -126,6 +126,10 @@ export function fitCalibration(pairs) {
   let Gs = G.map(r => r.map(v => v / d));
   const votes = pairs.reduce((s, p) => s + Math.sign(Gs[2][0] * p.img[0] + Gs[2][1] * p.img[1] + Gs[2][2]), 0);
   if (votes < 0) Gs = Gs.map(r => r.map(v => -v));
+  // Een echte camera ziet het veld nooit gespiegeld (determinant > 0). Gespiegeld: laat de server
+  // het oplossen (die kiest de echte kant, of zegt wat er niet klopt).
+  const [[g0, g1, g2], [g3, g4, g5], [g6, g7, g8]] = Gs;
+  if (g0 * (g4 * g8 - g5 * g7) - g1 * (g3 * g8 - g5 * g6) + g2 * (g3 * g7 - g4 * g6) <= 0) return null;
   return Gs;
 }
 

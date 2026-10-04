@@ -191,13 +191,15 @@ def render_moment(store: Store, moment: dict, dst: Path) -> Path:
     start, end = float(moment["start"]), float(moment["end"])
     length = max(0.5, end - start)
 
-    spot, label = None, ""
-    pid = moment.get("spotlight_player_id")
-    if pid:
+    spots = []  # (spoor, naam) per speler in de spotlight
+    pids = moment.get("spotlights")
+    if pids is None:
+        pids = [moment["spotlight_player_id"]] if moment.get("spotlight_player_id") else []
+    for pid in pids:
         p = store.one("SELECT * FROM players WHERE id = ?", (pid,))
         if p:
-            spot = load_spotlight(store, clip["id"], pid, start, end)
-            label = f"{p['number']} {p['name']}" if p["number"] else p["name"]
+            spots.append((load_spotlight(store, clip["id"], pid, start, end),
+                          f"{p['number']} {p['name']}" if p["number"] else p["name"]))
     drawings = sorted(moment.get("drawings") or [], key=lambda d: d["t"])
     freezes = [(max(0.0, min(length, d["t"] - start)), float(d.get("duration", 4))) for d in drawings
                if start <= d["t"] <= end]
@@ -214,7 +216,7 @@ def render_moment(store: Store, moment: dict, dst: Path) -> Path:
     with tempfile.TemporaryFile() as err:
         proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=err)
         try:
-            _write_frames(proc, src, start, end, length, spot, label, drawings)
+            _write_frames(proc, src, start, end, length, spots, drawings)
         finally:
             proc.stdin.close()
             code = proc.wait()
@@ -224,7 +226,7 @@ def render_moment(store: Store, moment: dict, dst: Path) -> Path:
     return dst
 
 
-def _write_frames(proc, src, start, end, length, spot, label, drawings) -> None:
+def _write_frames(proc, src, start, end, length, spots, drawings) -> None:
     pending = [d for d in sorted(drawings, key=lambda d: d["t"]) if start <= d["t"] <= end]
     frames = _frames(src, start, end)
     nxt = next(frames, None)
@@ -239,7 +241,7 @@ def _write_frames(proc, src, start, end, length, spot, label, drawings) -> None:
             cur, nxt = nxt, next(frames, None)
         t, frame = cur
         img = frame.copy()
-        if spot is not None:
+        for spot, label in spots:
             box = spot.box_at(target)
             if box is not None:
                 draw_spotlight(img, box, label)
