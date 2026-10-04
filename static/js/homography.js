@@ -67,7 +67,12 @@ function lineCoeffs([[x1, y1], [x2, y2]]) {
 }
 
 // Hoeveel informatie: punt = 2, elke lijn hoogstens 2 (meer punten op dezelfde lijn helpen niet)
+// Alleen punten en lijnen op de grond: punten in de lucht (bovenkant paal, lat) kan alleen het
+// cameramodel op de server gebruiken.
+const ground = pairs => pairs.filter(p => p.pitch || p.line);
+
 export function calibrationInfo(pairs) {
+  pairs = ground(pairs);
   const lines = new Map();
   let points = 0;
   for (const p of pairs) {
@@ -83,6 +88,7 @@ export function calibrationInfo(pairs) {
 }
 
 export function fitCalibration(pairs) {
+  pairs = ground(pairs);
   if (!calibrationInfo(pairs).ok) return null;
   const imgs = pairs.map(p => p.img);
   const world = pairs.flatMap(p => (p.pitch ? [p.pitch] : p.line));
@@ -125,6 +131,7 @@ export function fitCalibration(pairs) {
 
 // Gemiddelde fout in meters (punt: afstand, lijnpunt: afstand tot de lijn)
 export function calibrationError(G, pairs) {
+  pairs = ground(pairs);
   const e = pairs.map(p => {
     const q = apply(G, p.img);
     if (p.pitch) return Math.hypot(q[0] - p.pitch[0], q[1] - p.pitch[1]);

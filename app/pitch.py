@@ -20,6 +20,7 @@ _PA_HALF = 20.16  # halve breedte strafschopgebied
 _GA_HALF = 9.16  # halve breedte doelgebied
 _GOAL_HALF = 3.66
 _CIRCLE_R = 9.15
+GOAL_HEIGHT = 2.44  # onderkant van de lat
 _ARC_DY = math.sqrt(_CIRCLE_R**2 - 5.5**2)  # snijpunt penaltyboog met 16 m-lijn
 
 
@@ -29,10 +30,15 @@ class Geometry:
     width: float = DEFAULT_WIDTH
     landmarks: dict = field(init=False, repr=False, compare=False, hash=False)
     lines: dict = field(init=False, repr=False, compare=False, hash=False)
+    elevated: dict = field(init=False, repr=False, compare=False, hash=False)
+    elevated_lines: dict = field(init=False, repr=False, compare=False, hash=False)
 
     def __post_init__(self):
         object.__setattr__(self, "landmarks", _landmarks(self.length, self.width))
         object.__setattr__(self, "lines", _lines(self.length, self.width))
+        elevated, elevated_lines = _goal_frames(self.length, self.width)
+        object.__setattr__(self, "elevated", elevated)
+        object.__setattr__(self, "elevated_lines", elevated_lines)
 
     @property
     def half_w(self) -> float:
@@ -107,6 +113,21 @@ def _lines(L: float, W: float) -> dict[str, tuple[tuple[float, float], tuple[flo
     return {k: (tuple(map(float, a)), tuple(map(float, b))) for k, (a, b) in lines.items()}
 
 
+def _goal_frames(L: float, W: float):
+    """Punten en lijnen in de lucht: de bovenkant van de doelpalen en de lat (x, y, hoogte).
+    De voet van een paal is het gewone punt "Doelpaal ... boven/onder" (boven/onder = in de
+    veldtekening)."""
+    c = W / 2
+    pts, lines = {}, {}
+    for side, x0 in (("links", 0.0), ("rechts", L)):
+        a = (x0, round(c - _GOAL_HALF, 3), GOAL_HEIGHT)
+        b = (x0, round(c + _GOAL_HALF, 3), GOAL_HEIGHT)
+        pts[f"Doelpaal {side} boven, bovenkant"] = a
+        pts[f"Doelpaal {side} onder, bovenkant"] = b
+        lines[f"Lat {side}"] = (a, b)
+    return pts, lines
+
+
 def remap_points(points: list[dict], new: Geometry) -> list[dict]:
     """Kalibratiepunten (op naam) naar de veldcoördinaten van andere veldmaten omzetten."""
     out = []
@@ -117,6 +138,11 @@ def remap_points(points: list[dict], new: Geometry) -> list[dict]:
         elif q.get("line") and q.get("name") in new.lines:
             a, b = new.lines[q["name"]]
             q["line"] = [list(a), list(b)]
+        elif q.get("pitch3") is not None and q.get("name") in new.elevated:
+            q["pitch3"] = list(new.elevated[q["name"]])
+        elif q.get("line3") and q.get("name") in new.elevated_lines:
+            a, b = new.elevated_lines[q["name"]]
+            q["line3"] = [list(a), list(b)]
         out.append(q)
     return out
 

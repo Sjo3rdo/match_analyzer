@@ -118,3 +118,11 @@ def camera_on_pitch(lat: float, lon: float, polygons: list[list[tuple[float, flo
     y = geom.width / 2 + (rel @ v) * geom.width / width
     return {"x": round(float(x), 1), "y": round(float(y), 1), "pitch_length": round(float(length), 1),
             "pitch_width": round(float(width), 1), "distance_to_pitch": round(float(best[0]), 1)}
+
+
+def distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Afstand in meters tussen twee GPS-posities (kleine afstanden, platte benadering)."""
+    r = 6371000.0
+    dx = math.radians(lon2 - lon1) * r * math.cos(math.radians((lat1 + lat2) / 2))
+    dy = math.radians(lat2 - lat1) * r
+    return math.hypot(dx, dy)

@@ -92,6 +92,20 @@ def detect_lines(frame: np.ndarray, boxes: np.ndarray | None = None, roi: np.nda
     roi: optioneel masker (werkschaal) van waar het veld ongeveer ligt; daarbuiten negeren we
     alles (bomen, hekken, reclameborden, publiek)."""
     s = WORK_WIDTH / frame.shape[1]
+    # Heeft de app zelf geleerd veldlijnen te zien (knop "Het veld herkennen" bij Trainen), dan
+    # gebruiken we dat netwerk; de vorm-controles hieronder blijven gelden.
+    from .learning import learned_lines
+
+    learned = learned_lines(frame)
+    if learned is not None:
+        out = learned
+        if roi is not None:
+            out &= roi
+        if boxes is not None:
+            for x1, y1, x2, y2 in (np.asarray(boxes).reshape(-1, 4) * s).astype(int):
+                pad = int(0.1 * (y2 - y1)) + 2
+                out[max(0, y1 - pad):y2 + pad, max(0, x1 - pad):x2 + pad] = 0
+        return _line_components(out)[0]
     small = cv2.resize(frame, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
     lab = cv2.cvtColor(small, cv2.COLOR_BGR2LAB).astype(np.int16)
     L, A, B = lab[..., 0], lab[..., 1] - 128, lab[..., 2] - 128

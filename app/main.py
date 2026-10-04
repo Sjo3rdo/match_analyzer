@@ -16,7 +16,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics, clips as clip_export, config, geo, pitch, render
+from . import analytics, clips as clip_export, config, geo, learning, pitch, render, teams, training
 from .calibration import camera_prior, fit_calibration, fit_camera, normalize_h
 from .pipeline import Worker, probe, read_frame
 from .storage import Store, clip_dir
@@ -87,7 +87,9 @@ def get_pitch(match_id: int | None = None):
     g = pitch.of_match(store.one("SELECT * FROM matches WHERE id = ?", (match_id,)) if match_id else None)
     return {"length": g.length, "width": g.width,
             "landmarks": [{"name": k, "x": v[0], "y": v[1]} for k, v in g.landmarks.items()],
-            "lines": [{"name": k, "from": list(a), "to": list(b)} for k, (a, b) in g.lines.items()]}
+            "lines": [{"name": k, "from": list(a), "to": list(b)} for k, (a, b) in g.lines.items()],
+            "elevated": [{"name": k, "x": v[0], "y": v[1], "h": v[2]} for k, v in g.elevated.items()],
+            "elevated_lines": [{"name": k, "from": list(a), "to": list(b)} for k, (a, b) in g.elevated_lines.items()]}
 
 
 # --- wedstrijden -------------------------------------------------------------------------
@@ -257,6 +259,7 @@ def set_pitch_size(match_id: int, length: float | None, width: float | None) -> 
     if new == old:
         return new
     store.run("UPDATE matches SET pitch_length = ?, pitch_width = ? WHERE id = ?", (new.length, new.width, match_id))
+    _remember_venue(match_id)
     for c in store.all("SELECT * FROM clips WHERE match_id = ?", (match_id,)):
         for kf in store.keyframes(c["id"]):
             if kf.get("auto"):
@@ -305,8 +308,80 @@ def upload_clips(match_id: int, files: list[UploadFile] = File(...)):
             shutil.rmtree(dst.parent, ignore_errors=True)
             raise HTTPException(400, str(e)) from e
         _store_probe(cid, dst, info)
-        created.append(_get("clips", cid))
+        learned = _learn_for_new_clip(match_id, cid)
+        created.append({**_get("clips", cid), "learned": learned})
     return created
+
+
+# --- onthouden wat de gebruiker eerder heeft ingesteld ----------------------------------------
+# Zoals een trainer die een veld al kent: de maten van een veld (per GPS-plek) en waar je stond
+# (per video vanaf dezelfde plek) hoeven maar één keer ingesteld te worden.
+
+VENUE_RADIUS_M = 150.0
+SAME_SPOT_M = 8.0
+
+
+def _gps_of_match(match_id: int) -> tuple[float, float] | None:
+    rows = store.all("SELECT gps_lat, gps_lon FROM clips WHERE match_id = ? AND gps_lat IS NOT NULL", (match_id,))
+    if not rows:
+        return None
+    return float(np.median([r["gps_lat"] for r in rows])), float(np.median([r["gps_lon"] for r in rows]))
+
+
+def _remember_venue(match_id: int) -> None:
+    """Veldmaten van deze wedstrijd onthouden voor deze plek (GPS)."""
+    m = store.one("SELECT pitch_length, pitch_width FROM matches WHERE id = ?", (match_id,))
+    pos = _gps_of_match(match_id)
+    if not m or pos is None or m["pitch_length"] is None:
+        return
+    for v in store.all("SELECT * FROM venues"):
+        if geo.distance_m(pos[0], pos[1], v["lat"], v["lon"]) < VENUE_RADIUS_M:
+            store.run("UPDATE venues SET pitch_length = ?, pitch_width = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
+                      (m["pitch_length"], m["pitch_width"], v["id"]))
+            return
+    store.run("INSERT INTO venues (lat, lon, pitch_length, pitch_width) VALUES (?,?,?,?)",
+              (pos[0], pos[1], m["pitch_length"], m["pitch_width"]))
+
+
+def _learn_for_new_clip(match_id: int, clip_id: int) -> list[str]:
+    """Bij een nieuwe video overnemen wat al bekend is. Geeft uitleg terug voor de gebruiker."""
+    out = []
+    c = _get("clips", clip_id)
+    if c.get("gps_lat") is None:
+        return out
+    m = _get("matches", match_id)
+    if m.get("pitch_length") is None:  # veldmaten nog niet ingesteld: kennen we dit veld?
+        best = None
+        for v in store.all("SELECT * FROM venues WHERE pitch_length IS NOT NULL"):
+            d = geo.distance_m(c["gps_lat"], c["gps_lon"], v["lat"], v["lon"])
+            if d < VENUE_RADIUS_M and (best is None or d < best[0]):
+                best = (d, v)
+        if best:
+            g = set_pitch_size(match_id, best[1]["pitch_length"], best[1]["pitch_width"])
+            out.append(f"Veldmaten {g.length:g} × {g.width:g} m overgenomen: je hebt eerder op dit veld gefilmd")
+    if _share_camera(match_id):
+        out.append("Je positie is overgenomen van een andere video die je vanaf dezelfde plek filmde")
+    return out
+
+
+def _share_camera(match_id: int) -> int:
+    """Video's zonder camerapositie krijgen de positie van een video die vanaf (bijna) dezelfde
+    GPS-plek is gefilmd en waar je je plek zelf hebt aangeklikt."""
+    clips = store.all("SELECT * FROM clips WHERE match_id = ?", (match_id,))
+    known = [c for c in clips if c["cam_source"] == "hand" and c["gps_lat"] is not None and c["cam_x"] is not None]
+    n = 0
+    for c in clips:
+        if c["cam_x"] is not None or c["gps_lat"] is None:
+            continue
+        near = [(geo.distance_m(c["gps_lat"], c["gps_lon"], k["gps_lat"], k["gps_lon"]), k) for k in known]
+        near = [x for x in near if x[0] < SAME_SPOT_M]
+        if near:
+            k = min(near, key=lambda x: x[0])[1]
+            store.run("UPDATE clips SET cam_x = ?, cam_y = ?, cam_h = ?, cam_source = 'kopie' WHERE id = ?",
+                      (k["cam_x"], k["cam_y"], k["cam_h"], c["id"]))
+            analytics.invalidate(clip_id=c["id"])
+            n += 1
+    return n
 
 
 def _store_probe(cid: int, path: Path, info: dict, inherit: dict | None = None) -> None:
@@ -325,7 +400,9 @@ def _store_probe(cid: int, path: Path, info: dict, inherit: dict | None = None) 
 def update_clip(clip_id: int, data: dict = Body(...)):
     if "flip" in data and data["flip"] is not None:
         data = {**data, "flip": 1 if data["flip"] else 0}
-    return _update("clips", clip_id, data, {"order_idx", "period", "start_minute", "flip"})
+    if "train_ok" in data:
+        data = {**data, "train_ok": 1 if data["train_ok"] else 0}
+    return _update("clips", clip_id, data, {"order_idx", "period", "start_minute", "flip", "train_ok"})
 
 
 @app.delete("/api/clips/{clip_id}")
@@ -460,14 +537,32 @@ def calibrate_preview(clip_id: int, data: dict = Body(...)):
         K, err = fit_calibration(points, camera=prior)
     except (ValueError, np.linalg.LinAlgError) as e:
         return {"ok": False, "message": str(e)}
-    cam = None
+    cam, goals = None, []
     if prior is not None:
         try:
-            cam = {k: round(v, 1) for k, v in fit_camera(points, prior)[1].items() if k != "params"}
+            full = fit_camera(points, prior)[1]
+            cam = {k: round(v, 1) for k, v in full.items() if k != "params"}
+            goals = _goal_outlines(full["params"], (int(clip["width"]), int(clip["height"])),
+                                   pitch.of_match(_get("matches", clip["match_id"])))
         except ValueError:
             pass
     H = np.linalg.inv(K)
-    return {"ok": True, "H": normalize_h(H).tolist(), "error_m": round(err, 2), "camera": cam}
+    return {"ok": True, "H": normalize_h(H).tolist(), "error_m": round(err, 2), "camera": cam, "goals": goals}
+
+
+def _goal_outlines(params, size, geom) -> list[list[list[float]]]:
+    """De doelen (palen + lat) in beeld volgens het cameramodel, om de kalibratie te controleren."""
+    from .calibration import camera_projection, project_3d
+
+    P = camera_projection(np.asarray(params, float), size)
+    out = []
+    for side in ("links", "rechts"):
+        a, b = geom.elevated_lines[f"Lat {side}"]
+        frame = [(a[0], a[1], 0.0), a, b, (b[0], b[1], 0.0)]
+        img = project_3d(P, frame)
+        if np.isfinite(img).all():
+            out.append([[round(float(x), 1), round(float(y), 1)] for x, y in img])
+    return out
 
 
 @app.patch("/api/clips/{clip_id}/camera")
@@ -484,6 +579,8 @@ def set_camera(clip_id: int, data: dict = Body(...)):
         sets = ", ".join(f"{k} = ?" for k in fields)
         store.run(f"UPDATE clips SET {sets} WHERE id = ?", (*fields.values(), clip_id))
         analytics.invalidate(clip_id=clip_id)
+        if data.get("source") == "hand":
+            _share_camera(_get("clips", clip_id)["match_id"])
     return _get("clips", clip_id)
 
 
@@ -690,6 +787,7 @@ def get_tracks(clip_id: int):
     d = analytics.load_clip(store, clip_id)
     for r in rows:
         r["valid"] = d is None or r["track_id"] in d.valid_tracks
+        r["calib_suspect"] = bool(d is not None and d.calib_suspect)
     return rows
 
 
@@ -730,19 +828,63 @@ def reassign_teams(clip_id: int):
         raise HTTPException(409, "Analyseer de video eerst")
     res = assign_clip_teams(store, clip_id, keep_manual=True)
     analytics.invalidate(geometry=False)
+    _learn_team_colors(clip_id)
     return res
 
 
 @app.patch("/api/clips/{clip_id}/tracks/{track_id}")
 def update_track(clip_id: int, track_id: int, data: dict = Body(...)):
+    """Team of speler van een track aanpassen. team 3 = toeschouwer: telt nergens meer mee; het
+    antwoord bevat dan ook vergelijkbare personen ("similar") om in één keer mee weg te halen."""
     fields = {k: data[k] for k in ("team", "player_id") if k in data}
     if not fields:
         raise HTTPException(400, "Niets te wijzigen")
+    if fields.get("team") == teams.TEAM_SPECTATOR:
+        fields["player_id"] = None
     sets = ", ".join(f"{k} = ?" for k in fields)
     store.run(f"UPDATE tracks SET {sets} WHERE clip_id = ? AND track_id = ?",
               (*fields.values(), clip_id, track_id))
     analytics.invalidate(geometry=False)
-    return store.one("SELECT * FROM tracks WHERE clip_id = ? AND track_id = ?", (clip_id, track_id))
+    out = store.one("SELECT * FROM tracks WHERE clip_id = ? AND track_id = ?", (clip_id, track_id))
+    if "team" in fields:
+        _learn_team_colors(clip_id)
+    if fields.get("team") == teams.TEAM_SPECTATOR:
+        out["similar"] = analytics.similar_spectators(store, clip_id, track_id)
+    return out
+
+
+@app.post("/api/tracks/spectators")
+def mark_spectators(data: dict = Body(...)):
+    """Meerdere tracks tegelijk als toeschouwer aanwijzen (of terugzetten). data: {items: [{clip_id,
+    track_id}], undo?: bool}. Terugzetten geeft ze weer het automatisch bepaalde team."""
+    items = [(int(i["clip_id"]), int(i["track_id"])) for i in data.get("items") or []]
+    with store.tx() as c:
+        for cid, tid in items:
+            if data.get("undo"):
+                c.execute("UPDATE tracks SET team = team_auto WHERE clip_id = ? AND track_id = ? AND team = ?",
+                          (cid, tid, teams.TEAM_SPECTATOR))
+            else:
+                c.execute("UPDATE tracks SET team = ?, player_id = NULL WHERE clip_id = ? AND track_id = ?",
+                          (teams.TEAM_SPECTATOR, cid, tid))
+    analytics.invalidate(geometry=False)
+    return {"ok": True, "n": len(items)}
+
+
+def _learn_team_colors(clip_id: int) -> None:
+    """Leren van correcties: de teamkleuren van de wedstrijd (en van de vaste selectie, als die
+    gekoppeld is) volgen wat de gebruiker heeft ingedeeld. Nieuwe video's van deze wedstrijd en
+    volgende wedstrijden met dezelfde selectie beginnen dan met de goede kleuren."""
+    c = store.one("SELECT match_id FROM clips WHERE id = ?", (clip_id,))
+    if not c:
+        return
+    m = _get("matches", c["match_id"])
+    colors = _team_colors(c["match_id"])
+    for team in (0, 1):
+        if not colors[team]:
+            continue
+        store.run(f"UPDATE matches SET team{team}_color = ? WHERE id = ?", (colors[team], m["id"]))
+        if m.get(f"team{team}_squad"):
+            store.run("UPDATE squads SET color = ? WHERE id = ?", (colors[team], m[f"team{team}_squad"]))
 
 
 @app.post("/api/matches/{match_id}/players")
@@ -814,6 +956,105 @@ def match_highlights(match_id: int):
                 out.append({**e, "clip_id": c["id"]})
         except Exception:  # noqa: BLE001
             logging.exception("Geluid van clip %s", c["id"])
+    return out
+
+
+@app.get("/api/clips/{clip_id}/ball")
+def get_ball(clip_id: int, t0: float = 0.0, t1: float = 1e9):
+    return analytics.clip_ball(store, clip_id, t0, t1)
+
+
+@app.post("/api/clips/{clip_id}/ball")
+def set_ball(clip_id: int, data: dict = Body(...)):
+    """De bal zelf aanwijzen: data {t, x, y} in beeldpixels, of {t, x: null} = hier is geen bal.
+    data {t, clear: true} haalt een eigen aanwijzing weer weg."""
+    _get("clips", clip_id)
+    t = _snap_time(clip_id, float(data["t"]))
+    if data.get("clear"):
+        store.run("DELETE FROM ball_manual WHERE clip_id = ? AND ABS(t - ?) < 0.02", (clip_id, t))
+    else:
+        x, y = data.get("x"), data.get("y")
+        store.run("INSERT OR REPLACE INTO ball_manual (clip_id, t, x, y) VALUES (?,?,?,?)",
+                  (clip_id, t, None if x is None else float(x), None if y is None else float(y)))
+    analytics.invalidate(clip_id=clip_id)
+    return {"ok": True, "t": t}
+
+
+# --- de app slimmer maken (trainen op je eigen beelden) ------------------------------------------
+
+trainer = training.Trainer()
+
+
+def _after_training(kind: str, res: dict) -> None:
+    if kind == "field":
+        learning._field_cache.clear()
+    analytics.invalidate(geometry=kind == "field")
+
+
+trainer.on_done.append(_after_training)
+
+
+@app.get("/api/training")
+def training_overview():
+    return {**training.overview(store), "status": trainer.status()}
+
+
+@app.get("/api/training/status")
+def training_status():
+    return trainer.status()
+
+
+@app.post("/api/training/start")
+def training_start(data: dict = Body(...)):
+    """data: {kind: 'detector'|'field'|'players', quick?: bool, match_id?, player_id?}"""
+    kind = data.get("kind")
+    if kind not in ("detector", "field", "players"):
+        raise HTTPException(400, "Onbekende soort training")
+    opts = {"quick": bool(data.get("quick", True))}
+    if kind == "players":
+        if not data.get("match_id"):
+            raise HTTPException(400, "Kies een wedstrijd")
+        opts["match_id"] = int(data["match_id"])
+        if data.get("player_id"):
+            opts["player_id"] = int(data["player_id"])
+    try:
+        return trainer.start(kind, opts)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e)) from e
+
+
+@app.post("/api/training/stop")
+def training_stop():
+    trainer.stop()
+    return {"ok": True}
+
+
+@app.post("/api/training/{kind}/activate")
+def training_activate(kind: str, data: dict = Body(default={})):
+    """Een getrainde versie gebruiken (file), of terug naar het standaardmodel (file: null)."""
+    if kind not in learning.KINDS:
+        raise HTTPException(400, "Onbekende soort")
+    try:
+        learning.set_active(kind, data.get("file"))
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    _after_training(kind, {})
+    return {"ok": True, "active": learning.registry()[kind]["active"]}
+
+
+@app.get("/api/matches/{match_id}/recognize")
+def recognize_players(match_id: int):
+    """Ongekoppelde stukken die volgens de spelerprofielen bij een speler horen."""
+    _get("matches", match_id)
+    return learning.recognize(store, match_id)
+
+
+@app.get("/api/matches/{match_id}/profiles")
+def match_profiles(match_id: int):
+    """Welke spelers van deze wedstrijd al een profiel hebben."""
+    out = {}
+    for p in store.all("SELECT * FROM players WHERE match_id = ?", (match_id,)):
+        out[p["id"]] = learning.profile_of(store, p) is not None
     return out
 
 
