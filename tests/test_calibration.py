@@ -204,3 +204,28 @@ def test_elevated_points_need_camera_position():
     pts += [{"name": "x", "img": [500.0, 300.0], "pitch3": list(pitch.DEFAULT.elevated["Doelpaal rechts boven, bovenkant"])}]
     with pytest.raises(ValueError, match="positie"):
         fit_calibration(pts)
+
+
+def test_zoomed_clicks_count_more_and_fit_in_pixels():
+    """Punten die ingezoomd zijn aangeklikt (z), liggen preciezer: de kalibratie moet daar vlak
+    langs gaan, ook als de andere klikken wat slordig zijn."""
+    from app.calibration import fit_calibration
+    size, true, Himg = _sideline_camera()
+    rng = np.random.default_rng(4)
+    world = np.array([[94.0, 34.0], [105, 13.84], [88.5, 13.84], [105, 54.16], [88.5, 54.16], [80, 68], [100, 68], [94, 68]])
+    img = apply_h(Himg, world)
+    noisy = img + rng.normal(scale=6.0, size=img.shape)
+    precise = [5, 6]  # de zijlijnpunten dichtbij, ingezoomd aangeklikt
+    noisy[precise] = img[precise] + rng.normal(scale=0.5, size=(2, 2))
+
+    def err_at(K, k):
+        G = np.linalg.inv(K)
+        return float(np.linalg.norm(apply_h(G, world[k:k + 1])[0] - img[k]))
+
+    pts = [{"img": noisy[k].tolist(), "pitch": world[k].tolist()} for k in range(len(world))]
+    K0, _ = fit_calibration(pts)
+    for k in precise:
+        pts[k]["z"] = 4
+    K1, _ = fit_calibration(pts)
+    assert max(err_at(K1, k) for k in precise) < max(err_at(K0, k) for k in precise)
+    assert max(err_at(K1, k) for k in precise) < 2.5

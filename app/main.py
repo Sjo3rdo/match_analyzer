@@ -787,6 +787,7 @@ def get_tracks(clip_id: int):
     d = analytics.load_clip(store, clip_id)
     for r in rows:
         r["valid"] = d is None or r["track_id"] in d.valid_tracks
+        r["calib_suspect"] = bool(d is not None and d.calib_suspect)
     return rows
 
 

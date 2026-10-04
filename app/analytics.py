@@ -84,6 +84,7 @@ class ClipData:
     entity: dict[int, str] = field(default_factory=dict)  # track -> entiteit
     team: dict[int, int] = field(default_factory=dict)  # track -> team
     valid_tracks: set[int] = field(default_factory=set)
+    calib_suspect: bool = False  # de kalibratie zet bijna iedereen buiten het veld
     groups: dict[int, np.ndarray] | None = None  # track -> rijnummers (op volgorde van tijd)
     geom: pitch.Geometry = pitch.DEFAULT
     stationary: dict[int, float] = field(default_factory=dict)  # track -> deel van de tijd stil
@@ -180,7 +181,7 @@ def load_clip(store: Store, clip_id: int) -> ClipData | None:
     clip = store.one("SELECT * FROM clips WHERE id = ?", (clip_id,)) or geo.clip
     d = ClipData(clip, geo.t, geo.fps, geo.calibrated, geo.idx, geo.track, geo.boxes, geo.xy,
                  geo.ball_idx, geo.ball_xy, geo.ball_img, camera=geo.camera, valid_tracks=geo.valid_tracks,
-                 groups=geo.groups, geom=geo.geom, stationary=geo.stationary)
+                 groups=geo.groups, geom=geo.geom, stationary=geo.stationary, calib_suspect=geo.calib_suspect)
     players = {p["id"]: p for p in store.all("SELECT * FROM players WHERE match_id = ?", (clip["match_id"],))}
     for tr in store.all("SELECT * FROM tracks WHERE clip_id = ?", (clip_id,)):
         tid = tr["track_id"]
@@ -293,6 +294,12 @@ def stationary_tracks(d: ClipData) -> dict[int, float]:
     return still_fraction(d.t, d.idx, d.track, feet, d.boxes[:, 3] - d.boxes[:, 1], d.camera.A)
 
 
+def _on_pitch_frac(d: ClipData, rows: np.ndarray, margin: float = 1.5) -> float:
+    x, y = d.xy[rows, 0], d.xy[rows, 1]
+    ok = (x >= -margin) & (x <= d.geom.length + margin) & (y >= -margin) & (y <= d.geom.width + margin)
+    return float(ok.mean()) if len(ok) else 0.0
+
+
 def _valid_tracks(d: ClipData, min_frames: int = 10, min_on_pitch: float = 0.6) -> set[int]:
     """Tracks die echt spelers op het veld zijn (geen toeschouwers, wissels of mensen vlak voor de camera).
 
@@ -312,17 +319,27 @@ def _valid_tracks(d: ClipData, min_frames: int = 10, min_on_pitch: float = 0.6) 
     # wacht, moet blijven meetellen).
     W = d.geom.width
     groups = d.groups if d.groups is not None else group_rows(d.track)
+    calibrated = d.calibrated
+    if calibrated:
+        # Klopt de kalibratie wel? Als bijna iedereen die rondloopt volgens de kalibratie buiten het
+        # veld staat, ligt dat aan de kalibratie, niet aan de spelers. Dan negeren we de kalibratie
+        # hier (anders verdwijnt iedereen) en melden we het.
+        moving = [rows for tid, rows in groups.items() if len(rows) >= 2 * min_frames and still.get(tid, 0.0) < 0.5]
+        if len(moving) >= 5:
+            inside = [_on_pitch_frac(d, rows) >= min_on_pitch for rows in moving]
+            if np.mean(inside) < 0.35:
+                calibrated = False
+                d.calib_suspect = True
     for tid, rows in groups.items():
         if len(rows) < min_frames:
             continue
         if H_img and (d.boxes[rows, 3] >= 0.99 * H_img).mean() > 0.5:  # kaders aan de rand eindigen net erboven
             continue
         frac = still.get(tid, 0.0)
-        st = frac >= (0.85 if d.calibrated else 0.6)
-        if d.calibrated:
+        st = frac >= (0.85 if calibrated else 0.6)
+        if calibrated:
             x, y = d.xy[rows, 0], d.xy[rows, 1]
-            ok = (x >= -1.5) & (x <= d.geom.length + 1.5) & (y >= -1.5) & (y <= W + 1.5)
-            if ok.mean() < min_on_pitch:
+            if _on_pitch_frac(d, rows) < min_on_pitch:
                 continue
             my = float(np.nanmedian(y)) if np.isfinite(y).any() else 0.0
             if st and (my < 4.0 or my > W - 4.0):

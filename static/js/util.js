@@ -69,12 +69,13 @@ export function teamOptions(match, current) {
 
 // Een track als toeschouwer weghalen; daarna vergelijkbare personen (zelfde plek, zelfde kleding)
 // in één keer mee laten weghalen. box: element waarin de vraag komt; done: na afloop.
+// done(items): na afloop, met de extra weggehaalde tracks (of een lege lijst).
 export async function markSpectator(clipId, trackId, box, done) {
   const r = await api(`/clips/${clipId}/tracks/${trackId}`, { method: 'PATCH', json: { team: 3 } });
   toast('Weggehaald: telt nergens meer mee');
   const sim = r.similar || [];
-  if (!sim.length || !box) { done?.(); return; }
-  const close = () => { box.replaceChildren(); done?.(); };
+  if (!sim.length || !box) { done?.([]); return; }
+  const close = items => { box.replaceChildren(); done?.(items); };
   box.replaceChildren(h('div', { className: 'hint', style: { marginBottom: '12px' } },
     h('b', {}, `Nog ${sim.length} vergelijkbare ${sim.length === 1 ? 'persoon' : 'personen'} gevonden`),
     h('div', { className: 'small muted', style: { margin: '4px 0 8px' } },
@@ -84,9 +85,18 @@ export async function markSpectator(clipId, trackId, box, done) {
     h('div', { className: 'row' },
       h('button', { className: 'primary', onclick: async () => {
         await api('/tracks/spectators', { json: { items: sim } });
-        toast(`${sim.length} extra weggehaald`); close();
+        toast(`${sim.length} extra weggehaald`); close(sim);
       } }, `Ja, alle ${sim.length} weghalen`),
-      h('button', { onclick: close }, 'Nee'))));
+      h('button', { onclick: () => close([]) }, 'Nee'))));
+}
+
+// Iets bovenin de pagina verandert (er komt een melding bij, een lijst wordt opnieuw opgebouwd):
+// houd wat je aan het bekijken was op dezelfde plek in beeld, zodat de pagina niet verspringt.
+export async function keepInView(anchor, fn) {
+  const top = anchor && anchor.isConnected ? anchor.getBoundingClientRect().top : null;
+  const result = await fn();
+  if (top != null && anchor.isConnected) window.scrollBy(0, anchor.getBoundingClientRect().top - top);
+  return result;
 }
 
 export function playerLabel(p) {

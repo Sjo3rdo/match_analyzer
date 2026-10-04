@@ -20,6 +20,7 @@ export async function render(root, ctx) {
   let frameT = null;            // tijd van het beeld dat nu getoond wordt
   let proposal = null;          // automatisch voorstel dat nog bevestigd moet worden
   let goalSide = null;          // geklikt bij dit doel: kies voet/bovenkant/lat
+  let pendingZoom = 1;          // zoomfactor bij het aanklikken van het beeldpunt dat nog wacht
   let view = { s: 1, ox: 0, oy: 0 }, pan = null;  // inzoomen op het beeld
   const hasCam = () => clip.cam_x != null && clip.cam_y != null;
 
@@ -134,9 +135,9 @@ export async function render(root, ctx) {
     const hit = pairs.findIndex(q => Math.hypot(q.img[0] - p[0], q.img[1] - p[1]) < tol);
     if (hit >= 0) { drag = hit; return; }
     if (pendingPitch) {
-      addPair(pendingPitch, p); pendingPitch = null;
+      addPair(pendingPitch, p, view.s); pendingPitch = null;
     } else {
-      pendingImg = p;
+      pendingImg = p; pendingZoom = view.s;
     }
     redraw();
   });
@@ -150,6 +151,7 @@ export async function render(root, ctx) {
   frameCanvas.addEventListener('mousemove', e => {
     if (drag === null) return;
     pairs[drag].img = imgCoords(e);
+    pairs[drag].z = Math.max(pairs[drag].z || 1, view.s);  // ingezoomd verschoven: precies
     drawFrame(); scheduleFit();
   });
   window.addEventListener('mouseup', onUp);
@@ -189,7 +191,7 @@ export async function render(root, ctx) {
   });
 
   function pick(lm) {
-    if (pendingImg) { addPair(lm, pendingImg); pendingImg = null; }
+    if (pendingImg) { addPair(lm, pendingImg, pendingZoom); pendingImg = null; }
     else pendingPitch = lm;
     drawChooser();
     redraw();
@@ -242,13 +244,15 @@ export async function render(root, ctx) {
     chooser.replaceChildren(...rows);
   }
 
-  function addPair(lm, p) {
+  // z = hoe ver je was ingezoomd bij het klikken: zo'n klik is preciezer en telt zwaarder mee
+  function addPair(lm, p, z = 1) {
+    z = Math.round(Math.min(4, Math.max(1, z)) * 10) / 10;
     if (lm.line || lm.line3) {  // meerdere punten op dezelfde lijn mogen
-      pairs.push(lm.line ? { name: lm.name, img: p, line: lm.line } : { name: lm.name, img: p, line3: lm.line3 });
+      pairs.push(lm.line ? { name: lm.name, img: p, line: lm.line, z } : { name: lm.name, img: p, line3: lm.line3, z });
       return;
     }
     pairs = pairs.filter(q => q.name !== lm.name);
-    pairs.push(lm.h != null ? { name: lm.name, img: p, pitch3: [lm.x, lm.y, lm.h] } : { name: lm.name, img: p, pitch: [lm.x, lm.y] });
+    pairs.push(lm.h != null ? { name: lm.name, img: p, pitch3: [lm.x, lm.y, lm.h], z } : { name: lm.name, img: p, pitch: [lm.x, lm.y], z });
   }
 
   function segDist(p, a, b) {
@@ -281,11 +285,12 @@ export async function render(root, ctx) {
   function scheduleFit() {
     clearTimeout(fitTimer);
     if (!hasCam()) {
+      // meteen een snelle schatting tekenen; de server legt de lijnen daarna precies door je punten
       const info = calibrationInfo(pairs);
       const G = info.ok ? fitCalibration(pairs) : null;
       fit = { H: G ? inv(G) : null, err: G ? calibrationError(G, pairs) : null, cam: null, msg: needInfo().hint };
       drawFrame(); drawErr();
-      return;
+      if (!G) return;
     }
     fitTimer = setTimeout(async () => {
       const seq = ++fitSeq, info = needInfo();

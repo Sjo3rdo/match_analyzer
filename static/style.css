@@ -196,3 +196,14 @@ canvas { max-width: 100%; display: block; }
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border-2); border-radius: 10px; border: 2px solid var(--bg); }
 ::-webkit-scrollbar-track { background: transparent; }
+
+/* onderin vast: koppel-assistent en vragen (zodat de lijst erboven niet verspringt) */
+.dock { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); width: min(1180px, calc(100% - 28px));
+  max-height: 44vh; overflow: auto; z-index: 30; border-radius: var(--radius); }
+.dock:empty, .dock > div:empty { display: none; }
+.dock .hint { margin: 0 0 8px; background: var(--panel); box-shadow: 0 16px 40px rgba(0, 0, 0, .45); border-color: var(--border-2); }
+.dock .hint:last-child { margin-bottom: 0; }
+body.dock-open main { padding-bottom: 46vh; }
+.warn-hint { border-left-color: var(--warn); }
+
+body.dock-open #toast { bottom: calc(44vh + 30px); }

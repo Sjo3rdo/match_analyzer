@@ -103,3 +103,24 @@ def test_ball_outside_pitch_and_jumps_removed():
 def test_heatmap_counts_seconds_per_video_fps():
     pts = np.array([[52.5, 34.0]] * 25)
     assert abs(sum(map(sum, analytics.heatmap(pts, 12.5))) - 2.0) < 1e-6  # 25 beelden bij 12,5 per seconde
+
+
+def test_bad_calibration_does_not_hide_everyone():
+    """Staat (bijna) iedereen die rondloopt buiten het veld, dan klopt de kalibratie niet: niet wegfilteren."""
+    from app.calibration import CameraModel
+    fps, n, k = 10, 100, 6
+    idx, track, boxes, xy = [], [], [], []
+    for i in range(n):
+        for j in range(k):
+            idx.append(i)
+            track.append(j + 1)
+            px = 100 + 150 * j + 3 * i
+            boxes.append([px - 10, 300, px + 10, 360])
+            xy.append([300 + 0.3 * i, 300 + 10 * j])  # ver buiten het veld
+    d = ClipData(clip={"id": 1, "height": 1080}, t=np.arange(n) / fps, fps=fps, calibrated=True, idx=np.array(idx),
+                 track=np.array(track), boxes=np.array(boxes, float), xy=np.array(xy, float),
+                 ball_idx=np.zeros(0, int), ball_xy=np.zeros((0, 2)), ball_img=np.zeros((0, 2)),
+                 camera=CameraModel(np.tile(np.eye(3), (n, 1, 1)), []))
+    assert analytics._valid_tracks(d) == set(range(1, k + 1))
+    assert d.calib_suspect
+    assert not _people_clip(True).calib_suspect

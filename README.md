@@ -37,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.8 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.9 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. De browser haalt de interface na een update altijd vers op. Kwam je van een
 versie zonder versienummer rechtsboven, druk dan één keer op ⌥⌘R in Safari om de oude, bewaarde
 pagina weg te gooien (anders zie je bijv. geen deelknop of krijg je "Method Not Allowed").
@@ -118,6 +118,8 @@ minimap**, **Statistieken** en **Clips & delen**.
      GPS-positie (5 à 10 m nauwkeurig) is vaak niet genoeg.
    - **Inzoomen.** Knijp op het trackpad (of ⌥ + scrollen) om in te zoomen, bijvoorbeeld om de verre
      hoekvlag precies aan te klikken. Verschuiven doe je met twee vingers, of Shift + slepen.
+     Een punt dat je ingezoomd zet, telt zwaarder mee (tot 4× bij flink inzoomen): de lijn gaat dan
+     door jouw precieze stippen, en grovere punten van ver weg geven mee.
    - **Punten bewegen mee met het veld.** Zet je een punt en schuif je daarna naar een ander moment,
      dan schuift het punt mee met de camerabeweging. Zo kun je punten van verschillende momenten in één
      sleutelframe combineren: bijv. de middenstip nu en de verre hoekvlag als de camera daar is.
@@ -140,11 +142,16 @@ minimap**, **Statistieken** en **Clips & delen**.
    mogelijk weggefilterd: wie meestal op dezelfde plek staat (gemeten tegen de achtergrond, dus
    los van het zwenken), of wiens voeten buiten beeld vallen, telt niet als speler. Na de
    kalibratie valt ook iedereen buiten het veld af. Voer de selectie in, met rugnummers.
+   - **Kalibratie klopt niet?** Valt bijna iedereen die rondloopt buiten het veld, dan gaat de app
+     ervan uit dat de kalibratie niet goed ligt. Hij filtert dan niet op het veld en laat een
+     waarschuwing zien met een link naar **Kalibratie**.
+   - **Rustig de lijst afwerken.** Een kaartje dat je afhandelt (koppelen, 🚫) verdwijnt meteen, en de
+     pagina blijft staan waar je was. Vragen en de assistent verschijnen in een balk onderin.
    - **Toeschouwer weghalen.** Staat er toch iemand van het publiek tussen? Klik op 🚫 op zijn
      kaartje (of kies **Toeschouwer** bij het team, ook in **Video + minimap**). Hij telt dan nergens
      meer mee. De app zoekt meteen naar personen met dezelfde soort kleding op dezelfde plek, ook in
-     je andere video's van deze wedstrijd, en vraagt of die ook weg mogen. Vergist? Zet het team
-     terug, of vink "alleen op het veld" uit om ze terug te vinden.
+     je andere video's van deze wedstrijd, en vraagt of die ook weg mogen. Vergist? Vink **toon
+     weggehaalde** aan en zet het team terug.
    - **Selectie overnemen.** Klik bij een team op **💾 Bewaar als vaste selectie**. Bij een volgende
      wedstrijd kies je die teamnaam bij het aanmaken (of bij **📋 Selectie overnemen**), en staan de
      spelers er meteen in. Je kunt ook de selectie van een eerdere wedstrijd overnemen.

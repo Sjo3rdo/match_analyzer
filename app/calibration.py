@@ -154,18 +154,40 @@ def _fit_free(points: list[dict], refine: bool = True) -> tuple[np.ndarray, floa
     return K, float(np.mean(calibration_residuals(K, points)))
 
 
-def _refine(K: np.ndarray, points: list[dict], iters: int = 15) -> np.ndarray:
-    """Gauss-Newton op de fouten in meters (punten 2D, lijnpunten 1D)."""
+def point_weight(p: dict) -> float:
+    """Hoe precies een klik is: wie ingezoomd klikt (p["z"] = zoomfactor), klikt preciezer en telt
+    zwaarder mee (tot 4x)."""
+    try:
+        return float(np.clip(float(p.get("z") or 1.0), 1.0, 4.0))
+    except (TypeError, ValueError):
+        return 1.0
+
+
+def _refine(K: np.ndarray, points: list[dict], iters: int = 20) -> np.ndarray:
+    """Gauss-Newton op de fouten in beeldpixels: de getekende lijnen moeten door de aangeklikte
+    punten gaan. (In meters rekenen zou punten ver weg zwaarder laten wegen dan punten dichtbij,
+    terwijl je juist dichtbij het preciest klikt.) Ingezoomde klikken tellen zwaarder mee."""
+    img = np.array([p["img"] for p in points], float)
+    w = np.array([point_weight(p) for p in points])
+
     def res(h):
         Kh = np.append(h, 1.0).reshape(3, 3)
+        try:
+            G = np.linalg.inv(Kh)  # veld -> beeld
+        except np.linalg.LinAlgError:
+            return np.full(2 * len(points), np.inf)
         r = []
-        for p in points:
-            q = apply_h(Kh, np.asarray(p["img"], float))[0]
+        for p, (x, y), wi in zip(points, img, w):
             if p.get("pitch") is not None:
-                r += list(q - np.asarray(p["pitch"], float))
+                v = G @ np.array([*p["pitch"], 1.0])
+                if abs(v[2]) < 1e-12:
+                    r += [1e6, 1e6]
+                    continue
+                r += [wi * (v[0] / v[2] - x), wi * (v[1] / v[2] - y)]
             else:
-                l = _line_coeffs(p["line"])
-                r.append(l[0] * q[0] + l[1] * q[1] + l[2])
+                l = np.linalg.inv(G).T @ _line_coeffs(p["line"])  # veldlijn als lijn in het beeld
+                n = np.hypot(l[0], l[1]) or 1e-12
+                r.append(wi * (l[0] * x + l[1] * y + l[2]) / n)
         return np.array(r)
     h = K.reshape(-1)[:8].copy()
     r = res(h)
@@ -407,13 +429,14 @@ def default_focal(width: int) -> float:
     return (width / 2) / math.tan(math.radians(DEFAULT_HFOV_DEG / 2))
 
 
-def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma_px: float = 4.0) -> np.ndarray:
+def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma0: float = 3.0) -> np.ndarray:
     P = camera_projection(p, size)
     H = normalize_h(P[:, [0, 1, 3]])
     Hinv_T = np.linalg.inv(H).T
     r = []
     for q in points:
         x, y = q["img"]
+        sigma_px = sigma0 / point_weight(q)
         if q.get("pitch3") is not None:  # punt in de lucht (bovenkant van een doelpaal)
             v = project_3d(P, q["pitch3"])[0]
             if not np.isfinite(v).all():
