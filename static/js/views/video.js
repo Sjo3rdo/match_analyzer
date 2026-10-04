@@ -26,6 +26,7 @@ export async function render(root, ctx) {
   // Spelers in deze actie: klik ze aan in de (gepauzeerde) video, of kies ze uit de lijst.
   // Ze komen allemaal in de clip, elk met een spotlight (gele ring met naam).
   const actionPlayers = new Set();
+  const shotClipBox = h('input', { type: 'checkbox', checked: true });
   const actionBox = h('div', { className: 'row small', style: { gap: '6px', marginTop: '8px', flexWrap: 'wrap' } });
   const addPlayer = h('select', { onchange: e => { if (e.target.value) toggleAction(Number(e.target.value)); e.target.value = ''; } });
   function drawAction() {
@@ -57,6 +58,11 @@ export async function render(root, ctx) {
           h('div', { className: 'row' }, label,
             h('button', { className: 'primary', onclick: addMoment, title: 'Maakt een clip van 6 s vóór tot 4 s na dit moment' }, '✂️ Maak clip')),
           actionBox,
+          h('div', { className: 'row small', style: { marginTop: '8px' } },
+            h('button', { onclick: () => addShot(false), title: 'Sla hier een schot op (de eerste gekozen speler is de schutter)' }, '🎯 Schot'),
+            h('button', { onclick: () => addShot(true), title: 'Sla hier een goal op (de eerste gekozen speler is de maker)' }, '⚽ Goal'),
+            h('label', {}, shotClipBox, ' ook een clip maken'),
+            h('span', { className: 'muted' }, 'telt mee in de statistieken en de stand')),
           h('div', { className: 'small muted', style: { marginTop: '6px' } },
             'Pauzeer bij een kans of goal, klik de spelers aan die erbij betrokken zijn, geef een label en klik "Maak clip" (6 s ervoor tot 4 s erna). Je clips staan hieronder bij ',
             '"Momenten in deze video" en bij ', h('a', { href: `#/match/${match.id}/momenten` }, 'Clips & delen'),
@@ -223,6 +229,22 @@ export async function render(root, ctx) {
       match.players.length ? null : h('div', { className: 'small muted' }, 'Voeg eerst spelers toe bij "Spelers".'));
   }
 
+  async function addShot(goal) {
+    video.pause();
+    const t = video.currentTime, ids = [...actionPlayers];
+    const shooter = ids.length ? playerById.get(`p${ids[0]}`) : null;
+    await api(`/matches/${match.id}/shots`, { json: { clip_id: clip.id, t: Math.max(0, t - 1), t_end: t, goal, on_target: goal || null,
+      player_id: shooter?.id || null, team: shooter ? shooter.team : null } });
+    if (shotClipBox.checked) {
+      await api(`/matches/${match.id}/moments`, { json: { clip_id: clip.id, start: Math.max(0, t - 7), end: t + 4,
+        label: label.value || (goal ? 'Goal' : 'Schot'), players: ids, spotlights: ids } });
+      label.value = '';
+    }
+    actionPlayers.clear(); drawAction(); draw();
+    toast(goal ? `⚽ Goal opgeslagen${shooter ? ` (${playerLabel(shooter)})` : ''}` : '🎯 Schot opgeslagen');
+    loadEvents();
+  }
+
   async function addMoment() {
     const t = video.currentTime, ids = [...actionPlayers];
     const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: clip.id, start: Math.max(0, t - 6), end: t + 4,
@@ -235,8 +257,8 @@ export async function render(root, ctx) {
   }
 
   async function loadEvents() {
-    const [moments, stats, hl] = await Promise.all([api(`/matches/${match.id}/moments`), api(`/matches/${match.id}/stats`),
-      api(`/matches/${match.id}/highlights`).catch(() => [])]);
+    const [moments, stats, hl, sh] = await Promise.all([api(`/matches/${match.id}/moments`), api(`/matches/${match.id}/stats`),
+      api(`/matches/${match.id}/highlights`).catch(() => []), api(`/matches/${match.id}/shots`).catch(() => ({ shots: [] }))]);
     const name = ent => playerLabel(playerById.get(ent)) || 'onbekend';
     const items = [
       ...moments.filter(m => m.clip_id === clip.id).map(m => ({ t: m.start, text: `🎬 ${m.label}${m.players.length ? ' – ' + m.players.map(id => name('p' + id)).join(', ') : ''}`,
@@ -244,12 +266,16 @@ export async function render(root, ctx) {
       ...stats.events.filter(e => e.clip_id === clip.id && (e.kind !== 'sprint' || playerById.has(e.entity))).map(e => ({
         t: e.t, text: e.kind === 'sprint' ? `⚡ Sprint ${name(e.entity)} (${e.value} km/u)`
           : e.kind === 'pass' ? `➡️ Pass ${name(e.entity)} → ${name(e.to)}` : `✖️ Balverlies ${name(e.entity)}` })),
+      ...sh.shots.filter(s => s.clip_id === clip.id).map(s => ({ t: s.t,
+        text: `${s.goal ? '⚽ Goal' : s.on_target ? '🎯 Schot op doel' : '🎯 Schot'}${s.player_id ? ' – ' + name('p' + s.player_id) : ''}`,
+        del: async () => { await api(`/shots/${s.id}`, { method: 'DELETE' }); toast('Weggehaald'); loadEvents(); } })),
       ...hl.filter(e => e.clip_id === clip.id).map(e => ({ t: Math.max(0, e.t - 6),
         text: e.kind === 'gejuich' ? '📣 Gejuich (mogelijk een kans of goal)' : '🔔 Fluitsignaal' })),
     ].sort((a, b) => a.t - b.t);
     eventsBox.replaceChildren(...(items.length ? items.map(it => h('div', { className: 'list-item', onclick: () => { video.currentTime = Math.max(0, it.t - 2); video.play(); } },
       h('b', {}, matchMinute(clip, it.t)), h('span', { className: 'muted small' }, fmtTime(it.t)), h('span', { style: { flex: 1 } }, it.text),
-      it.href ? h('a', { href: it.href, onclick: e => e.stopPropagation() }, 'bewerk') : null))
+      it.href ? h('a', { href: it.href, onclick: e => e.stopPropagation() }, 'bewerk') : null,
+      it.del ? h('button', { className: 'danger small', title: 'Weghalen', onclick: e => { e.stopPropagation(); it.del(); } }, '×') : null))
       : [h('div', { className: 'muted small' }, 'Nog geen momenten.')]));
   }
 

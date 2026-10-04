@@ -32,6 +32,9 @@ SPRINT_MIN_S = 1.0
 POSSESSION_RADIUS_M = 2.0
 POSSESSION_MIN_FRAMES = 2
 PASS_MAX_GAP_S = 5.0
+SHOT_MIN_SPEED_MS = 40 / 3.6  # een schot gaat harder dan dit (een rustige pass niet)
+SHOT_MAX_DIST_M = 30.0  # alleen schoten van binnen deze afstand tot het doel
+SHOT_WIDE_M = 6.0  # 'richting doel': hooguit zoveel meter naast de paal
 HEATMAP_BINS = (21, 14)  # cellen van 5 x ~4,9 m
 
 

@@ -481,6 +481,117 @@ def passes(segs: list[Possession]) -> list[dict]:
     return out
 
 
+# --- schoten en goals --------------------------------------------------------------------
+#
+# Metafoor: een grensrechter die bij het doel staat. Hij let op een bal die ineens hard richting
+# het doel gaat (een schot), kijkt of hij tussen de palen zou gaan (op doel), en of de bal daarna
+# bij het doel verdwijnt of over de lijn gaat. Hoort hij dan ook gejuich en/of een fluitsignaal,
+# dan is het waarschijnlijk een goal. Het blijven voorstellen: jij bevestigt.
+
+def _ball_track(d: ClipData) -> tuple[np.ndarray, np.ndarray]:
+    ok = ~np.isnan(d.ball_xy).any(axis=1) if len(d.ball_xy) else np.zeros(0, bool)
+    return d.t[d.ball_idx[ok]], d.ball_xy[ok]
+
+
+def detect_shots(d: ClipData) -> list[dict]:
+    """Schoten richting doel in één video (veldcoördinaten zoals gekalibreerd, niet gespiegeld)."""
+    if not d.calibrated or len(d.ball_idx) < 3:
+        return []
+    geom = d.geom
+    L, W = geom.length, geom.width
+    gh = pitch._GOAL_HALF
+    tb, xy = _ball_track(d)
+    if len(tb) < 3:
+        return []
+    segs = possession_segments(d)
+    found: list[dict] = []
+    for i in range(len(tb) - 1):
+        # snelheid over een korte tijd (0,15 - 0,6 s): minder last van een losse misser
+        j = i + 1
+        while j < len(tb) - 1 and tb[j] - tb[i] < 0.15:
+            j += 1
+        dt = tb[j] - tb[i]
+        if dt <= 0 or dt > 0.6:
+            continue
+        v = (xy[j] - xy[i]) / dt
+        speed = float(np.hypot(*v))
+        if speed < config.SHOT_MIN_SPEED_MS or abs(v[0]) < 1e-6:
+            continue
+        gx = 0.0 if v[0] < 0 else L  # naar welk doel gaat hij?
+        goal = np.array([gx, W / 2])
+        if np.hypot(*(goal - xy[i])) > config.SHOT_MAX_DIST_M:
+            continue
+        s = (gx - xy[i][0]) / v[0]  # waar kruist de baan de doellijn?
+        if s <= 0:
+            continue
+        y_cross = float(xy[i][1] + s * v[1])
+        off = abs(y_cross - W / 2) - gh
+        if off > config.SHOT_WIDE_M:
+            continue
+        if found and tb[i] - found[-1]["t_end"] < 1.5 and found[-1]["goal_x"] == gx:
+            found[-1]["t_end"] = float(tb[j])  # zelfde schot, nog onderweg
+            found[-1]["speed_kmh"] = max(found[-1]["speed_kmh"], round(speed * 3.6))
+            continue
+        found.append({"t": float(tb[i]), "t_end": float(tb[j]), "x": round(float(xy[i][0]), 1),
+                      "y": round(float(xy[i][1]), 1), "goal_x": gx, "y_cross": round(y_cross, 1),
+                      "on_target": bool(off <= 0.5), "speed_kmh": round(speed * 3.6)})
+    for sh in found:
+        gx = sh["goal_x"]
+        # hoe eindigt het? bal bij de doellijn tussen de palen, of kwijt vlak bij het doel
+        after = np.flatnonzero((tb > sh["t"]) & (tb <= sh["t_end"] + 2.0))
+        near_line = [k for k in after if abs(xy[k][0] - gx) < 2.0 and abs(xy[k][1] - W / 2) < gh + 0.5]
+        last = int(after[-1]) if len(after) else int(np.searchsorted(tb, sh["t"]))
+        nxt = np.flatnonzero(tb > tb[min(last, len(tb) - 1)])
+        gap = (tb[nxt[0]] - tb[last]) if len(nxt) else 99.0
+        lost_near_goal = gap > 0.7 and np.hypot(xy[last][0] - gx, xy[last][1] - W / 2) < 12
+        sh["ball_at_line"] = bool(near_line)
+        sh["lost_near_goal"] = bool(lost_near_goal)
+        # wie schoot? de laatste balbezitter vlak ervoor
+        prev = [p for p in segs if p.t0 <= sh["t"] + 0.3 and p.t1 >= sh["t"] - 1.5]
+        if prev:
+            p = max(prev, key=lambda q: q.t1)
+            sh["entity"], sh["team"] = p.entity, p.team
+        else:
+            sh["entity"], sh["team"] = None, -1
+    return found
+
+
+def position_at(store: Store, clip_id: int, t: float, player_id: int | None = None) -> tuple[float, float] | None:
+    """Waar op het veld (meters) gebeurde het op tijd t? De bal als die er is, anders de speler."""
+    d = load_clip(store, clip_id)
+    if d is None or not d.calibrated or not len(d.t):
+        return None
+    tb, xy = _ball_track(d)
+    if len(tb):
+        k = int(np.argmin(np.abs(tb - t)))
+        if abs(tb[k] - t) <= 0.5:
+            return round(float(xy[k][0]), 1), round(float(xy[k][1]), 1)
+    if player_id:
+        tids = [tid for tid, e in d.entity.items() if e == f"p{player_id}"]
+        rows = np.concatenate([d.rows_of(tid) for tid in tids]) if tids else np.zeros(0, int)
+        rows = rows[~np.isnan(d.xy[rows]).any(axis=1)] if len(rows) else rows
+        if len(rows):
+            k = rows[int(np.argmin(np.abs(d.t[d.idx[rows]] - t)))]
+            if abs(d.t[d.idx[k]] - t) <= 1.0:
+                return round(float(d.xy[k][0]), 1), round(float(d.xy[k][1]), 1)
+    return None
+
+
+def goal_chance(shot: dict, sounds: list[dict]) -> str | None:
+    """'waarschijnlijk' / 'mogelijk' een goal, of None. sounds: gejuich en fluitsignalen van die video."""
+    if not shot.get("on_target"):
+        return None
+    cheer = any(e["kind"] == "gejuich" and shot["t"] - 1 <= e["t"] <= shot["t_end"] + 15 for e in sounds)
+    whistle = any(e["kind"] == "fluitsignaal" and shot["t_end"] <= e["t"] <= shot["t_end"] + 60 for e in sounds)
+    ball = shot.get("ball_at_line") or shot.get("lost_near_goal")
+    points = int(cheer) + int(whistle) + int(bool(ball))
+    if points >= 2 and (cheer or shot.get("ball_at_line")):
+        return "waarschijnlijk"
+    if points >= 1:
+        return "mogelijk"
+    return None
+
+
 # --- wedstrijdniveau ---------------------------------------------------------------------
 
 def match_stats(store: Store, match_id: int) -> dict:

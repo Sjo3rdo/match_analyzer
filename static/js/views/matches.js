@@ -28,7 +28,7 @@ export async function render(root) {
     list.length ? h('div', { className: 'match-grid' }, list.map(m => h('div', { className: 'match-card', onclick: () => location.hash = `#/match/${m.id}/clips` },
       h('div', { className: 'eyebrow' }, m.date || 'Zonder datum'),
       h('div', { className: 'teams' }, m.name),
-      h('div', { className: 'meta' }, h('span', {}, `${m.team0_name} – ${m.team1_name}`), h('span', {}, `🎬 ${m.n_clips} video${m.n_clips === 1 ? '' : "'s"}`)),
+      h('div', { className: 'meta' }, h('span', {}, m.score ? `${m.team0_name} ${m.score[0]} – ${m.score[1]} ${m.team1_name}` : `${m.team0_name} – ${m.team1_name}`), h('span', {}, `🎬 ${m.n_clips} video${m.n_clips === 1 ? '' : "'s"}`)),
       h('button', { className: 'danger small del', title: 'Verwijderen', onclick: async e => {
         e.stopPropagation();
         if (!confirm(`"${m.name}" en alle bijbehorende video's verwijderen?`)) return;

@@ -96,6 +96,23 @@ CREATE TABLE IF NOT EXISTS moments (
     drawings TEXT DEFAULT '[]',
     created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS shots (
+    id INTEGER PRIMARY KEY,
+    match_id INTEGER NOT NULL REFERENCES matches(id) ON DELETE CASCADE,
+    clip_id INTEGER NOT NULL REFERENCES clips(id) ON DELETE CASCADE,
+    t REAL NOT NULL,
+    t_end REAL,
+    status TEXT NOT NULL DEFAULT 'bevestigd',  -- 'bevestigd' of 'afgewezen' (voorstel dat niet klopte)
+    goal INTEGER DEFAULT 0,
+    on_target INTEGER,
+    team INTEGER,
+    player_id INTEGER REFERENCES players(id) ON DELETE SET NULL,
+    x REAL,
+    y REAL,
+    goal_x REAL,
+    auto INTEGER DEFAULT 0,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 CREATE TABLE IF NOT EXISTS squads (
     id INTEGER PRIMARY KEY,
     name TEXT NOT NULL,

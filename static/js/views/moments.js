@@ -30,6 +30,7 @@ export async function render(root, ctx) {
   const editor = h('div');
   const listBox = h('div', { className: 'list', style: { maxHeight: '360px' } });
   const suggestBox = h('div', { className: 'list', style: { maxHeight: '260px' } });
+  const shotBox = h('div', { className: 'list', style: { maxHeight: '300px' } });
   const exp = exportPanel();
   const playerFilter = h('select', { onchange: e => { filterPlayer = e.target.value; drawList(); drawSuggestions(); } },
     h('option', { value: '' }, 'Alle spelers'), match.players.map(p => h('option', { value: p.id }, playerLabel(p))));
@@ -56,6 +57,10 @@ export async function render(root, ctx) {
           h('h3', {}, 'Clips'), h('button', { onclick: newClipHere }, '+ Nieuwe clip')), listBox),
         h('div', { className: 'panel' }, h('h3', {}, 'Exporteren & delen'), exp.el,
           h('div', { className: 'small muted' }, 'Kies clips met de vinkjes, of exporteer de geopende clip.')),
+        h('div', { className: 'panel' }, h('h3', {}, 'Schoten en goals (voorstellen)'), shotBox,
+          h('div', { className: 'small muted', style: { marginTop: '6px' } },
+            'Gevonden uit de bal (hard richting doel) en het geluid (gejuich, fluitsignaal). Bevestig wat klopt: ',
+            'dat telt mee in de statistieken en de stand. Een gemist schot of goal voeg je toe bij "Video + minimap".')),
         h('div', { className: 'panel' }, h('h3', {}, 'Suggesties (automatisch gevonden)'), suggestBox))));
 
   // --- lijst ---------------------------------------------------------------------------
@@ -83,6 +88,43 @@ export async function render(root, ctx) {
         m.drawings.length ? h('span', { title: 'Tekeningen' }, `✏️${m.drawings.length}`) : null,
         h('span', { className: 'muted small' }, `${Math.round(m.end - m.start)}s`));
     }) : [h('div', { className: 'muted small' }, 'Nog geen clips. Maak er een met "+ Nieuwe clip" of via een suggestie.')]));
+  }
+
+  // --- schoten en goals ----------------------------------------------------------------
+  async function loadShots() {
+    const data = await api(`/matches/${match.id}/shots`).catch(() => null);
+    const list = (data?.suggestions || []).filter(s => clipById.has(s.clip_id));
+    shotBox.replaceChildren(...(list.length ? list.map(s => {
+      const who = playerLabel(playerById.get(s.player_id)) || (s.team >= 0 ? teamName(match, s.team) : 'onbekend');
+      const what = s.goal_chance ? `⚽ ${s.goal_chance === 'waarschijnlijk' ? 'Waarschijnlijk' : 'Mogelijk'} goal`
+        : `🎯 Schot ${s.on_target ? 'op doel' : 'naast'}`;
+      const item = h('div', { className: 'list-item' }, ...where(clipById.get(s.clip_id), s.t),
+        h('span', { style: { flex: 1 } }, what, ' ', h('span', { className: 'small muted' }, `${who} · ${s.speed_kmh} km/u`)),
+        h('button', { title: 'Klopt: het was een schot', onclick: () => confirmShot(s, false, item) }, '✓ Schot'),
+        h('button', { title: 'Klopt: het was een goal', onclick: () => confirmShot(s, true, item) }, '⚽ Goal'),
+        h('button', { title: 'Geen schot', onclick: () => rejectShot(s, item) }, '✗'),
+        h('button', { title: 'Maak er een clip van, met de schutter in de spotlight', onclick: () => shotClip(s, !!s.goal_chance) }, '+ clip'));
+      return item;
+    }) : [h('div', { className: 'muted small' }, data ? 'Geen voorstellen (meer). Analyseer en kalibreer eerst, en koppel spelers.'
+      : 'Kon de voorstellen niet laden.')]));
+  }
+  function shotPayload(s, extra) {
+    return { clip_id: s.clip_id, t: s.t, t_end: s.t_end, on_target: s.on_target, team: s.team >= 0 ? s.team : null,
+      player_id: s.player_id, x: s.x, y: s.y, goal_x: s.goal_x, auto: true, ...extra };
+  }
+  async function confirmShot(s, goal, item) {
+    await api(`/matches/${match.id}/shots`, { json: shotPayload(s, { goal, status: 'bevestigd' }) });
+    item.remove(); toast(goal ? '⚽ Goal opgeslagen' : '🎯 Schot opgeslagen'); ctx.refreshSteps?.();
+  }
+  async function rejectShot(s, item) {
+    await api(`/matches/${match.id}/shots`, { json: shotPayload(s, { status: 'afgewezen' }) });
+    item.remove();
+  }
+  async function shotClip(s, goal) {
+    const ids = s.player_id ? [s.player_id] : [];
+    const m = await api(`/matches/${match.id}/moments`, { json: { clip_id: s.clip_id, start: Math.max(0, s.t - 6),
+      end: (s.t_end || s.t) + 3, label: goal ? 'Goal' : 'Schot', players: ids, spotlights: ids } });
+    moments.push(m); select(m); toast('Clip gemaakt');
   }
 
   async function loadSuggestions() {
@@ -448,6 +490,7 @@ export async function render(root, ctx) {
   drawList(); drawEditor();
   if (current) select(current);
   loadSuggestions();
+  loadShots();
   const onResize = () => (drawMode ? redrawDraw() : drawOverlay());
   window.addEventListener('resize', onResize);
   return () => { flushSave(); cancelAnimationFrame(raf); clearTimeout(freezeTimer); video.pause(); video.removeAttribute('src'); window.removeEventListener('resize', onResize); };

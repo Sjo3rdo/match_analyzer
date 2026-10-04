@@ -16,7 +16,7 @@ from fastapi import Body, FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import analytics, clips as clip_export, config, geo, learning, pitch, render, teams, training
+from . import analytics, clips as clip_export, config, geo, learning, pitch, render, shots, teams, training
 from .calibration import camera_prior, fit_calibration, fit_camera, normalize_h
 from .pipeline import Worker, probe, read_frame
 from .storage import Store, clip_dir
@@ -96,8 +96,11 @@ def get_pitch(match_id: int | None = None):
 
 @app.get("/api/matches")
 def list_matches():
-    return store.all("SELECT m.*, (SELECT COUNT(*) FROM clips c WHERE c.match_id = m.id) AS n_clips "
+    rows = store.all("SELECT m.*, (SELECT COUNT(*) FROM clips c WHERE c.match_id = m.id) AS n_clips "
                      "FROM matches m ORDER BY COALESCE(date, created_at) DESC")
+    for m in rows:
+        m["score"] = shots.score(store, m["id"])
+    return rows
 
 
 @app.post("/api/matches")
@@ -219,6 +222,7 @@ def get_match(match_id: int):
                                 "WHERE c.match_id = ? AND t.player_id IS NOT NULL", (match_id,))["n"]
     m["players"] = store.all("SELECT * FROM players WHERE match_id = ? ORDER BY team, "
                              "CAST(number AS INTEGER), name", (match_id,))
+    m["score"] = shots.score(store, match_id)
     return m
 
 
@@ -962,6 +966,66 @@ def match_highlights(match_id: int):
         except Exception:  # noqa: BLE001
             logging.exception("Geluid van clip %s", c["id"])
     return out
+
+
+# --- schoten en goals --------------------------------------------------------------------
+
+_SHOT_FIELDS = {"t", "t_end", "status", "goal", "on_target", "team", "player_id", "x", "y", "goal_x", "auto"}
+
+
+def _shot_payload(data: dict) -> dict:
+    out = {k: data[k] for k in _SHOT_FIELDS if k in data}
+    for k in ("goal", "on_target", "auto"):
+        if k in out and out[k] is not None:
+            out[k] = 1 if out[k] else 0
+    if out.get("status") not in (None, "bevestigd", "afgewezen"):
+        raise HTTPException(400, "Onbekende status")
+    if out.get("goal"):
+        out["on_target"] = 1  # een goal is altijd op doel
+    return out
+
+
+@app.get("/api/matches/{match_id}/shots")
+def get_shots(match_id: int):
+    _get("matches", match_id)
+    return shots.overview(store, match_id)
+
+
+@app.post("/api/matches/{match_id}/shots")
+def add_shot(match_id: int, data: dict = Body(...)):
+    """Een schot of goal opslaan: een bevestigd (of afgewezen) voorstel, of zelf toegevoegd in de video."""
+    c = _get("clips", int(data["clip_id"]))
+    if c["match_id"] != match_id:
+        raise HTTPException(400, "Video hoort niet bij deze wedstrijd")
+    fields = {"status": "bevestigd", **_shot_payload(data)}
+    if "t" not in fields:
+        raise HTTPException(400, "Tijd ontbreekt")
+    if fields.get("x") is None and fields["status"] == "bevestigd":  # zelf toegevoegd: waar ongeveer?
+        where = analytics.position_at(store, c["id"], float(fields["t"]), fields.get("player_id"))
+        if where is not None:
+            fields["x"], fields["y"] = where
+    cols = ["match_id", "clip_id", *fields]
+    sid = store.run(f"INSERT INTO shots ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})",
+                    (match_id, c["id"], *fields.values()))
+    return _get("shots", sid)
+
+
+@app.patch("/api/shots/{shot_id}")
+def update_shot(shot_id: int, data: dict = Body(...)):
+    _get("shots", shot_id)
+    fields = _shot_payload(data)
+    if "goal" in fields and not fields["goal"] and "on_target" not in data:
+        fields.pop("on_target", None)
+    if fields:
+        sets = ", ".join(f"{k} = ?" for k in fields)
+        store.run(f"UPDATE shots SET {sets} WHERE id = ?", (*fields.values(), shot_id))
+    return _get("shots", shot_id)
+
+
+@app.delete("/api/shots/{shot_id}")
+def delete_shot(shot_id: int):
+    store.run("DELETE FROM shots WHERE id = ?", (shot_id,))
+    return {"ok": True}
 
 
 @app.get("/api/clips/{clip_id}/ball")
