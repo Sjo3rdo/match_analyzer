@@ -1,26 +1,25 @@
 # Match Analyzer
 
-Een lokale app voor je laptop die voetbalwedstrijden analyseert tot op het niveau van de
-individuele speler, in de stijl van Veo. Het verschil met Veo is dat je hier gewone
-telefoonvideo's gebruikt die je achteraf uploadt, gefilmd vanaf de zijlijn of vanaf een hoger punt
-en gewoon uit de hand.
+Een app voor je laptop die voetbalwedstrijden analyseert tot op het niveau van de individuele
+speler. Je gebruikt gewone telefoonvideo's, gefilmd vanaf de zijlijn of vanaf een hoger punt en
+gewoon uit de hand, en uploadt ze achteraf.
 
-Alles draait op je eigen laptop. Er gaat geen video naar internet, en ook geen gebruiksgegevens:
-de anonieme statistieken die de detectiesoftware (Ultralytics) normaal verstuurt, staan uit.
+Alles draait op je eigen laptop. Er gaan geen video's of gebruiksgegevens naar internet.
 
 ## Wat het doet
 
 | Onderdeel | Wat je krijgt |
 |---|---|
-| Spelers volgen | Iedereen op het veld wordt in elk frame gevonden (YOLO) en over de tijd gevolgd. |
+| Spelers volgen | Iedereen op het veld wordt in elk beeld gevonden en over de tijd gevolgd. |
 | Teams | Automatisch ingedeeld op shirtkleur, ook in zon en schaduw, en gelijk over alle video's van een wedstrijd. Scheidsrechter, keepers en publiek komen bij 'overig'. |
 | Wie is wie | Rugnummers lezen (optioneel), spelers koppelen door ze in de video aan te klikken, en een koppel-assistent die de rest van het spoor van een speler voorstelt. Selecties bewaar je en neem je over in de volgende wedstrijd. |
 | Per speler | Gelopen afstand, topsnelheid, sprints, minuten, heatmap en gemiddelde positie. |
-| Bal | Balbezit per team, passes, balverlies, passnetwerk. |
+| Bal | De bal volgen, balbezit per team, passes, balverlies, passnetwerk. Je kunt de bal ook zelf aanwijzen. |
 | Minimap | Een 2D-bovenaanzicht dat met de video meeloopt. |
 | Knippen | Een lange video vóór de analyse in delen knippen (1e/2e helft), warming-up en rust eruit. |
 | Hoogtepunten | Suggesties uit de analyse (sprints, passes) en uit het geluid (gejuich, fluitsignalen). |
-| Clips en delen | Clips maken zoals in Veo: begin/eind, label, spelers taggen, opmerking, tekenen op beeld (beeld bevriest), spotlight die een speler volgt, afspeellijst per speler. Export als mp4, reel of zip, en direct delen via AirDrop, WhatsApp, Berichten of Mail. |
+| Clips en delen | Clips maken: begin/eind, label, spelers taggen, opmerking, tekenen op beeld (beeld bevriest), spotlight die een speler volgt, afspeellijst per speler. Export als mp4, reel of zip, en direct delen via AirDrop, WhatsApp, Berichten of Mail. |
+| Zelf leren | Op jouw verzoek oefent de app op je eigen gecorrigeerde beelden, zodat hij spelers, de bal, het veld en je eigen spelers steeds beter herkent. |
 
 ## Installeren en starten (MacBook met Apple Silicon)
 
@@ -38,9 +37,7 @@ met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automat
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
 in de app staat de versie en de commit (bijv. `versie 0.9 · 7e771cd`); die moet gelijk zijn aan
-`git log -1 --oneline`. De browser haalt de interface na een update altijd vers op. Kwam je van een
-versie zonder versienummer rechtsboven, druk dan één keer op ⌥⌘R in Safari om de oude, bewaarde
-pagina weg te gooien (anders zie je bijv. geen deelknop of krijg je "Method Not Allowed").
+`git log -1 --oneline`. Ziet de app er na een update vreemd uit, druk dan één keer op ⌥⌘R in Safari.
 
 Wil je ook rugnummers automatisch laten lezen? Installeer dan:
 
@@ -167,9 +164,9 @@ minimap**, **Statistieken** en **Clips & delen**.
      vorige stuk ophield en hebben hetzelfde shirt. Zie het als een spoor in de sneeuw dat steeds
      even onderbroken is: heb je één stuk, dan zoekt de app het volgende. Met **✓ Koppel** neem je
      een voorstel over, daarna zoekt de app verder. Via 🔍 achter een speler open je de assistent
-     ook zelf. Klik op **Automatisch koppelen** om
-   tracks met een leesbaar rugnummer te koppelen. De rest koppel je via de kaartjes of door in
-   **Video + minimap** te pauzeren en op een speler te klikken.
+     ook zelf.
+   - **Automatisch koppelen** koppelt tracks met een leesbaar rugnummer. De rest koppel je via de
+     kaartjes of door in **Video + minimap** te pauzeren en op een speler te klikken.
 
    **De bal.** In **Video + minimap** zie je een cirkel om de bal: wit = gevonden, geel gestippeld =
    geschat (de bal was even niet te zien en de app trekt een lijn tussen ervoor en erna), groen = door
@@ -260,55 +257,28 @@ Alles blijft op je eigen laptop.
 
 ## Hoe nauwkeurig is het?
 
-Wees realistisch: met telefoonbeelden vanaf de zijlijn kom je niet aan de nauwkeurigheid van
-een vaste 180°-camera.
+Met telefoonbeelden vanaf de zijlijn kom je niet aan de nauwkeurigheid van een vaste 180°-camera.
+Zie de cijfers als een goede indruk, niet als meetwerk.
 
-- **Afstand en snelheid.** Hoe dichter bij de camera, hoe beter. Aan de verre kant kan een fout
-  van 1 tot 2 m per positie ontstaan. De app strijkt posities glad en negeert onmogelijke sprongen.
-- **Bal.** Een kleine, snelle bal is vaak niet te zien. De app volgt hem daarom als een vogelaar:
-  is hij even weg, dan zoomt de app in op de plek waar hij heen ging (uitsnede op volle resolutie),
-  en is hij lang weg, dan zoekt de app af en toe het hele beeld in stukken af. Korte gaten (tot
-  1 s) vult de app op. Dat maakt de analyse wat langzamer. Balbezit en passes blijven een
-  *schatting*; wijs de bal zelf aan op momenten die ertoe doen. Video's die met een eerdere versie
-  zijn geanalyseerd, hebben dit pas na **Opnieuw** analyseren.
-- **Rugnummers.** Vanaf de zijlijn zijn die vaak onleesbaar. Gebruik ze daarom als suggestie en
-  controleer de koppelingen.
-- **Teams en publiek.** In fel zonlicht lijkt een donkerblauw shirt soms grijs; zo'n speler kan bij
-  'overig' terechtkomen. Toeschouwers die bewegen (bijvoorbeeld langs de lijn lopen) worden pas
-  na de kalibratie herkend, omdat ze dan buiten het veld staan.
-- **Geluid.** Gejuich en fluitsignalen zijn suggesties. Wind in de microfoon, iemand die vlak
-  naast je praat of een losse roep van een speler ("hier!") telt de app niet als gejuich, en per
-  halve minuut krijg je hooguit één suggestie van elke soort. Controleer het altijd even: een
-  langgerekte roep kan soms als fluitsignaal binnenkomen.
-- **Spelers buiten beeld.** Wie buiten beeld is, wordt niet gemeten. Het aantal minuten laat zien
-  hoe lang iemand in beeld was.
+- **Afstand en snelheid.** Hoe dichter bij de camera, hoe beter. Aan de verre kant kan een positie
+  1 à 2 m afwijken.
+- **Bal.** Een kleine, snelle bal is vaak even niet te zien. De app zoekt hem dan ingezoomd op en
+  vult korte gaten op, maar balbezit en passes blijven een schatting. Wijs de bal zelf aan op
+  momenten die ertoe doen.
+- **Rugnummers.** Vanaf de zijlijn vaak onleesbaar: gebruik ze als suggestie en controleer de
+  koppelingen.
+- **Teams en publiek.** In fel zonlicht lijkt een donker shirt soms grijs; zo'n speler kan bij
+  'overig' terechtkomen. Publiek dat langs de lijn loopt, valt pas na de kalibratie af.
+- **Geluid.** Gejuich en fluitsignalen zijn suggesties; controleer ze even.
+- **Spelers buiten beeld** worden niet gemeten. Het aantal minuten is de tijd dat iemand in beeld was.
 
-## Techniek
+## Voor ontwikkelaars
 
-- **Backend.** Python, FastAPI en SQLite (`app/`).
-- **Detectie.** Ultralytics YOLO11, op de Apple-GPU via MPS (`app/detection.py`).
-- **Volgen.** Een eigen ByteTrack-achtige tracker die camerabeweging compenseert
-  (`app/tracking.py`).
-- **Camerabeweging en kalibratie.** Optical flow op de achtergrond met homografieën. Tussen
-  sleutelframes wordt gemengd om drift te beperken (`app/calibration.py`).
-- **Teams.** K-means op shirtkleur in de Lab-kleurruimte, waarbij graspixels worden weggefilterd
-  (`app/teams.py`).
-- **Statistieken.** Te vinden in `app/analytics.py`.
-- **Bal volgen.** `app/ball.py`: kandidaten kiezen op het spoor, inzoomen en zoeken als hij kwijt is.
-- **Trainen.** `app/learning.py` (voorbeelden verzamelen, modelversies, veldnetwerk, spelerprofielen)
-  en `app/train.py` (draait als apart proces). Eigen modellen staan in `data/models/custom/`.
-- **Interface.** Gewone HTML en JavaScript zonder build-stap (`static/`).
-
-Instellingen, zoals het model, de analyse-fps en de sprintgrens, staan in `app/config.py`. Je
-kunt het model ook kiezen met een omgevingsvariabele, bijvoorbeeld
-`MATCH_ANALYZER_MODEL=yolo11l.pt ./run.sh` voor meer precisie (langzamer).
-
-### Tests
+De app is gebouwd met Python (FastAPI, SQLite) en gewone HTML/JavaScript; de code staat in `app/` en
+`static/`. Instellingen, zoals het detectiemodel, de analyse-fps en de sprintgrens, staan in
+`app/config.py`. Tests draaien:
 
 ```bash
 .venv/bin/pip install -r requirements-dev.txt
 .venv/bin/python -m pytest
 ```
-
-De end-to-end-test maakt een synthetische wedstrijdvideo en doorloopt de hele keten: uploaden,
-kalibreren, analyseren, koppelen, statistieken en export.
