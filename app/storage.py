@@ -209,6 +209,9 @@ class Store:
         for col, typ in (("analysis_mode", "TEXT"), ("flip", "INTEGER")):
             if col not in cols:
                 self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
+        # Begin van de opname (seconden sinds 1970), uit de metadata van de video
+        if "rec_start" not in cols:
+            self.run("ALTER TABLE clips ADD COLUMN rec_start REAL")
         # Door de gebruiker goedgekeurd om de app mee te trainen
         if "train_ok" not in cols:
             self.run("ALTER TABLE clips ADD COLUMN train_ok INTEGER DEFAULT 0")
@@ -221,7 +224,8 @@ class Store:
         mcols = {r["name"] for r in self.all("PRAGMA table_info(matches)")}
         # Veldmaten per wedstrijd, en de shirtkleur per team (om video's gelijk te trekken)
         for col, typ in (("pitch_length", "REAL"), ("pitch_width", "REAL"), ("team0_color", "TEXT"),
-                         ("team1_color", "TEXT"), ("team0_squad", "INTEGER"), ("team1_squad", "INTEGER")):
+                         ("team1_color", "TEXT"), ("team0_squad", "INTEGER"), ("team1_squad", "INTEGER"),
+                         ("half_length", "INTEGER")):
             if col not in mcols:
                 self.run(f"ALTER TABLE matches ADD COLUMN {col} {typ}")
         # Oude 'markers' (één tijdstip) worden clips (begin + eind), zoals in een video-editor

@@ -59,7 +59,33 @@ def read_video_metadata(path: Path, ffmpeg: str) -> dict:
                 pass
         elif key.endswith("quicktime.model") or key == "model":
             meta.setdefault("device", val)
+        elif key.endswith("quicktime.creationdate"):  # iPhone: begin van de opname, met tijdzone
+            ts = parse_time(val)
+            if ts is not None:
+                meta["rec_start"] = ts
+        elif key == "creation_time" and "rec_start" not in meta:
+            ts = parse_time(val)
+            if ts is not None:
+                meta["rec_start_fallback"] = ts
+    if "rec_start" not in meta and "rec_start_fallback" in meta:
+        meta["rec_start"] = meta["rec_start_fallback"]
+    meta.pop("rec_start_fallback", None)
     return meta
+
+
+def parse_time(val: str) -> float | None:
+    """'2026-10-02T14:03:11+0200' of '2026-10-02T12:03:11.000000Z' -> seconden sinds 1970 (UTC)."""
+    from datetime import datetime, timezone
+    v = val.strip().replace("Z", "+00:00")
+    if len(v) >= 5 and v[-5] in "+-" and v[-3] != ":":  # +0200 -> +02:00
+        v = v[:-2] + ":" + v[-2:]
+    try:
+        dt = datetime.fromisoformat(v)
+    except ValueError:
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
 
 
 def to_local(lat: float, lon: float, lat0: float, lon0: float) -> np.ndarray:
