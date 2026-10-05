@@ -261,3 +261,19 @@ def test_mirrored_field_is_never_chosen():
     swapped += [{"img": img((88.5, 54.16)), "pitch": [16.5, 54.16]}, {"img": img((94, 34)), "pitch": [11, 34]}]
     with pytest.raises(ValueError, match="gespiegeld"):
         C.fit_calibration(swapped)
+
+
+def test_swapped_goal_post_is_the_suspect_point():
+    """Verkeerde paal gekoppeld: zonder die klik klopt de rest, dus die klik is de verdachte."""
+    from app import pitch
+    from app.calibration import default_focal, fit_camera, suspect_point
+    size, true, H = _sideline_camera(zoom=1.25)
+    L = pitch.LANDMARKS
+    names = ["Doelpaal rechts boven", "Strafschopgebied rechts hoek boven", "Strafschopgebied rechts hoek onder",
+             "Doelgebied rechts hoek onder", "Strafschopstip rechts", "Doelgebied rechts hoek boven"]
+    pts = _items(H, [("pt", L[n]) for n in names])
+    prior = {**PRIOR, "f": default_focal(1920)}
+    assert suspect_point(fit_camera(pts, prior)[1]["params"], pts, prior, size) is None
+    bad = [dict(p) for p in pts]
+    bad[0]["pitch"] = list(L["Doelpaal rechts onder"])  # linker- en rechterpaal verwisseld
+    assert suspect_point(fit_camera(bad, prior)[1]["params"], bad, prior, size) == 0

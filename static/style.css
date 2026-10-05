@@ -84,7 +84,7 @@ h3 { font-size: 13px; margin: 0 0 10px; font-weight: 700; text-transform: upperc
 .grid-cols { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
 @media (max-width: 1000px) { .grid2, .grid-cols { grid-template-columns: 1fr; } }
 .muted { color: var(--muted); } .small { font-size: 12.5px; }
-.warn { color: var(--warn); margin-top: 8px; }
+.warn { display: inline-block; color: var(--text); background: var(--warn-soft); border-left: 4px solid var(--warn); padding: 6px 10px; border-radius: 6px; margin-top: 8px; }
 
 /* --- knoppen en velden ------------------------------------------------------------------------ */
 button, .btn { font: inherit; font-weight: 600; font-size: 13px; padding: 8px 14px; border-radius: var(--radius-sm);
@@ -204,7 +204,14 @@ canvas { max-width: 100%; display: block; }
 .dock .hint { margin: 0 0 8px; background: var(--panel); box-shadow: 0 16px 40px rgba(0, 0, 0, .45); border-color: var(--border-2); }
 .dock .hint:last-child { margin-bottom: 0; }
 body.dock-open main { padding-bottom: 46vh; }
-.warn-hint { border-left-color: var(--warn); }
+.warn-hint { background: var(--warn-soft); border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  border-left: 5px solid var(--warn); color: var(--text); font-size: 13.5px; }
+.warn-hint::before { content: '⚠️ '; }
+.warn-hint b { color: var(--text); }
+.coach.bad { background: color-mix(in srgb, var(--warn) 18%, var(--panel)); border-color: var(--warn); }
+.coach.bad .coach-step { background: var(--warn); color: #1b1300; }
+.list-item.suspect { background: var(--warn-soft); box-shadow: inset 4px 0 0 var(--warn); }
+.post-col { display: flex; flex-direction: column; gap: 4px; min-width: 150px; }
 
 body.dock-open #toast { bottom: calc(44vh + 30px); }
 .chip-x { background: none; border: none; padding: 0 0 0 4px; color: inherit; cursor: pointer; font-size: 14px; line-height: 1; min-height: 0; box-shadow: none; }

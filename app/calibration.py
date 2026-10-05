@@ -505,6 +505,31 @@ def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma0:
     return np.array(r)
 
 
+def suspect_point(params, points: list[dict], prior: dict, size) -> int | None:
+    """Welke klik past niet bij de rest? Geeft de index, of None als dat niet duidelijk is.
+
+    Metafoor: één getuige vertelt een ander verhaal. Laat je om de beurt één getuige weg, dan zijn
+    de anderen het pas onderling eens als juist die ene ontbreekt. Per klik wordt dus opnieuw
+    gefit zonder die klik; de klik waarbij de rest ineens goed klopt, is de verdachte."""
+    p = np.asarray(params, float)
+    if len(points) < 4:
+        return None
+    spread = []
+    for i in range(len(points)):
+        rest = points[:i] + points[i + 1:]
+        if calibration_dof(rest, elevated=True) < 3:
+            spread.append(np.inf)
+            continue
+        q = _lm(lambda v: _cam_residuals(v, rest, prior, size), p)  # noqa: B023
+        r = _cam_residuals(q, rest, prior, size, sigma0=1.0)[:-5]
+        spread.append(float(np.sqrt(np.mean(r ** 2))))
+    order = np.argsort(spread)
+    best, second = spread[order[0]], spread[order[1]]
+    if best < 0.006 * size[0] and second > 3 * best + 3:
+        return int(order[0])
+    return None
+
+
 def _lm(fun, p0: np.ndarray, iters: int = 60) -> np.ndarray:
     """Levenberg-Marquardt met numerieke afgeleiden (klein probleem, 7 parameters)."""
     p, r = p0.copy(), fun(p0)

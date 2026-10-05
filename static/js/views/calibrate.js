@@ -5,6 +5,7 @@ import { api, h, fmtTime, toast } from '../util.js';
 import { PitchView, pitchPolylines } from '../pitch.js';
 import { apply, inv, fitCalibration, calibrationInfo, calibrationError } from '../homography.js';
 import { stationsPanel } from './stations.js';
+import { heightField } from './camheight.js';
 
 export async function render(root, ctx) {
   const { match } = ctx;
@@ -33,6 +34,7 @@ export async function render(root, ctx) {
   const timeLabel = h('span', { className: 'muted' });
   const errLabel = h('span');
   const pairList = h('div', { className: 'list' });
+  const fitWarn = h('div');
   const camPanel = h('div', { className: 'panel' });
   const kfList = h('div');
   const proposeBox = h('div');
@@ -83,6 +85,7 @@ export async function render(root, ctx) {
         camPanel,
         h('div', { className: 'panel' },
           h('div', { className: 'row', style: { justifyContent: 'space-between' } }, h('h3', {}, 'Punten in dit ijkmoment'), errLabel),
+          fitWarn,
           proposeBox,
           pairList,
           h('div', { className: 'row', style: { marginTop: '10px' } },
@@ -209,9 +212,24 @@ export async function render(root, ctx) {
     redraw();
   }
 
-  // Bij het doel liggen de palen vlak naast elkaar; daarom kies je hier met knoppen. "Boven" en
-  // "onder" is de paal bovenaan of onderaan in de veldtekening; de bovenkant is waar de lat zit.
+  // Bij het doel liggen de palen vlak naast elkaar; daarom kies je hier met knoppen. Links en rechts
+  // zoals jij het doel zag vanaf je plek (de app rekent om naar de tekening). Bovenkant = waar de lat zit.
   function goalChooser(side) { goalSide = side; drawChooser(); }
+  // welke paal ("boven"/"onder" in de tekening) zag de filmer links? Zonder plek: vanaf de onderste zijlijn
+  function leftPost(side) {
+    const gx = side === 'links' ? 0 : pitchInfo.length, gy = pitchInfo.width / 2;
+    const cx = hasCam() ? clip.cam_x : pitchInfo.length / 2, cy = hasCam() ? clip.cam_y : pitchInfo.width + 5;
+    const dx = gx - cx, dy = gy - cy;
+    // y wijst omlaag in de tekening: een negatief kruisproduct = links van de kijkrichting
+    const cross = (y, x) => dx * (y - cy) - dy * (x - cx);
+    return cross(gy - 3.66, gx) < cross(gy + 3.66, gx) ? 'boven' : 'onder';
+  }
+  // "Doelpaal links onder, bovenkant" -> "Doel links: linkerpaal, bovenkant" (vanuit de filmer)
+  function label(name) {
+    const m = /^Doelpaal (links|rechts) (boven|onder)(, bovenkant)?$/.exec(name || '');
+    if (!m) return name;
+    return `Doel ${m[1]}: ${leftPost(m[1]) === m[2] ? 'linkerpaal' : 'rechterpaal'}, ${m[3] ? 'bovenkant' : 'voet'}`;
+  }
   function drawChooser() {
     const named = n => pitchInfo.landmarks.find(l => l.name === n);
     const up = n => pitchInfo.elevated.find(l => l.name === n);
@@ -219,24 +237,26 @@ export async function render(root, ctx) {
       onclick: () => { goalSide = null; pick(lm); } }, label) : null;
     const rows = [];
     if (goalSide) {
-      const s = goalSide;
+      const s = goalSide, L = leftPost(s), R = L === 'boven' ? 'onder' : 'boven';
       const lat = pitchInfo.elevated_lines.find(l => l.name === `Lat ${s}`);
       const goalLine = pitchInfo.lines.find(l => l.name === `Doellijn ${s}`);
+      const post = (paal, wie) => h('div', { className: 'post-col' }, h('b', {}, wie),
+        btn('⬆ Bovenkant', up(`Doelpaal ${s} ${paal}, bovenkant`), `Bovenkant van de ${wie.toLowerCase()}, waar de lat begint (2,44 m)`),
+        btn('⬇ Onderkant (voet)', named(`Doelpaal ${s} ${paal}`), `Waar de ${wie.toLowerCase()} de grond raakt`));
       rows.push(h('div', { className: 'hint', style: { margin: '0 0 6px' } },
         h('b', {}, `Doel ${s}: wat klik je aan in het beeld?`),
-        h('div', { className: 'row', style: { marginTop: '6px', gap: '6px' } },
-          btn('Paal boven – voet', named(`Doelpaal ${s} boven`), 'Waar de paal (bovenaan in de tekening) de grond raakt'),
-          btn('Paal boven – bovenkant', up(`Doelpaal ${s} boven, bovenkant`), 'Bovenkant van die paal, waar de lat begint (2,44 m)'),
-          btn('Paal onder – voet', named(`Doelpaal ${s} onder`), 'Waar de paal (onderaan in de tekening) de grond raakt'),
-          btn('Paal onder – bovenkant', up(`Doelpaal ${s} onder, bovenkant`), 'Bovenkant van die paal (2,44 m)'),
-          lat ? btn('Ergens op de lat', { name: lat.name, line3: [lat.from, lat.to] }, 'Een plek op de lat (2,44 m hoog)') : null,
-          goalLine ? btn('Ergens op de doellijn', { name: goalLine.name, line: [goalLine.from, goalLine.to] }) : null,
-          h('button', { onclick: () => { goalSide = null; drawChooser(); } }, 'Annuleren')),
+        h('div', { className: 'muted' }, `Links en rechts zoals jij het doel zag ${hasCam() ? 'vanaf je plek' : 'vanaf de zijlijn onderaan de tekening'}.`),
+        h('div', { className: 'row', style: { marginTop: '8px', gap: '14px', alignItems: 'flex-start' } },
+          post(L, 'Linkerpaal'), post(R, 'Rechterpaal'),
+          h('div', { className: 'post-col' }, h('b', {}, 'Of'),
+            lat ? btn('Ergens op de lat', { name: lat.name, line3: [lat.from, lat.to] }, 'Een plek op de lat (2,44 m hoog)') : null,
+            goalLine ? btn('Ergens op de doellijn', { name: goalLine.name, line: [goalLine.from, goalLine.to] }) : null,
+            h('button', { onclick: () => { goalSide = null; drawChooser(); } }, 'Annuleren'))),
         hasCam() ? null : h('div', { className: 'muted', style: { marginTop: '4px' } },
           'De bovenkant en de lat tellen mee zodra de app weet waar je stond (📍 hieronder).')));
     }
     // alles ook uit een lijst te kiezen, bijvoorbeeld een zijlijn als je verder geen vast punt ziet
-    const opt = (v, label) => h('option', { value: v, selected: pendingPitch && v.endsWith('|' + pendingPitch.name) }, label);
+    const opt = (v, text) => h('option', { value: v, selected: pendingPitch && v.endsWith('|' + pendingPitch.name) }, text);
     const list = h('select', { onchange: e => {
       const [kind, name] = e.target.value.split('|');
       e.target.value = '';
@@ -247,9 +267,9 @@ export async function render(root, ctx) {
     } },
       h('option', { value: '' }, 'Of kies een punt of lijn uit de lijst…'),
       h('optgroup', { label: 'Lijnen (een plek ergens op de lijn)' }, pitchInfo.lines.map(l => opt(`l|${l.name}`, l.name))),
-      h('optgroup', { label: 'Punten op de grond' }, pitchInfo.landmarks.map(l => opt(`p|${l.name}`, l.name))),
+      h('optgroup', { label: 'Punten op de grond' }, pitchInfo.landmarks.map(l => opt(`p|${l.name}`, label(l.name)))),
       h('optgroup', { label: 'Doel, in de lucht (2,44 m)' }, [
-        ...pitchInfo.elevated.map(l => opt(`u|${l.name}`, l.name)),
+        ...pitchInfo.elevated.map(l => opt(`u|${l.name}`, label(l.name))),
         ...pitchInfo.elevated_lines.map(l => opt(`ul|${l.name}`, `${l.name} (ergens op de lat)`))]));
     rows.push(h('div', { className: 'row' }, list,
       h('span', { className: 'muted' }, 'Zie je alleen een zijlijn? Kies "Zijlijn onder" (de kant waar jij staat als je onderaan de tekening staat) en klik er een paar plekken op aan.')));
@@ -328,7 +348,6 @@ export async function render(root, ctx) {
 
   function drawCamPanel() {
     drawCoach();
-    const heights = [[1.6, 'staand langs de lijn (1,6 m)'], [2.5, 'op een bankje/heuvel (2,5 m)'], [4, 'tribune (4 m)'], [6, 'hoge tribune (6 m)']];
     const hNow = clip.cam_h || 1.6;
     camPanel.replaceChildren(...[
       h('h3', {}, '📍 Waar stond je bij het filmen?'),
@@ -342,9 +361,6 @@ export async function render(root, ctx) {
       h('div', { className: 'row' },
         h('button', { className: placingCam ? 'primary' : '', onclick: () => { placingCam = !placingCam; drawCamPanel(); } },
           placingCam ? 'Klik nu op de veldtekening…' : '📍 Klik waar je stond'),
-        h('select', { onchange: e => hasCam() ? setCamera({ h: Number(e.target.value) }) : (clip.cam_h = Number(e.target.value)) },
-          heights.map(([v, l]) => h('option', { value: v, selected: Math.abs(hNow - v) < 0.05 }, l)),
-          heights.some(([v]) => Math.abs(hNow - v) < 0.05) ? null : h('option', { value: hNow, selected: true }, `${hNow} m`)),
         clip.gps_lat != null ? h('button', { 'data-gps': '1', title: 'Stuurt alleen de GPS-positie van deze video naar OpenStreetMap om het veld te vinden', onclick: async e => {
           e.target.disabled = true; e.target.textContent = 'Zoeken...'; gpsError = null;
           try {
@@ -359,6 +375,8 @@ export async function render(root, ctx) {
           } finally { drawCamPanel(); }
         } }, '📡 Zoek via GPS') : null,
         hasCam() ? h('button', { onclick: () => setCamera({ x: null, y: null, source: null }) }, 'Wissen') : null),
+      h('div', { style: { marginTop: '10px' } }, h('div', { className: 'small', style: { marginBottom: '4px' } }, 'Hoe hoog hield je de telefoon?'),
+        heightField(hNow, v => hasCam() ? setCamera({ h: v }) : (clip.cam_h = v), fit.cam ? fit.cam.h : null)),
       gpsError ? h('div', { className: 'hint warn-hint', style: { marginTop: '8px' } }, h('b', {}, 'Zoeken via GPS lukte niet. '), gpsError,
         h('div', {}, 'Klik dan zelf op "📍 Klik waar je stond" en daarna op de veldtekening.')) : null,
       clip.gps_lat != null && !hasCam() ? h('div', { className: 'small muted', style: { marginTop: '6px' } },
@@ -453,7 +471,7 @@ export async function render(root, ctx) {
       const cx = fit.cam ? fit.cam.x : clip.cam_x, cy = fit.cam ? fit.cam.y : clip.cam_y;
       if (fit.cam) {
         const a = fit.cam.yaw_deg * Math.PI / 180, half = fit.cam.hfov_deg * Math.PI / 360;
-        c.save(); c.fillStyle = 'rgba(10,132,255,.18)'; c.beginPath(); c.moveTo(...pv.toPx(cx, cy));
+        c.save(); c.fillStyle = fit.err >= 1 ? 'rgba(255,90,95,.16)' : 'rgba(10,132,255,.18)'; c.beginPath(); c.moveTo(...pv.toPx(cx, cy));
         c.lineTo(...pv.toPx(cx + 60 * Math.cos(a - half), cy + 60 * Math.sin(a - half)));
         c.lineTo(...pv.toPx(cx + 60 * Math.cos(a + half), cy + 60 * Math.sin(a + half))); c.closePath(); c.fill(); c.restore();
       }
@@ -464,12 +482,31 @@ export async function render(root, ctx) {
   }
 
   function drawPairs() {
-    pairList.replaceChildren(...pairs.map((p, i) => h('div', { className: 'list-item' },
-      h('b', {}, i + 1), h('span', { style: { flex: 1 } }, p.line ? `op lijn: ${p.name}` : p.line3 ? `op de lat: ${p.name}` : p.name,
+    const bad = suspect();
+    pairList.replaceChildren(...pairs.map((p, i) => h('div', { className: `list-item${i === bad ? ' suspect' : ''}`, title: i === bad ? 'Dit punt past niet bij de rest' : '' },
+      h('b', {}, i + 1), h('span', { style: { flex: 1 } }, p.line ? `op lijn: ${p.name}` : p.line3 ? `op de lat: ${p.name}` : label(p.name),
         offScreen(p.img) ? h('span', { className: 'muted small', title: 'Dit punt ligt nu buiten beeld (gezet op een ander moment). Het telt gewoon mee.' }, ' · buiten beeld') : null),
       h('button', { onclick: () => { pairs.splice(i, 1); redraw(); } }, '×'))));
+    fitWarn.replaceChildren(badFitHint() || '');
     if (!pairs.length) pairList.append(h('div', { className: 'muted small' },
-      pendingImg ? 'Klik nu het bijbehorende punt op het veld.' : pendingPitch ? `Klik nu ${pendingPitch.line || pendingPitch.line3 ? 'een plek op ' : ''}"${pendingPitch.name}" in het beeld.` : 'Nog geen punten.'));
+      pendingImg ? 'Klik nu het bijbehorende punt op het veld.' : pendingPitch ? `Klik nu ${pendingPitch.line || pendingPitch.line3 ? 'een plek op ' : ''}"${label(pendingPitch.name)}" in het beeld.` : 'Nog geen punten.'));
+  }
+
+  // Past één klik niet bij de rest? Dan trekt die de hele kalibratie scheef (ook de kijkrichting).
+  // De server zoekt de klik zonder welke de rest wél klopt. Index, of -1 (niets verdachts of onduidelijk).
+  function suspect() {
+    if (!fit.H || fit.err == null || fit.err < 1) return -1;
+    const i = fit.cam?.suspect;
+    return Number.isInteger(i) && i < pairs.length ? i : -1;
+  }
+  function badFitHint() {
+    if (!fit.H || fit.err == null || fit.err < 1) return null;
+    const i = suspect();
+    return h('div', { className: 'hint warn-hint', style: { margin: '8px 0' } },
+      h('b', {}, `De punten passen niet goed bij elkaar (gemiddeld ${fit.err.toFixed(1)} m ernaast). `),
+      i >= 0 ? `Waarschijnlijk klopt punt ${i + 1} (${label(pairs[i].name)}) niet: verkeerd gekoppeld, of net naast de plek geklikt. ` : '',
+      'Vaak gaat het om linker- en rechterpaal die verwisseld zijn. Verwijder dat punt (×) of sleep het naar de goede plek. ' +
+      'Zolang dit niet klopt, kloppen ook je kijkrichting op de tekening en de witte lijnen niet.');
   }
 
   // Wat moet je nu doen? (alleen in de wizard)
@@ -487,16 +524,21 @@ export async function render(root, ctx) {
     } else if (pendingImg) [step, text] = ['2', 'Klik nu hetzelfde punt (of dezelfde lijn) aan in de veldtekening rechts, of kies het in de lijst eronder.'];
     else if (pendingPitch) [step, text] = ['2', 'Klik nu dat punt in het beeld links aan.'];
     else if (!info.ok) [step, text] = ['2', `Klik in het beeld op iets wat je herkent: een hoek van het strafschopgebied, de middenstip, een doelpaal, of een plek op een veldlijn. ${info.hint ? '(' + info.hint + ')' : ''} Zoom in voor precisie.`];
-    else {
+    else if (fit.H && fit.err != null && fit.err >= 1) {
+      const i = suspect();
+      [step, text] = ['!', `De punten passen nog niet bij elkaar (${fit.err.toFixed(1)} m ernaast). ` +
+        (i >= 0 ? `Punt ${i + 1} (${label(pairs[i].name)}) is de vreemde eend: verwijder het (×) of sleep het naar de goede plek.` : 'Controleer de punten in de lijst: is er één verkeerd gekoppeld?')];
+    } else {
       [step, text] = ['3', 'Liggen de witte lijnen nu op het veld? Sla dan op. Nog niet goed? Sleep een punt of klik er een bij.'];
       extra = h('button', { className: 'primary', onclick: save }, '✓ Opslaan');
     }
     if (proposal?.failed && !proposing) text = `De app vond het veld niet zelf (${proposal.failed}). ` + text;
+    coach.classList.toggle('bad', step === '!');
     coach.replaceChildren(...[h('span', { className: 'coach-step' }, step), h('div', { style: { flex: 1 } }, text), extra].filter(Boolean));
   }
 
   function drawErr() {
-    drawCoach();
+    drawCoach(); drawPairs();
     const info = needInfo(), need = hasCam() ? 3 : 8;
     if (fit.H && fit.err != null) {
       errLabel.replaceChildren(h('span', { className: `badge ${fit.err < 1 ? 'ok' : 'err'}` }, `afwijking ${fit.err.toFixed(2)} m`));
@@ -568,7 +610,7 @@ export async function render(root, ctx) {
       } }, '×')));
     kfList.replaceChildren(...(rows.length ? rows : [h('div', { className: 'muted small' },
       'Nog geen ijkmomenten. Kalibreer er één; daarna stelt de app de rest van de video automatisch bij.')]), autoPanel(autos, manual),
-      trainPanel(manual));
+      trainPanel(manual) || '');
   }
 
   // Klopt alles? Dan mag de app van deze video leren (pas trainen als jij dat kiest, bij Trainen).
