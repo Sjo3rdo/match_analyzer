@@ -1,5 +1,6 @@
 // Begeleide route voor een nieuwe wedstrijd: één vraag per scherm, van uploaden tot spelers.
 import { api, h, toast, fmtTime, teamName, TEAM_COLORS } from '../util.js';
+import { PitchView, setPitchSize, pitchPolylines } from '../pitch.js';
 import * as calibrate from './calibrate.js';
 import { stationsPanel } from './stations.js';
 
@@ -190,43 +191,218 @@ export async function render(root, ctx) {
     await draw();
   }
 
-  // --- 5. veld vastleggen per standplaats -----------------------------------------------------
+  // --- 5. veld vastleggen per standplaats: a) waar stond je  b) plek verbeteren  c) veld intekenen  d) herkenningspunten
   async function stepCalibrate() {
     const data = await api(`/matches/${match.id}/stations`);
     const need = data.stations.filter(s => !s.anchor && !s.no_gps);
     const noGps = data.stations.filter(s => s.no_gps && !s.anchor);
     if (!need.length) {
-      add(...title('Het veld is vastgelegd', 'Voor elke standplaats heb je één video gekalibreerd. In de volgende stap doet de app de rest.'),
+      add(...title('Het veld is vastgelegd', 'Voor elke standplaats is één video gekalibreerd. In de volgende stap doet de app de rest.'),
         h('div', {}, data.stations.filter(s => s.anchor).map(s => h('div', { className: 'list-item' }, h('b', {}, s.label),
           h('span', { className: 'small muted' }, `${s.clips.length} video('s)`), h('span', { className: 'badge ok' }, `✓ via ${s.anchor.filename}`)))),
         noGps.length ? h('p', { className: 'small muted' }, `${noGps.reduce((n, s) => n + s.clips.length, 0)} video('s) zonder GPS-positie kon de app niet aan een plek koppelen; die kalibreer je later zelf bij "Kalibratie".`) : null);
       return navButtons();
     }
     const st = need[0], total = data.stations.filter(s => !s.no_gps).length, nr = total - need.length + 1;
-    add(...title(`Veld vastleggen: ${st.label}`,
-      `Standplaats ${nr} van ${total} · ${st.clips.length} video('s). Zie het als een fotograaf op een statief: leg je plek één keer vast met één video, dan doet de app de rest van deze standplaats zelf.`),
-      h('div', { className: 'small muted' }, 'De app zoekt de video met het meeste veld in beeld…'));
+    add(...title(`Veld vastleggen: ${st.label}`, `Standplaats ${nr} van ${total} · ${st.clips.length} video('s). De app zoekt de video met het meeste veld in beeld…`));
     navButtons({ next: 'Deze standplaats overslaan →', onNext: () => go(step + 1), note: 'Sla over als geen enkele video bruikbaar is' });
-    const best = await api(`/matches/${match.id}/stations/${st.id}/best`).catch(() => null);
-    if (!best) { add(h('p', {}, 'Geen bruikbare video gevonden.')); return; }
-    const other = h('select', { onchange: e => open(Number(e.target.value)) },
-      st.clips.map(c => h('option', { value: c.id, selected: c.id === best.id }, c.filename)));
-    const holder = h('div');
+    let clip = await api(`/matches/${match.id}/stations/${st.id}/best`).catch(() => null);
+    if (!clip) { add(h('p', {}, 'Geen bruikbare video gevonden.')); return; }
+
+    const SUBS = [['plek', 'Waar stond je?'], ['verbeter', 'Plek verbeteren'], ['voorstel', 'Veld intekenen'], ['punten', 'Herkenningspunten']];
+    let sub = clip.cam_x != null ? 'verbeter' : 'plek', osm = null, gpsMsg = null, subCleanup = () => {};
+    const body = h('div');
+    const subBar = h('div', { className: 'wizard-steps small' });
+    const pick = h('select', { onchange: async e => {
+      clip = (await reload()).clips.find(c => c.id === Number(e.target.value)) || clip; show(clip.cam_x != null ? 'verbeter' : 'plek');
+    } },
+      st.clips.map(c => h('option', { value: c.id, selected: c.id === clip.id }, c.filename)));
     card.replaceChildren(); add(...title(`Veld vastleggen: ${st.label}`,
-      `Standplaats ${nr} van ${total} · ${st.clips.length} video('s). Leg je plek één keer vast met deze video; de app doet de rest van deze standplaats daarna zelf.`),
-      h('div', { className: 'row small' }, 'Video:', other, h('span', { className: 'muted' }, '(de app koos die met het meeste veld in beeld; kies gerust een andere)')),
-      holder);
-    async function open(id) {
-      cleanupStep();
-      holder.replaceChildren();
-      const m = await reload();
-      const sub = await calibrate.render(holder, {
-        match: m, params: new URLSearchParams({ clip: id }), setParam() {}, refreshSteps() {},
-        wizard: { onSaved: () => { toast(`✓ ${st.label} vastgelegd`); go(step); } },
-      });
-      cleanupStep = typeof sub === 'function' ? sub : () => {};
+      `Standplaats ${nr} van ${total} · ${st.clips.length} video('s). Je legt je plek één keer vast met één video; de app doet de rest van deze standplaats daarna zelf.`),
+      h('div', { className: 'row small' }, 'Video:', pick, h('span', { className: 'muted' }, '(de app koos die met het meeste veld in beeld)')),
+      subBar, body);
+    cleanupStep = () => subCleanup();
+
+    const setCam = async data => { const c = await api(`/clips/${clip.id}/camera`, { method: 'PATCH', json: data }); Object.assign(clip, c); };
+
+    function show(s) {
+      subCleanup(); subCleanup = () => {};
+      sub = s;
+      const idx = SUBS.findIndex(x => x[0] === s);
+      subBar.replaceChildren(...SUBS.map(([k, label], i) => h('div', { className: `ws ${k === s ? 'cur' : ''} ${i < idx ? 'done' : ''}`,
+        onclick: () => (i <= idx || (i === 1 && clip.cam_x != null)) && show(k) },
+        h('span', { className: 'n' }, i < idx ? '✓' : 'abcd'[i]), label)));
+      body.replaceChildren();
+      ({ plek: subPlace, verbeter: subRefine, voorstel: subPropose, punten: subPoints })[s]();
     }
-    await open(best.id);
+
+    // een veldtekening waarop je je plek ziet (en aanklikt of versleept)
+    function pitchPicker({ onPick, drag = false, acc = null }) {
+      const canvas = h('canvas', { style: { cursor: 'crosshair', borderRadius: '10px', maxWidth: '760px' } });
+      const pv = new PitchView(canvas, { margin: 14 });
+      let dragging = false;
+      const draw = () => {
+        pv.resize(); pv.draw();
+        if (clip.cam_x != null) {
+          if (acc) {  // onzekerheid van de GPS-positie
+            const c = pv.ctx, [px, py] = pv.toPx(clip.cam_x, clip.cam_y);
+            c.beginPath(); c.arc(px, py, acc * pv.scale, 0, 2 * Math.PI); c.fillStyle = 'rgba(255,214,0,.18)'; c.fill();
+          }
+          pv.dot(clip.cam_x, clip.cam_y, '#ffd600', 9, '📍');
+        }
+      };
+      const at = e => { const r = canvas.getBoundingClientRect(); return pv.toM(e.clientX - r.left, e.clientY - r.top); };
+      canvas.addEventListener('mousedown', e => {
+        const [x, y] = at(e);
+        if (drag && clip.cam_x != null && Math.hypot(x - clip.cam_x, y - clip.cam_y) < 6) { dragging = true; return; }
+        clip.cam_x = x; clip.cam_y = y; draw(); onPick(x, y);
+      });
+      const move = e => { if (!dragging) return; const [x, y] = at(e); clip.cam_x = x; clip.cam_y = y; draw(); };
+      const up = () => { if (dragging) { dragging = false; onPick(clip.cam_x, clip.cam_y); } };
+      window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
+      subCleanup = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
+      requestAnimationFrame(draw);
+      return { el: canvas, draw };
+    }
+
+    // a) waar stond je?
+    function subPlace() {
+      const status = h('div');
+      const picker = pitchPicker({ onPick: async (x, y) => {
+        await setCam({ x, y, h: clip.cam_h || 1.6, source: 'hand' });
+        status.replaceChildren(h('div', { className: 'hint' }, '📍 Je plek staat op de tekening.'));
+        nextBtn.disabled = false;
+      } });
+      const nextBtn = h('button', { className: 'primary', disabled: clip.cam_x == null, onclick: () => show('verbeter') }, 'Volgende: plek verbeteren →');
+      const gpsBtn = clip.gps_lat != null ? h('button', { className: 'primary', onclick: async () => {
+        gpsBtn.disabled = true; gpsBtn.textContent = '📡 Zoeken in OpenStreetMap…';
+        status.replaceChildren(h('div', { className: 'small muted' }, 'De app stuurt alleen de GPS-positie van deze video naar OpenStreetMap en zoekt het voetbalveld dat daar ligt.'));
+        try {
+          const r = await fetch(`/api/clips/${clip.id}/camera/gps`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+          const j = await r.json();
+          if (!r.ok) throw new Error(j.detail || r.statusText);
+          Object.assign(clip, j.clip);
+          osm = [j.pitch_length, j.pitch_width];
+          gpsMsg = `Gevonden: een veld van ${j.pitch_length} × ${j.pitch_width} m. Je plek staat op de tekening (GPS ± ${Math.max(5, Math.round(clip.gps_acc || 8))} m; de gele cirkel).`;
+          status.replaceChildren(h('div', { className: 'hint' }, '✓ ', gpsMsg));
+          picker.draw(); nextBtn.disabled = false;
+        } catch (err) {
+          status.replaceChildren(h('div', { className: 'hint warn-hint' }, h('b', {}, 'Zoeken via GPS lukte niet. '), String(err.message || err),
+            h('div', { style: { marginTop: '4px' } }, 'Geen probleem: klik hieronder zelf op de tekening waar je stond.')));
+        } finally { gpsBtn.disabled = false; gpsBtn.textContent = '📡 Zoek mijn plek via GPS'; }
+      } }, '📡 Zoek mijn plek via GPS') : null;
+      body.append(
+        h('p', { className: 'lead' }, clip.gps_lat != null
+          ? 'Je video weet ongeveer waar je stond. Klik op de knop: de app zoekt het voetbalveld op en zet je plek op de tekening. Lukt dat niet, klik dan zelf op de tekening.'
+          : 'Deze video bevat geen GPS-positie. Klik op de tekening waar je ongeveer stond (naast het veld mag ook).'),
+        h('div', { className: 'row', style: { marginBottom: '10px' } }, gpsBtn), status, picker.el,
+        h('div', { className: 'row', style: { marginTop: '12px' } }, nextBtn));
+      if (clip.cam_x != null) status.replaceChildren(h('div', { className: 'hint' }, gpsMsg || '📍 Je plek staat al op de tekening.'));
+    }
+
+    // b) plek verbeteren en extra gegevens
+    function subRefine() {
+      const saved = h('span', { className: 'small muted' });
+      const picker = pitchPicker({ drag: true, acc: clip.cam_source === 'gps' ? Math.max(5, clip.gps_acc || 8) : null, onPick: async (x, y) => {
+        await setCam({ x, y, source: 'hand' }); saved.textContent = '✓ opgeslagen';
+      } });
+      const heights = [[1.6, 'Staand langs de lijn (± 1,6 m)'], [2.5, 'Op een bankje of heuvel (± 2,5 m)'], [4, 'Tribune (± 4 m)'], [6, 'Hoge tribune (± 6 m)']];
+      const hNow = clip.cam_h || 1.6;
+      const height = h('select', { onchange: async e => { await setCam({ h: Number(e.target.value) }); saved.textContent = '✓ opgeslagen'; } },
+        heights.map(([v, l]) => h('option', { value: v, selected: Math.abs(hNow - v) < 0.05 }, l)));
+      const len = h('input', { type: 'number', min: 50, max: 120, step: 0.5, value: match.pitch_length || 105, style: { width: '80px' } });
+      const wid = h('input', { type: 'number', min: 30, max: 90, step: 0.5, value: match.pitch_width || 68, style: { width: '80px' } });
+      const saveSize = async () => {
+        await api(`/matches/${match.id}`, { method: 'PATCH', json: { pitch_length: Number(len.value), pitch_width: Number(wid.value) } });
+        await reload(); setPitchSize(match.pitch_length, match.pitch_width); picker.draw(); saved.textContent = '✓ veldmaten opgeslagen';
+      };
+      len.addEventListener('change', saveSize); wid.addEventListener('change', saveSize);
+      const osmDiff = osm && (Math.abs(osm[0] - (match.pitch_length || 105)) > 1 || Math.abs(osm[1] - (match.pitch_width || 68)) > 1);
+      body.append(
+        h('p', { className: 'lead' }, 'Klopt de plek? Sleep de 📍 naar waar je echt stond: hoe preciezer, hoe beter de app straks het veld vindt. Vul ook in hoe hoog je stond en hoe groot het veld is.'),
+        picker.el,
+        h('div', { className: 'form-grid', style: { marginTop: '12px' } },
+          h('label', {}, 'Hoe hoog stond je?', height),
+          h('label', {}, 'Veldmaten (lengte × breedte, meter)', h('div', { className: 'row' }, len, '×', wid)),
+          osmDiff ? h('div', { className: 'hint' }, `OpenStreetMap zegt ${osm[0]} × ${osm[1]} m. `,
+            h('button', { className: 'small', onclick: () => { len.value = osm[0]; wid.value = osm[1]; saveSize(); } }, 'Overnemen')) : null),
+        h('div', { className: 'small muted' }, 'Amateurvelden zijn vaak kleiner dan 105 × 68 m. Weet je het niet, laat het dan zo.'),
+        h('div', { className: 'row', style: { marginTop: '12px' } },
+          h('button', { onclick: () => show('plek') }, '← Waar stond je'),
+          h('button', { className: 'primary', onclick: () => show('voorstel') }, 'Volgende: veld intekenen →'), saved));
+    }
+
+    // c) de app tekent het veld in; jij zegt of het klopt
+    function subPropose() {
+      const moments = [0.5, 0.25, 0.75, 0.1, 0.9].map(q => Math.round(q * (clip.duration || 10) * 10) / 10);
+      let k = 0, result = null;
+      const canvas = h('canvas', { style: { width: '100%', maxWidth: '960px', borderRadius: '10px', background: '#000' } });
+      const msg = h('div');
+      const buttons = h('div', { className: 'row', style: { marginTop: '10px' } });
+      body.append(h('p', { className: 'lead' }, 'De app zoekt nu zelf de witte lijnen en legt de veldtekening erop, vanaf jouw plek. Vallen de gele lijnen op de witte lijnen in het beeld?'),
+        msg, canvas, buttons);
+      const tryNext = async () => {
+        const t = moments[k % moments.length]; k++;
+        msg.replaceChildren(h('div', { className: 'small muted' }, `⏳ Zoeken op ${fmtTime(t)}… (± 10 seconden)`)); buttons.replaceChildren();
+        result = await api(`/clips/${clip.id}/propose?t=${t}`).catch(e => ({ ok: false, message: e.message }));
+        const frameT = result.t ?? t;
+        const img = new Image();
+        img.onload = () => {
+          const W = 960, s = W / (clip.width || img.width);
+          canvas.width = W; canvas.height = Math.round((clip.height || img.height) * s);
+          const c = canvas.getContext('2d'); c.drawImage(img, 0, 0, canvas.width, canvas.height);
+          if (result.ok) {
+            const H = result.H;
+            c.strokeStyle = '#ffd600'; c.lineWidth = 2.5;
+            for (const pl of pitchPolylines()) {
+              c.beginPath(); let pen = false;
+              for (const [X, Y] of pl) {
+                const w = H[2][0] * X + H[2][1] * Y + H[2][2];
+                if (w <= 1e-6) { pen = false; continue; }
+                const u = (H[0][0] * X + H[0][1] * Y + H[0][2]) / w * s, v = (H[1][0] * X + H[1][1] * Y + H[1][2]) / w * s;
+                if (Math.abs(u) > 4 * W || Math.abs(v) > 4 * W) { pen = false; continue; }
+                pen ? c.lineTo(u, v) : c.moveTo(u, v); pen = true;
+              }
+              c.stroke();
+            }
+          }
+        };
+        img.src = `/api/clips/${clip.id}/frame?t=${frameT}&w=960`;
+        if (result.ok) {
+          msg.replaceChildren(h('div', { className: 'hint' }, result.info?.ambiguous
+            ? 'Er zijn hier weinig lijnen te zien; kijk extra goed of het klopt.' : 'Gevonden. Liggen de gele lijnen op de witte lijnen?'));
+          buttons.replaceChildren(
+            h('button', { className: 'primary', onclick: async () => {
+              await api(`/clips/${clip.id}/keyframes`, { json: { t: result.t, points: result.points } });
+              toast(`✓ ${st.label} vastgelegd`); go(step);
+            } }, '✓ Ja, dit klopt'),
+            h('button', { onclick: tryNext }, '↻ Ander moment proberen'),
+            h('button', { onclick: () => show('punten') }, '✗ Klopt niet: zelf herkenningspunten aanklikken'));
+        } else {
+          msg.replaceChildren(h('div', { className: 'hint warn-hint' }, 'Op dit moment vond de app het veld niet zelf. ', result.message || ''));
+          buttons.replaceChildren(
+            k < moments.length ? h('button', { className: 'primary', onclick: tryNext }, '↻ Ander moment proberen') : null,
+            h('button', { className: k < moments.length ? '' : 'primary', onclick: () => show('punten') }, 'Zelf herkenningspunten aanklikken'),
+            h('button', { onclick: () => show('verbeter') }, '← Plek verbeteren'));
+        }
+      };
+      tryNext();
+    }
+
+    // d) zelf herkenningspunten aanklikken (met uitleg per klik)
+    async function subPoints() {
+      const holder = h('div');
+      body.append(h('p', { className: 'lead' }, 'Klik in het beeld op een punt dat je herkent (hoekvlag, hoek van het strafschopgebied, middenstip, doelpaal) en daarna op hetzelfde punt in de veldtekening. Omdat je plek bekend is, zijn 1 punt en 1 lijn vaak al genoeg. De balk hieronder zegt steeds wat de volgende klik is.'),
+        h('button', { className: 'small', onclick: () => show('voorstel') }, '← Toch het voorstel van de app'), holder);
+      const m = await reload();
+      const r = await calibrate.render(holder, {
+        match: m, params: new URLSearchParams({ clip: clip.id }), setParam() {}, refreshSteps() {},
+        wizard: { noAutoPropose: true, onSaved: () => { toast(`✓ ${st.label} vastgelegd`); go(step); } },
+      });
+      subCleanup = typeof r === 'function' ? r : () => {};
+    }
+
+    show(sub);
   }
 
   // --- 6. de rest automatisch, en controleren ----------------------------------------------------

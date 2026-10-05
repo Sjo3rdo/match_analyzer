@@ -37,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.15 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.16 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. Ziet de app er na een update vreemd uit, druk dan één keer op ⌥⌘R in Safari.
 
 Wil je ook rugnummers automatisch laten lezen? Installeer dan:
@@ -63,10 +63,19 @@ wedstrijdpagina een knop **Verder met stap …**.
    goede video. De app zet daarna alles op volgorde en rekent per video helft en minuut uit.
 4. **Analyseren.** Eén keuze (Nauwkeurig of Snel) en alles gaat in de wachtrij. Je hoeft niet te
    wachten: ga gerust door.
-5. **Veld vastleggen.** Per helft (je staat vaak per helft ergens anders) en per standplaats kies je
-   één video; de app stelt die met het meeste veld in beeld voor. Een balk bovenaan zegt steeds wat
-   de volgende klik is: eerst waar je stond (📡 GPS of aanklikken), dan doet de app een voorstel
-   ("Klopt dit?"), en anders klik je zelf een paar punten aan.
+5. **Veld vastleggen.** Per helft (je staat vaak per helft ergens anders) en per standplaats één
+   video; de app stelt die met het meeste veld in beeld voor. Dat gaat in vier stapjes:
+   - **a. Waar stond je?** Klik **📡 Zoek mijn plek via GPS**: de app zoekt het voetbalveld op in
+     OpenStreetMap en zet je plek als 📍 op een grote veldtekening, met een gele cirkel voor de
+     onnauwkeurigheid. Lukt dat niet, dan blijft de reden in beeld staan en klik je zelf op de
+     tekening waar je stond.
+   - **b. Plek verbeteren.** Sleep de 📍 naar waar je echt stond, kies hoe hoog je stond (staand,
+     bankje, tribune) en vul de veldmaten in (of neem die van OpenStreetMap over).
+   - **c. Veld intekenen.** De app zoekt zelf de witte lijnen en tekent de veldlijnen geel over het
+     beeld. Kloppen ze? **✓ Ja, dit klopt**. Zo niet: probeer een ander moment of ga naar d.
+   - **d. Herkenningspunten.** Klik zelf een punt aan dat je herkent (hoekvlag, middenstip, hoek van
+     het strafschopgebied) en daarna hetzelfde punt op de tekening. Een balk bovenaan zegt steeds
+     wat de volgende klik is; met je plek bekend zijn 1 punt en 1 lijn vaak al genoeg.
 6. **Controleren.** De app kalibreert de rest van de video's zelf (zie hieronder bij *Veel video's*)
    en jij loopt de plaatjes langs: ✓ of ✗.
 7. **Teams en spelers.** Klopt de kleur bij de juiste ploeg (anders omwisselen), en voer de spelers
@@ -161,7 +170,7 @@ minimap**, **Statistieken** en **Clips & delen**.
      de volgende ronde weer mee als puzzelstuk.
    - **Laat de app het veld zoeken.** Weet de app waar je stond, dan zoekt hij zelf de witte lijnen en
      legt hij de veldtekening erop, zonder klikken (**🤖 Zoek het veld automatisch**; gebeurt vanzelf
-     als er nog geen sleutelframe is). Zie het als rondkijken met een plattegrond in je hand tot alle
+     als er nog geen ijkmoment is). Zie het als rondkijken met een plattegrond in je hand tot alle
      lijnen kloppen. Controleer het voorstel: vallen de witte lijnen op het veld? Sleep punten bij waar
      nodig en klik **✓ Klopt**. Zegt de app **twijfel**, dan zijn er te weinig lijnen te zien (bijv.
      alleen de zijlijn); kies dan een moment met de 16-meter, middenlijn of cirkel in beeld. Klik je
@@ -175,19 +184,20 @@ minimap**, **Statistieken** en **Clips & delen**.
      oplossingen: het echte veld en zijn spiegelbeeld (vouw het veld dubbel op de middenlijn en die
      lijnen vallen op zichzelf). Een camera ziet het veld nooit in spiegelbeeld, dus de app kiest de
      echte kant. Kan dat niet, omdat de punten zelf alleen gespiegeld kloppen (bijv. het verkeerde
-     doel of de verkeerde zijlijn gekozen), dan zegt de app dat; bij het sleutelframe staat dan
+     doel of de verkeerde zijlijn gekozen), dan zegt de app dat; bij het ijkmoment staat dan
      **⚠ klopt niet**. Een oude kalibratie die zo gespiegeld was, zet de app vanzelf goed.
    - **Punten bewegen mee met het veld.** Zet je een punt en schuif je daarna naar een ander moment,
      dan schuift het punt mee met de camerabeweging. Zo kun je punten van verschillende momenten in één
-     sleutelframe combineren: bijv. de middenstip nu en de verre hoekvlag als de camera daar is.
+     ijkmoment combineren: bijv. de middenstip nu en de verre hoekvlag als de camera daar is.
      Punten die daardoor buiten beeld vallen, tellen gewoon mee.
-   - **Eén sleutelframe is genoeg.** Na de analyse volgt de app de camerabeweging, zoals een lijm die
+   - **Eén ijkmoment is genoeg.** (Een *ijkmoment* is een moment in de video waarop jij het veld
+     hebt vastgelegd, zoals je een weegschaal één keer ijkt.) Na de analyse volgt de app de camerabeweging, zoals een lijm die
      de plattegrond op het beeld vasthoudt. Elke seconde zoekt hij daarnaast de witte veldlijnen op
      en legt hij de plattegrond er opnieuw precies op (**🤖 Automatisch bijgesteld**). Lukt dat niet,
      bijvoorbeeld bij versleten lijnen, fel zonlicht of een korrelig beeld, dan kijkt de app nog een
      keer extra goed: hij middelt over een stukje lijn in plaats van per pixel, zoals je een vage
      stoeprand beter ziet als je een paar stappen ervan bekijkt. Dit start
-     vanzelf zodra je een sleutelframe opslaat, of na de analyse. De gele stippellijnen laten op elk
+     vanzelf zodra je een ijkmoment opslaat, of na de analyse. De gele stippellijnen laten op elk
      moment zien hoe goed het past. Onder **🤖 Automatisch bijgesteld** staat de lijst: klik op een tijd
      om te kijken, ✓ keurt goed, ✗ verwijdert, ✎ zet de punten klaar om zelf bij te stellen, of keur
      ze met **✓ Alles accepteren** in één keer goed. Goedgekeurde blijven staan als je opnieuw bijstelt.
@@ -196,7 +206,7 @@ minimap**, **Statistieken** en **Clips & delen**.
    - Kijk je lang langs alleen de zijlijn, zonder dwarslijnen zoals de 16-meterlijn, middenlijn,
      doellijn of cirkel? Dan is niet te zien hoeveel je gedraaid hebt. De app slaat die momenten over
      en overbrugt ze met de camerabeweging tot er weer dwarslijnen in beeld komen. Past het ergens
-     niet, zet daar dan zelf een extra sleutelframe.
+     niet, zet daar dan zelf een extra ijkmoment.
 
 3. **Spelers.** Toeschouwers, wissels langs de lijn en mensen vlak voor de camera worden zoveel
    mogelijk weggefilterd: wie meestal op dezelfde plek staat (gemeten tegen de achtergrond, dus

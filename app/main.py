@@ -787,7 +787,7 @@ def start_autocalib(clip_id: int):
     if c["status"] != "klaar":
         raise HTTPException(409, "Analyseer de video eerst")
     if not store.one("SELECT 1 AS x FROM keyframes WHERE clip_id = ? AND auto = 0", (clip_id,)):
-        raise HTTPException(400, "Kalibreer eerst één sleutelframe met de hand")
+        raise HTTPException(400, "Leg eerst zelf één ijkmoment vast (Kalibratie)")
     worker.submit_autocalib(clip_id)
     return _get("clips", clip_id)
 

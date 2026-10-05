@@ -599,7 +599,7 @@ class Worker:
 
         def progress(frac, n):
             self.store.run("UPDATE clips SET calib_status = 'bezig', calib_progress = ?, calib_message = ? WHERE id = ?",
-                           (frac, f"{n} automatische sleutelframes", clip_id))
+                           (frac, f"{n} automatische ijkmomenten", clip_id))
         try:
             progress(0.0, 0)
             res = run_autocalib(self.store, clip_id, progress=progress)
