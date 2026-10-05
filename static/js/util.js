@@ -39,7 +39,7 @@ export function toast(msg, error = false) {
   el.style.background = error ? 'var(--danger)' : '';
   el.classList.add('show');
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.remove('show'), 3500);
+  toastTimer = setTimeout(() => el.classList.remove('show'), error ? 9000 : 3500);  // fouten langer in beeld
 }
 
 export function fmtTime(s) {

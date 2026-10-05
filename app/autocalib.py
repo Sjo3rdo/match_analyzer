@@ -699,14 +699,14 @@ def run_autocalib(store, clip_id: int, every_s: float = 1.0, progress=None) -> d
             continue
         accepted[int(np.argmin(np.abs(t - kf["t"])))] = K
     if not accepted:
-        raise ValueError("Kalibreer eerst één sleutelframe met de hand")
+        raise ValueError("Leg eerst zelf één ijkmoment vast (Kalibratie)")
     for kf in kept:
         try:
             accepted.setdefault(int(np.argmin(np.abs(t - kf["t"]))), fit_calibration(kf["points"])[0])
         except ValueError:
             continue
     if not accepted:
-        raise ValueError("Kalibreer eerst één sleutelframe met de hand")
+        raise ValueError("Leg eerst zelf één ijkmoment vast (Kalibratie)")
     f_full = _focal(clip, manual)
     # Bekende camerapositie (aangeklikt of via GPS)? Dan bijstellen met het cameramodel: vaste plek,
     # zoom en scheefstand vastgehouden aan het handmatige sleutelframe.
