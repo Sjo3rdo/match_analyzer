@@ -36,7 +36,8 @@ OVERPASS_URLS = (
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
 )
-USER_AGENT = "match-analyzer/0.13 (lokale voetbalanalyse; https://github.com/sjo3rdo/match_analyzer)"
+USER_AGENT = "match-analyzer/0.17 (lokale voetbalanalyse; https://github.com/sjo3rdo/match_analyzer)"
+OSM_API = "https://api.openstreetmap.org/api/0.6/map"
 
 
 class OsmError(RuntimeError):
@@ -53,32 +54,74 @@ def _ssl_context() -> ssl.SSLContext:
         return ssl.create_default_context()
 
 
-def _overpass(query: str, timeout: int) -> dict:
+def _problem(e: Exception) -> tuple[str, str]:
+    """Wat ging er mis, in een paar woorden: ('http', code), ('ssl', ...) of ('net', ...)."""
+    if isinstance(e, urllib.error.HTTPError):  # server bereikt, maar hij wil nu niet (druk, geweigerd)
+        return ("http", str(e.code))
+    reason = getattr(e, "reason", e)
+    return ("ssl" if isinstance(reason, ssl.SSLError) or "CERTIFICATE" in str(e) else "net", str(reason))
+
+
+def _get(url: str, data: bytes | None, timeout: float) -> bytes:
+    headers = {"User-Agent": USER_AGENT}
+    if data is not None:
+        headers["Content-Type"] = "application/x-www-form-urlencoded"
+    req = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout, context=_ssl_context()) as resp:
+        return resp.read()
+
+
+def _overpass(query: str, timeout: int, problems: list) -> dict | None:
+    """Alle Overpass-servers tegelijk vragen; de eerste die antwoordt wint (niet drie keer wachten)."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
     body = urllib.parse.urlencode({"data": query}).encode()
-    ctx = _ssl_context()
-    problems = []
-    for url in OVERPASS_URLS:
-        req = urllib.request.Request(url, data=body, headers={
-            "User-Agent": USER_AGENT, "Accept": "application/json",
-            "Content-Type": "application/x-www-form-urlencoded"})
-        try:
-            with urllib.request.urlopen(req, timeout=timeout + 5, context=ctx) as resp:
-                return json.load(resp)
-        except urllib.error.HTTPError as e:  # server bereikt, maar hij wil nu niet (druk, geweigerd)
-            problems.append(("http", e.code))
-        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
-            reason = getattr(e, "reason", e)
-            problems.append(("ssl" if isinstance(reason, ssl.SSLError) or "CERTIFICATE" in str(e) else "net", str(reason)))
-        logging.warning("OpenStreetMap via %s mislukt: %s", url, problems[-1])
+    pool = ThreadPoolExecutor(max_workers=len(OVERPASS_URLS))
+    futs = {pool.submit(_get, url, body, timeout + 5): url for url in OVERPASS_URLS}
+    try:
+        for fut in as_completed(futs):
+            try:
+                return json.loads(fut.result())
+            except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+                problems.append(_problem(e))
+                logging.warning("OpenStreetMap via %s mislukt: %s", futs[fut], problems[-1])
+    finally:
+        pool.shutdown(wait=False, cancel_futures=True)
+    return None
+
+
+def _osm_api_pitches(bbox: tuple[float, float, float, float], timeout: float) -> list[list[tuple[float, float]]]:
+    """Terugval: het kaartje van een klein vierkant direct van openstreetmap.org (een andere dienst dan
+    de zoekservers). bbox = (zuid, west, noord, oost)."""
+    import xml.etree.ElementTree as ET
+    s_, w_, n_, e_ = bbox
+    raw = _get(f"{OSM_API}?bbox={w_:.6f},{s_:.6f},{e_:.6f},{n_:.6f}", None, timeout)
+    root = ET.fromstring(raw)
+    nodes = {nd.get("id"): (float(nd.get("lat")), float(nd.get("lon"))) for nd in root.iter("node")}
+    out = []
+    for way in root.iter("way"):
+        tags = {t.get("k"): t.get("v") for t in way.iter("tag")}
+        if tags.get("leisure") != "pitch":
+            continue
+        if "soccer" not in tags.get("sport", "soccer"):
+            continue
+        pts = [nodes[r.get("ref")] for r in way.iter("nd") if r.get("ref") in nodes]
+        if len(pts) >= 4:
+            out.append(pts)
+    return out
+
+
+def _osm_error(problems: list) -> OsmError:
     kinds = {k for k, _ in problems}
-    if "http" in kinds:
-        codes = sorted({str(c) for k, c in problems if k == "http"})
-        raise OsmError(f"de OpenStreetMap-servers zijn nu druk of weigeren het verzoek (code {', '.join(codes)}); "
-                       "probeer het over een paar minuten opnieuw")
     if kinds == {"ssl"}:
-        raise OsmError("de beveiligde verbinding wordt niet vertrouwd (certificaten van Python ontbreken). "
-                       "Installeer ze met: .venv/bin/pip install --upgrade certifi")
-    raise OsmError(f"geen verbinding met internet? ({problems[0][1] if problems else 'onbekend'})")
+        return OsmError("de beveiligde verbinding wordt niet vertrouwd (certificaten van Python ontbreken). "
+                        "Installeer ze met: .venv/bin/pip install --upgrade certifi")
+    if "http" in kinds or any("timed out" in d.lower() for _, d in problems):
+        codes = sorted({d for k, d in problems if k == "http"})
+        return OsmError("de OpenStreetMap-servers zijn nu te druk en antwoorden niet op tijd"
+                        + (f" (code {', '.join(codes)})" if codes else "") + "; probeer het over een paar minuten opnieuw")
+    return OsmError(f"geen verbinding met internet? ({problems[0][1] if problems else 'onbekend'})")
+
+
 _ISO6709 = re.compile(r"([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)([+-]\d+(?:\.\d+)?)?")
 
 
@@ -146,17 +189,49 @@ def to_local(lat: float, lon: float, lat0: float, lon0: float) -> np.ndarray:
                      math.radians(lat - lat0) * r])
 
 
-def query_pitches(lat: float, lon: float, radius: int = 300, timeout: int = 25) -> list[list[tuple[float, float]]]:
-    """Omtrek (lat, lon) van voetbalvelden in de buurt, uit OpenStreetMap (Overpass)."""
+def query_pitches(lat: float, lon: float, radius: int = 300, timeout: int = 20) -> list[list[tuple[float, float]]]:
+    """Omtrek (lat, lon) van voetbalvelden in de buurt, uit OpenStreetMap.
+
+    Eerst de zoekservers (Overpass, allemaal tegelijk), met een lichte vraag: alleen velden in een
+    klein vierkant rond je plek. Antwoordt geen enkele op tijd, dan het kaartje van dat vierkant
+    rechtstreeks van openstreetmap.org. Wat gevonden is, onthoudt de app voor die plek."""
+    from . import config
+    key = f"{lat:.4f},{lon:.4f},{radius}"
+    cache_path = config.DATA_DIR / "osm_cache.json"
+    try:
+        cache = json.loads(cache_path.read_text())
+    except (OSError, ValueError):
+        cache = {}
+    if key in cache:
+        return [[tuple(p) for p in poly] for poly in cache[key]]
+    dlat = radius / 111_320
+    dlon = radius / (111_320 * max(0.2, math.cos(math.radians(lat))))
+    bbox = (lat - dlat, lon - dlon, lat + dlat, lon + dlon)  # zuid, west, noord, oost
+    problems: list = []
     q = (f"[out:json][timeout:{timeout}];"
-         f"(way(around:{radius},{lat},{lon})[\"leisure\"=\"pitch\"];);out geom;")
-    data = _overpass(q, timeout)
-    out = []
-    for el in data.get("elements", []):
-        sport = (el.get("tags") or {}).get("sport", "soccer")
-        geom = el.get("geometry") or []
-        if "soccer" in sport and len(geom) >= 4:
-            out.append([(g["lat"], g["lon"]) for g in geom])
+         f"way[\"leisure\"=\"pitch\"]({bbox[0]:.6f},{bbox[1]:.6f},{bbox[2]:.6f},{bbox[3]:.6f});out geom;")
+    data = _overpass(q, timeout, problems)
+    if data is not None:
+        out = []
+        for el in data.get("elements", []):
+            sport = (el.get("tags") or {}).get("sport", "soccer")
+            geom = el.get("geometry") or []
+            if "soccer" in sport and len(geom) >= 4:
+                out.append([(g["lat"], g["lon"]) for g in geom])
+    else:
+        try:
+            out = _osm_api_pitches(bbox, timeout + 10)
+        except Exception as e:  # noqa: BLE001
+            problems.append(_problem(e) if isinstance(e, OSError) else ("net", str(e)))
+            logging.warning("OpenStreetMap via %s mislukt: %s", OSM_API, problems[-1])
+            raise _osm_error(problems) from e
+    if out:
+        cache[key] = out
+        try:
+            cache_path.parent.mkdir(parents=True, exist_ok=True)
+            cache_path.write_text(json.dumps(cache))
+        except OSError:
+            pass
     return out
 
 

@@ -49,36 +49,53 @@ def test_x_runs_left_to_right_as_seen_from_camera():
     assert pos["x"] > 52.5 + 25 and pos["y"] > 68
 
 
-def test_overpass_falls_back_to_other_server_and_explains_problems(monkeypatch):
-    """Is de eerste OpenStreetMap-server druk (429) of de verbinding niet te vertrouwen, dan de volgende;
-    lukt het nergens, dan een melding in gewone woorden."""
+def test_osm_search_falls_back_and_explains_problems(monkeypatch, tmp_path):
+    """De zoekservers worden tegelijk gevraagd; antwoordt er geen, dan het kaartje rechtstreeks van
+    openstreetmap.org; lukt ook dat niet, dan een melding in gewone woorden. Gevonden velden worden onthouden."""
     import io
     import json
     import ssl
     import urllib.error
     import pytest
+    from app import config
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     calls = []
     answer = {"elements": [{"tags": {"sport": "soccer"},
                             "geometry": [{"lat": 53.0, "lon": 6.0}, {"lat": 53.001, "lon": 6.0},
                                          {"lat": 53.001, "lon": 6.0015}, {"lat": 53.0, "lon": 6.0015}]}]}
+    osm_xml = (b'<osm><node id="1" lat="53.0" lon="6.0"/><node id="2" lat="53.001" lon="6.0"/>'
+               b'<node id="3" lat="53.001" lon="6.0015"/><node id="4" lat="53.0" lon="6.0015"/>'
+               b'<way id="9"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><nd ref="1"/>'
+               b'<tag k="leisure" v="pitch"/><tag k="sport" v="soccer"/></way>'
+               b'<way id="10"><nd ref="1"/><nd ref="2"/><nd ref="3"/><nd ref="4"/><tag k="building" v="yes"/></way></osm>')
 
     def fake(mode):
         def urlopen(req, timeout=None, context=None):
             calls.append(req.full_url)
             assert context is not None and req.get_header("User-agent").startswith("match-analyzer")
-            if mode == "busy-then-ok" and len(calls) == 1:
-                raise urllib.error.HTTPError(req.full_url, 429, "Too Many Requests", {}, None)
+            osm_api = req.full_url.startswith(geo.OSM_API)
+            if mode == "one-busy" and req.full_url == geo.OVERPASS_URLS[0]:
+                raise urllib.error.HTTPError(req.full_url, 504, "Gateway Timeout", {}, None)
+            if mode == "overpass-down" and not osm_api:
+                raise urllib.error.URLError(TimeoutError("The read operation timed out"))
+            if mode == "overpass-down":
+                return io.BytesIO(osm_xml)
             if mode == "ssl":
                 raise urllib.error.URLError(ssl.SSLCertVerificationError("CERTIFICATE_VERIFY_FAILED"))
             if mode == "busy":
                 raise urllib.error.HTTPError(req.full_url, 504, "Gateway Timeout", {}, None)
             return io.BytesIO(json.dumps(answer).encode())
         return urlopen
-    monkeypatch.setattr(geo.urllib.request, "urlopen", fake("busy-then-ok"))
-    assert len(geo.query_pitches(53.0, 6.0)) == 1 and calls[1] == geo.OVERPASS_URLS[1]
+    monkeypatch.setattr(geo.urllib.request, "urlopen", fake("one-busy"))
+    assert len(geo.query_pitches(53.0, 6.0)) == 1  # een andere zoekserver antwoordde
+    calls.clear()
+    assert len(geo.query_pitches(53.0, 6.0)) == 1 and calls == []  # onthouden: niet opnieuw zoeken
+    monkeypatch.setattr(geo.urllib.request, "urlopen", fake("overpass-down"))
+    polys = geo.query_pitches(53.2, 6.2)
+    assert len(polys) == 1 and len(polys[0]) == 5 and any(c.startswith(geo.OSM_API) for c in calls)
     monkeypatch.setattr(geo.urllib.request, "urlopen", fake("ssl"))
     with pytest.raises(geo.OsmError, match="certificaten"):
-        geo.query_pitches(53.0, 6.0)
+        geo.query_pitches(53.3, 6.3)
     monkeypatch.setattr(geo.urllib.request, "urlopen", fake("busy"))
     with pytest.raises(geo.OsmError, match="druk"):
-        geo.query_pitches(53.0, 6.0)
+        geo.query_pitches(53.4, 6.4)
