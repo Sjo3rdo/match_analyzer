@@ -4,6 +4,7 @@
 import { api, h, fmtTime, toast } from '../util.js';
 import { PitchView, pitchPolylines } from '../pitch.js';
 import { apply, inv, fitCalibration, calibrationInfo, calibrationError } from '../homography.js';
+import { stationsPanel } from './stations.js';
 
 export async function render(root, ctx) {
   const { match } = ctx;
@@ -41,6 +42,10 @@ export async function render(root, ctx) {
   const predToggle = h('label', { className: 'small' }, h('input', { type: 'checkbox', checked: true,
     onchange: e => { showPred = e.target.checked; drawFrame(); } }), ' toon voorspelling (geel)');
 
+  const stations = stationsPanel(match, id => {
+    clip = clips.find(c => c.id === id) || clip; clipSel.value = clip.id; ctx.setParam('clip', clip.id); loadClip();
+    clipSel.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  });
   root.append(
     h('div', { className: 'hint' },
       'Tip: stel eerst in waar je stond (📍 hieronder, of via GPS als je video dat heeft). Dan is 1 punt + 1 lijn al genoeg. ' +
@@ -52,6 +57,7 @@ export async function render(root, ctx) {
       'De witte lijnen laten zien of het klopt. Eén sleutelframe is genoeg: daarna legt de app het veld elke seconde zelf ' +
       'opnieuw op de witte lijnen (🤖 hieronder). De gele lijnen tonen op elk moment hoe goed het past; past het ergens niet, ' +
       'zet daar dan een extra sleutelframe.'),
+    stations.el,
     h('div', { className: 'row', style: { marginBottom: '12px' } }, 'Video:', clipSel),
     h('div', { className: 'grid2' },
       h('div', { className: 'panel' },
@@ -630,7 +636,7 @@ export async function render(root, ctx) {
     t = res.t;
     toast(`Sleutelframe opgeslagen (afwijking ${res.error_m} m)${clip.status === 'klaar' ? ' – de app stelt nu de rest van de video automatisch bij' : ''}`);
     setTimeout(refreshClip, 500);
-    await loadKeyframes();
+    await loadKeyframes(); stations.refresh();
     predicted = clip.status === 'klaar' ? await api(`/clips/${clip.id}/predict?t=${t}`) : [];
     drawFrame();
   }
@@ -704,6 +710,7 @@ export async function render(root, ctx) {
   const onResize = () => { pv.resize(); drawPitch(); };
   window.addEventListener('resize', onResize);
   return () => {
+    stations.cleanup();
     clearTimeout(calibTimer); window.removeEventListener('mouseup', onUp); window.removeEventListener('mousemove', onPan);
     window.removeEventListener('resize', onResize);
   };

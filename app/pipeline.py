@@ -532,6 +532,12 @@ class Worker:
             self.store.run("UPDATE clips SET calib_status = 'wachtrij', calib_progress = 0, "
                            "calib_message = 'In de wachtrij' WHERE id = ?", (clip_id,))
 
+    def submit_stations(self, match_id: int) -> None:
+        """Alle video's zonder eigen kalibratie automatisch kalibreren vanaf hun standplaats."""
+        if self._put(("stations", match_id)):
+            self.store.run("UPDATE matches SET stations_status = 'wachtrij', stations_progress = 0, "
+                           "stations_message = 'In de wachtrij' WHERE id = ?", (match_id,))
+
     def _run(self) -> None:
         while True:
             kind, clip_id = self.q.get()
@@ -560,8 +566,32 @@ class Worker:
                 except Exception:  # noqa: BLE001
                     log.error("Teams indelen clip %s mislukt\n%s", clip_id, traceback.format_exc())
                 analytics.invalidate(geometry=False)
+            elif kind == "stations":
+                self._stations(clip_id)
             else:
                 self._autocalib(clip_id)
+
+    def _stations(self, match_id: int) -> None:
+        from . import stations
+
+        def progress(frac, msg):
+            self.store.run("UPDATE matches SET stations_status = 'bezig', stations_progress = ?, stations_message = ? "
+                           "WHERE id = ?", (frac, msg, match_id))
+        try:
+            progress(0.0, "Beginnen")
+            r = stations.run(self.store, match_id, progress=progress, worker=self)
+            parts = [f"{r['ok']} voorgesteld"]
+            if r["mislukt"]:
+                parts.append(f"{r['mislukt']} niet gelukt")
+            if r["geen_anker"]:
+                parts.append(f"{r['geen_anker']} wachten op één eigen kalibratie van hun standplaats")
+            if r["niet_geanalyseerd"]:
+                parts.append(f"{r['niet_geanalyseerd']} nog niet geanalyseerd")
+            self.store.run("UPDATE matches SET stations_status = 'klaar', stations_progress = 1, stations_message = ? "
+                           "WHERE id = ?", (", ".join(parts), match_id))
+        except Exception as e:  # noqa: BLE001
+            log.error("Standplaatsen wedstrijd %s mislukt\n%s", match_id, traceback.format_exc())
+            self.store.run("UPDATE matches SET stations_status = 'fout', stations_message = ? WHERE id = ?", (str(e), match_id))
 
     def _autocalib(self, clip_id: int) -> None:
         from . import analytics

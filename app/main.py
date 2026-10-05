@@ -526,12 +526,13 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
         raise HTTPException(400, str(e)) from e
     data["t"] = _snap_time(clip_id, float(data["t"]))
     if data.get("id"):
-        store.run("UPDATE keyframes SET t = ?, points = ? WHERE id = ? AND clip_id = ?",
-                  (data["t"], json.dumps(points), data["id"], clip_id))
+        store.run("UPDATE keyframes SET t = ?, points = ?, source = NULL WHERE id = ? AND clip_id = ?",
+                  (data["t"], json.dumps(points), data["id"], clip_id))  # zelf bijgesteld: nu jouw eigen kalibratie
         kid = data["id"]
     else:
         kid = store.run("INSERT INTO keyframes (clip_id, t, points) VALUES (?,?,?)",
                         (clip_id, data["t"], json.dumps(points)))
+    store.run("UPDATE clips SET calib_review = NULL WHERE id = ?", (clip_id,))
     analytics.invalidate(clip_id=clip_id)
     _start_autocalib(clip)
     return {"id": kid, "t": data["t"], "error_m": round(err, 2)}
@@ -1227,6 +1228,93 @@ def order_apply(match_id: int, data: dict = Body(...)):
     n = order.apply(store, match_id, data.get("items") or [])
     analytics.invalidate()
     return {"updated": n}
+
+
+# --- standplaatsen: één keer kalibreren per plek, de rest automatisch ------------------------
+
+@app.get("/api/matches/{match_id}/stations")
+def get_stations(match_id: int):
+    from . import stations
+    m = _get("matches", match_id)
+    out = []
+    for st in stations.group(store, match_id):
+        a = stations.anchor(store, st)
+        clips = []
+        for c in st["clips"]:
+            kfs = store.keyframes(c["id"])
+            own = [k for k in kfs if not k.get("auto") and k.get("source") != "standplaats"]
+            prop = [k for k in kfs if k.get("source") == "standplaats"]
+            state = ("eigen" if own else c.get("calib_review") if prop or c.get("calib_review") in ("mislukt", "afgekeurd")
+                     else "niet_geanalyseerd" if c["status"] != "klaar" else "open")
+            clips.append({"id": c["id"], "filename": c["filename"], "status": c["status"], "state": state,
+                          "method": c.get("calib_method"), "gps_acc": c.get("gps_acc"), "rec_start": c.get("rec_start"),
+                          "period": c.get("period"), "start_minute": c.get("start_minute"),
+                          "has_calibration": bool(own or prop), "calib_status": c.get("calib_status")})
+        cam = None
+        if a is not None:
+            p = a[1]
+            cam = {"clip_id": a[0]["id"], "filename": a[0]["filename"], "x": round(float(p[0]), 1), "y": round(float(p[1]), 1),
+                   "h": round(float(p[2]), 1)}
+        out.append({"id": st["id"], "label": st["label"], "acc_m": st["acc_m"], "precision_m": st["precision_m"],
+                    "no_gps": st["no_gps"], "anchor": cam, "clips": clips})
+    return {"stations": out, "job": {"status": m.get("stations_status"), "progress": m.get("stations_progress"),
+                                     "message": m.get("stations_message")}}
+
+
+@app.post("/api/matches/{match_id}/stations/run")
+def run_stations(match_id: int):
+    _get("matches", match_id)
+    if worker is None:
+        raise HTTPException(503, "De achtergrondverwerking draait niet")
+    worker.submit_stations(match_id)
+    return {"ok": True}
+
+
+@app.post("/api/clips/{clip_id}/calib-review")
+def calib_review(clip_id: int, data: dict = Body(...)):
+    """Een automatisch voorgestelde kalibratie goedkeuren of afkeuren."""
+    c = _get("clips", clip_id)
+    status = data.get("status")
+    if status not in ("goedgekeurd", "afgekeurd"):
+        raise HTTPException(400, "Kies goedgekeurd of afgekeurd")
+    if status == "afgekeurd":
+        store.run("DELETE FROM keyframes WHERE clip_id = ? AND (source = 'standplaats' OR (auto = 1 AND COALESCE(accepted, 0) = 0))",
+                  (clip_id,))
+    store.run("UPDATE clips SET calib_review = ? WHERE id = ?", (status, clip_id))
+    analytics.invalidate(clip_id=c["id"])
+    return {"ok": True}
+
+
+@app.get("/api/clips/{clip_id}/calib-thumb")
+def calib_thumb(clip_id: int, w: int = 480):
+    """Klein beeld met de veldlijnen erover zoals de kalibratie ze legt (om snel te controleren)."""
+    from .autocalib import pitch_samples
+    from .calibration import fit_keyframe
+    c = _get("clips", clip_id)
+    kfs = [k for k in store.keyframes(clip_id) if not k.get("auto")]
+    if not kfs:
+        raise HTTPException(404, "Nog niet gekalibreerd")
+    kf = kfs[0]
+    try:
+        K, _ = fit_keyframe(kf, camera=camera_prior(c))
+        frame, _ = read_frame(Path(c["path"]), kf["t"])
+    except ValueError as e:
+        raise HTTPException(400, str(e)) from e
+    geom = pitch.of_match(_get("matches", c["match_id"]))
+    G = np.linalg.inv(K)
+    pts = pitch_samples(step=0.2, geom=geom)
+    hom = np.hstack([pts, np.ones((len(pts), 1))]) @ G.T
+    front = hom[:, 2] > 1e-9
+    img = hom[front, :2] / hom[front, 2:3]
+    Hh, W = frame.shape[:2]
+    inside = (img[:, 0] >= 0) & (img[:, 0] < W) & (img[:, 1] >= 0) & (img[:, 1] < Hh)
+    r = max(2, W // 640)
+    for x, y in img[inside].astype(int):
+        cv2.circle(frame, (int(x), int(y)), r, (0, 214, 255), -1, cv2.LINE_AA)
+    s = min(1.0, w / W)
+    small = cv2.resize(frame, None, fx=s, fy=s, interpolation=cv2.INTER_AREA)
+    ok, buf = cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 80])
+    return Response(buf.tobytes(), media_type="image/jpeg", headers={"Cache-Control": "no-store"})
 
 
 @app.post("/api/clips/{clip_id}/split")
