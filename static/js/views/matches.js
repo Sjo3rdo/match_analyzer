@@ -11,7 +11,7 @@ export async function render(root) {
   const create = async () => {
     if (!name.value.trim()) return name.focus();
     const m = await api('/matches', { json: { name: name.value, date: date.value, team0_name: t0.value, team1_name: t1.value } });
-    location.hash = `#/match/${m.id}/clips`;
+    location.hash = `#/match/${m.id}/start`;
   };
   name.addEventListener('keydown', e => e.key === 'Enter' && create());
   root.append(
@@ -25,7 +25,7 @@ export async function render(root) {
         h('button', { className: 'primary', onclick: create }, '+ Aanmaken')),
       squads.length ? h('div', { className: 'small muted', style: { marginTop: '8px' } },
         `Kies bij een team een opgeslagen naam (${squads.map(q => q.name).join(', ')}): dan staan de spelers er meteen in.`) : null),
-    list.length ? h('div', { className: 'match-grid' }, list.map(m => h('div', { className: 'match-card', onclick: () => location.hash = `#/match/${m.id}/clips` },
+    list.length ? h('div', { className: 'match-grid' }, list.map(m => h('div', { className: 'match-card', onclick: () => location.hash = m.wizard_step && !m.wizard_done ? `#/match/${m.id}/start?stap=${m.wizard_step}` : `#/match/${m.id}/clips` },
       h('div', { className: 'eyebrow' }, m.date || 'Zonder datum'),
       h('div', { className: 'teams' }, m.name),
       h('div', { className: 'meta' }, h('span', {}, m.score ? `${m.team0_name} ${m.score[0]} – ${m.score[1]} ${m.team1_name}` : `${m.team0_name} – ${m.team1_name}`), h('span', {}, `🎬 ${m.n_clips} video${m.n_clips === 1 ? '' : "'s"}`)),

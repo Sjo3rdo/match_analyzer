@@ -37,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.14 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.15 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. Ziet de app er na een update vreemd uit, druk dan één keer op ⌥⌘R in Safari.
 
 Wil je ook rugnummers automatisch laten lezen? Installeer dan:
@@ -47,6 +47,33 @@ Wil je ook rugnummers automatisch laten lezen? Installeer dan:
 ```
 
 Alle gegevens (video's, analyses, exports) staan in de map `data/`.
+
+## Begeleide route voor een nieuwe wedstrijd
+
+Een nieuwe wedstrijd begint in een wizard: één vraag per scherm, met bovenaan de stappen en onderaan
+**Volgende**. Stop je halverwege (bijvoorbeeld omdat de analyse even duurt), dan staat er op de
+wedstrijdpagina een knop **Verder met stap …**.
+
+1. **Wedstrijd.** Naam, datum, teams en speeltijd per helft (30, 35, 40 of 45 minuten). Kies je bij
+   een team een opgeslagen selectie, dan staan de spelers er meteen in.
+2. **Video's.** Sleep al je video's in één keer in het vak, in willekeurige volgorde.
+3. **Tijdlijn.** "Hoe laat was de aftrap?" (de app vult de opnametijd van je eerste video alvast in).
+   Daarna laat de app de video zien waarvan hij denkt dat de 2e helft begint (na het langste gat
+   waarin niets is gefilmd). Klopt het? Dan vul je in hoe laat de 2e helft begon; anders kies je de
+   goede video. De app zet daarna alles op volgorde en rekent per video helft en minuut uit.
+4. **Analyseren.** Eén keuze (Nauwkeurig of Snel) en alles gaat in de wachtrij. Je hoeft niet te
+   wachten: ga gerust door.
+5. **Veld vastleggen.** Per helft (je staat vaak per helft ergens anders) en per standplaats kies je
+   één video; de app stelt die met het meeste veld in beeld voor. Een balk bovenaan zegt steeds wat
+   de volgende klik is: eerst waar je stond (📡 GPS of aanklikken), dan doet de app een voorstel
+   ("Klopt dit?"), en anders klik je zelf een paar punten aan.
+6. **Controleren.** De app kalibreert de rest van de video's zelf (zie hieronder bij *Veel video's*)
+   en jij loopt de plaatjes langs: ✓ of ✗.
+7. **Teams en spelers.** Klopt de kleur bij de juiste ploeg (anders omwisselen), en voer de spelers
+   in of neem een vaste selectie over. Bij **✓ Klaar** koppelt de app wat hij via rugnummers kan;
+   de rest doe je bij **Spelers**.
+
+Alles wat de wizard doet, kun je daarna ook nog op de tabbladen hieronder bijstellen.
 
 ## Werkwijze, stap voor stap
 

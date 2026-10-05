@@ -9,6 +9,7 @@ import * as video from './views/video.js';
 import * as stats from './views/stats.js';
 import * as moments from './views/moments.js';
 import * as training from './views/training.js';
+import * as wizard from './views/wizard.js';
 
 // Tabbladen; de eerste drie zijn de stappen die je doorloopt (met een ✓ als ze klaar zijn en een
 // geel bolletje bij de volgende stap), de rest is om te bekijken.
@@ -86,13 +87,23 @@ async function route() {
       history.replaceState(null, '', `#/match/${matchId}/${tab}?${p}`);
     },
   };
-  const mod = (TABS.find(t => t[0] === tab) || TABS[0])[2];
+  const mod = tab === 'start' ? wizard : (TABS.find(t => t[0] === tab) || TABS[0])[2];
   view.append(h('div', { className: 'match-head' },
     h('div', {}, h('div', { className: 'eyebrow' }, 'Wedstrijd'), h('h1', {}, match.name)),
     h('span', { className: 'vs' }, h('span', { className: 'dot', style: { background: TEAM_COLORS[0] } }), match.team0_name,
       match.score ? h('b', { className: 'score', title: 'Stand uit de bevestigde goals' }, ` ${match.score[0]} – ${match.score[1]} `) : ' – ',
       h('span', { className: 'dot', style: { background: TEAM_COLORS[1], marginLeft: '4px' } }), match.team1_name),
     match.date ? h('span', { className: 'date' }, match.date) : null));
+  // Begeleide route nog niet afgemaakt? Dan bovenaan een knop om verder te gaan waar je was.
+  if (tab !== 'start' && match.wizard_step && !match.wizard_done) {
+    view.append(h('div', { className: 'hint continue-banner' },
+      h('span', {}, h('b', {}, 'Begeleide route: '), `je was bij stap ${match.wizard_step} van 7.`),
+      h('div', { className: 'row' },
+        h('a', { className: 'btn primary', href: `#/match/${matchId}/start?stap=${match.wizard_step}` }, `Verder met stap ${match.wizard_step} →`),
+        h('button', { className: 'small', onclick: async () => {
+          await api(`/matches/${matchId}`, { method: 'PATCH', json: { wizard_done: 1 } }); route();
+        } }, 'Niet meer tonen'))));
+  }
   cleanup = await mod.render(view, ctx);
 }
 

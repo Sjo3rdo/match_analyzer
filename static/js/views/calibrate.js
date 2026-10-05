@@ -20,6 +20,7 @@ export async function render(root, ctx) {
   let fit = { H: null, err: null, cam: null, msg: '' }, placingCam = false, osmSize = null;
   let frameT = null;            // tijd van het beeld dat nu getoond wordt
   let proposal = null;          // automatisch voorstel dat nog bevestigd moet worden
+  let proposing = false;        // de app zoekt nu het veld
   let goalSide = null;          // geklikt bij dit doel: kies voet/bovenkant/lat
   let pendingZoom = 1;          // zoomfactor bij het aanklikken van het beeldpunt dat nog wacht
   let view = { s: 1, ox: 0, oy: 0 }, pan = null;  // inzoomen op het beeld
@@ -42,12 +43,16 @@ export async function render(root, ctx) {
   const predToggle = h('label', { className: 'small' }, h('input', { type: 'checkbox', checked: true,
     onchange: e => { showPred = e.target.checked; drawFrame(); } }), ' toon voorspelling (geel)');
 
-  const stations = stationsPanel(match, id => {
+  // Begeleide modus (wizard): één video, een coach die zegt wat de volgende klik is, geen overzicht/uitleg.
+  const wiz = ctx.wizard || null;
+  const coach = h('div', { className: 'coach' });
+  const stations = wiz ? { el: null, refresh() {}, cleanup() {} } : stationsPanel(match, id => {
     clip = clips.find(c => c.id === id) || clip; clipSel.value = clip.id; ctx.setParam('clip', clip.id); loadClip();
     clipSel.scrollIntoView({ behavior: 'smooth', block: 'start' });
   });
-  root.append(
-    h('div', { className: 'hint' },
+  root.append(...[
+    wiz ? coach : null,
+    wiz ? null : h('div', { className: 'hint' },
       'Tip: stel eerst in waar je stond (📍 hieronder, of via GPS als je video dat heeft). Dan is 1 punt + 1 lijn al genoeg. ' +
       'Zo werkt het: 1) Kies met de schuif een moment. 2) Klik in het beeld op een herkenbaar punt (hoek strafschopgebied, ' +
       'strafschopstip, doelpaal, hoekvlag...) of op een plek ergens op een veldlijn. 3) Klik hetzelfde punt of dezelfde lijn aan ' +
@@ -58,7 +63,7 @@ export async function render(root, ctx) {
       'opnieuw op de witte lijnen (🤖 hieronder). De gele lijnen tonen op elk moment hoe goed het past; past het ergens niet, ' +
       'zet daar dan een extra sleutelframe.'),
     stations.el,
-    h('div', { className: 'row', style: { marginBottom: '12px' } }, 'Video:', clipSel),
+    wiz ? null : h('div', { className: 'row', style: { marginBottom: '12px' } }, 'Video:', clipSel),
     h('div', { className: 'grid2' },
       h('div', { className: 'panel' },
         h('div', { className: 'row', style: { marginBottom: '8px' } }, slider, timeLabel),
@@ -83,7 +88,7 @@ export async function render(root, ctx) {
             saveBtn,
             h('button', { onclick: usePredicted }, 'Voorspelde punten overnemen'),
             h('button', { onclick: () => { pairs = []; editingId = null; proposal = null; redraw(); } }, 'Leegmaken'))),
-        h('div', { className: 'panel' }, h('h3', {}, 'Sleutelframes van deze video'), kfList))));
+        wiz ? null : h('div', { className: 'panel' }, h('h3', {}, 'Sleutelframes van deze video'), kfList)))].filter(Boolean));
 
   const pv = new PitchView(pitchCanvas, { margin: 14 });  // ruimte om je eigen plek naast het veld aan te klikken
   requestAnimationFrame(() => { pv.resize(); drawPitch(); });
@@ -321,6 +326,7 @@ export async function render(root, ctx) {
   }
 
   function drawCamPanel() {
+    drawCoach();
     const heights = [[1.6, 'staand langs de lijn (1,6 m)'], [2.5, 'op een bankje/heuvel (2,5 m)'], [4, 'tribune (4 m)'], [6, 'hoge tribune (6 m)']];
     const hNow = clip.cam_h || 1.6;
     camPanel.replaceChildren(...[
@@ -338,7 +344,7 @@ export async function render(root, ctx) {
         h('select', { onchange: e => hasCam() ? setCamera({ h: Number(e.target.value) }) : (clip.cam_h = Number(e.target.value)) },
           heights.map(([v, l]) => h('option', { value: v, selected: Math.abs(hNow - v) < 0.05 }, l)),
           heights.some(([v]) => Math.abs(hNow - v) < 0.05) ? null : h('option', { value: hNow, selected: true }, `${hNow} m`)),
-        clip.gps_lat != null ? h('button', { title: 'Stuurt alleen de GPS-positie van deze video naar OpenStreetMap om het veld te vinden', onclick: async e => {
+        clip.gps_lat != null ? h('button', { 'data-gps': '1', title: 'Stuurt alleen de GPS-positie van deze video naar OpenStreetMap om het veld te vinden', onclick: async e => {
           e.target.disabled = true; e.target.textContent = 'Zoeken...';
           try {
             const r = await api(`/clips/${clip.id}/camera/gps`, { method: 'POST' });
@@ -462,7 +468,31 @@ export async function render(root, ctx) {
       pendingImg ? 'Klik nu het bijbehorende punt op het veld.' : pendingPitch ? `Klik nu ${pendingPitch.line || pendingPitch.line3 ? 'een plek op ' : ''}"${pendingPitch.name}" in het beeld.` : 'Nog geen punten.'));
   }
 
+  // Wat moet je nu doen? (alleen in de wizard)
+  function drawCoach() {
+    if (!wiz) return;
+    const info = needInfo();
+    let step, text, extra = null;
+    if (proposing) [step, text] = ['…', 'De app zoekt het veld vanaf jouw plek. Even geduld (± 10 seconden).'];
+    else if (!hasCam() && !pairs.length) {
+      [step, text] = ['1', 'Waar stond je? Klik hieronder op 📡 Zoek via GPS, of klik op de veldtekening rechts op de plek waar je stond.'];
+      extra = clip.gps_lat != null ? h('button', { className: 'primary', onclick: () => document.querySelector('[data-gps]')?.click() }, '📡 Zoek mijn plek via GPS') : null;
+    } else if (proposal && !proposal.failed) {
+      [step, text] = ['2', 'Voorstel van de app. Vallen de witte lijnen op de witte lijnen in het beeld? Dan klopt het. Zo niet, sleep een punt naar de goede plek.'];
+      extra = h('button', { className: 'primary', onclick: save }, '✓ Klopt – opslaan');
+    } else if (pendingImg) [step, text] = ['2', 'Klik nu hetzelfde punt (of dezelfde lijn) aan in de veldtekening rechts, of kies het in de lijst eronder.'];
+    else if (pendingPitch) [step, text] = ['2', 'Klik nu dat punt in het beeld links aan.'];
+    else if (!info.ok) [step, text] = ['2', `Klik in het beeld op iets wat je herkent: een hoek van het strafschopgebied, de middenstip, een doelpaal, of een plek op een veldlijn. ${info.hint ? '(' + info.hint + ')' : ''} Zoom in voor precisie.`];
+    else {
+      [step, text] = ['3', 'Liggen de witte lijnen nu op het veld? Sla dan op. Nog niet goed? Sleep een punt of klik er een bij.'];
+      extra = h('button', { className: 'primary', onclick: save }, '✓ Opslaan');
+    }
+    if (proposal?.failed && !proposing) text = `De app vond het veld niet zelf (${proposal.failed}). ` + text;
+    coach.replaceChildren(h('span', { className: 'coach-step' }, step), h('div', { style: { flex: 1 } }, text), extra);
+  }
+
   function drawErr() {
+    drawCoach();
     const info = needInfo(), need = hasCam() ? 3 : 8;
     if (fit.H && fit.err != null) {
       errLabel.replaceChildren(h('span', { className: `badge ${fit.err < 1 ? 'ok' : 'err'}` }, `afwijking ${fit.err.toFixed(2)} m`));
@@ -637,6 +667,7 @@ export async function render(root, ctx) {
     toast(`Sleutelframe opgeslagen (afwijking ${res.error_m} m)${clip.status === 'klaar' ? ' – de app stelt nu de rest van de video automatisch bij' : ''}`);
     setTimeout(refreshClip, 500);
     await loadKeyframes(); stations.refresh();
+    if (wiz) return wiz.onSaved(clip);
     predicted = clip.status === 'klaar' ? await api(`/clips/${clip.id}/predict?t=${t}`) : [];
     drawFrame();
   }
@@ -669,7 +700,6 @@ export async function render(root, ctx) {
   }
 
   // --- automatisch voorstel ---------------------------------------------------------------
-  let proposing = false;
   async function runPropose() {
     if (proposing) return;
     if (!hasCam()) return toast('Stel eerst in waar je stond (📍 of via GPS); dan kan de app het veld zelf zoeken');
@@ -685,6 +715,7 @@ export async function render(root, ctx) {
   }
 
   function drawProposal() {
+    drawCoach();
     saveBtn.textContent = proposal && !proposal.failed ? '✓ Klopt – opslaan' : 'Sleutelframe opslaan';
     const manualCount = keyframes.filter(k => !k.auto).length;
     const btn = h('button', { disabled: proposing || !hasCam(), title: hasCam() ? '' : 'Stel eerst in waar je stond',

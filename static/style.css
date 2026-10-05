@@ -221,3 +221,28 @@ td.rust { color: var(--warn); padding: 6px 10px; }
 .stations .thumb-empty { display: flex; align-items: center; justify-content: center; color: var(--muted); font-size: 12px; }
 .stations .thumb.voorstel { border-color: var(--warn); }
 .stations .thumb.mislukt, .stations .thumb.afgekeurd { border-color: var(--danger); }
+/* begeleide route (wizard) */
+.coach { display: flex; align-items: center; gap: 14px; padding: 14px 16px; margin-bottom: 12px; border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 12%, var(--panel)); border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+  font-size: 15px; position: sticky; top: 70px; z-index: 5; }
+.coach-step { display: inline-flex; width: 30px; height: 30px; border-radius: 50%; align-items: center; justify-content: center;
+  background: var(--accent); color: var(--accent-ink); font-weight: 700; flex: none; }
+.wizard-steps { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 16px; }
+.wizard-steps .ws { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-radius: 999px; font-size: 13px;
+  color: var(--muted); border: 1px solid var(--border); background: var(--panel); cursor: pointer; }
+.wizard-steps .ws.done { color: var(--text); }
+.wizard-steps .ws.done .n { background: var(--accent); color: var(--accent-ink); }
+.wizard-steps .ws.cur { border-color: var(--accent); color: var(--text); font-weight: 600; }
+.wizard-steps .ws .n { display: inline-flex; width: 20px; height: 20px; border-radius: 50%; align-items: center; justify-content: center;
+  background: var(--raise); font-size: 12px; }
+.wizard-card { max-width: 920px; }
+.wizard-card h2 { margin-top: 0; }
+.wizard-card .lead { font-size: 15px; color: var(--text); margin: 4px 0 14px; }
+.wizard-nav { display: flex; justify-content: space-between; align-items: center; margin-top: 18px; gap: 10px; }
+.dropzone { border: 2px dashed var(--border-2); border-radius: 14px; padding: 34px; text-align: center; cursor: pointer; color: var(--muted); }
+.dropzone.over { border-color: var(--accent); color: var(--text); background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.wizard-thumb { width: 100%; max-width: 640px; border-radius: 10px; display: block; background: #000; aspect-ratio: 16 / 9; object-fit: cover; }
+.continue-banner { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px 18px; }
+.form-grid label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
+.form-grid label input, .form-grid label select { color: var(--text); }

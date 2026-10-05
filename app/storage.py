@@ -211,7 +211,7 @@ class Store:
                 self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
         # Standplaatsen: zoom van de camera (brandpuntsafstand in pixels) en de controle van een
         # automatisch voorgestelde kalibratie ('voorstel', 'goedgekeurd', 'afgekeurd', 'mislukt')
-        for col, typ in (("cam_f", "REAL"), ("calib_review", "TEXT"), ("calib_method", "TEXT")):
+        for col, typ in (("cam_f", "REAL"), ("calib_review", "TEXT"), ("calib_method", "TEXT"), ("line_score", "REAL")):
             if col not in cols:
                 self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
         if "source" not in {r["name"] for r in self.all("PRAGMA table_info(keyframes)")}:
@@ -233,7 +233,8 @@ class Store:
         for col, typ in (("pitch_length", "REAL"), ("pitch_width", "REAL"), ("team0_color", "TEXT"),
                          ("team1_color", "TEXT"), ("team0_squad", "INTEGER"), ("team1_squad", "INTEGER"),
                          ("half_length", "INTEGER"), ("stations_status", "TEXT"), ("stations_progress", "REAL"),
-                         ("stations_message", "TEXT")):
+                         ("stations_message", "TEXT"), ("kickoff", "REAL"), ("kickoff2", "REAL"),
+                         ("wizard_step", "INTEGER"), ("wizard_done", "INTEGER")):
             if col not in mcols:
                 self.run(f"ALTER TABLE matches ADD COLUMN {col} {typ}")
         # Oude 'markers' (één tijdstip) worden clips (begin + eind), zoals in een video-editor

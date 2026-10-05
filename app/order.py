@@ -75,3 +75,53 @@ def apply(store: Store, match_id: int, items: list[dict]) -> int:
                   (int(it["order_idx"]), int(it["period"]), float(it["start_minute"]), c["id"]))
         n += 1
     return n
+
+
+# --- begeleid: aftrap en begin van de 2e helft ------------------------------------------------
+
+def timeline_guess(store: Store, match_id: int) -> dict:
+    """Voorstel voor de wizard: de video's op opnametijd, de vermoedelijke eerste video van de 2e helft
+    (na het grootste gat) en de aftraptijden (begin van de eerste video van elke helft)."""
+    clips = store.all("SELECT * FROM clips WHERE match_id = ? ORDER BY order_idx, id", (match_id,))
+    timed = sorted([(ensure_rec_start(store, c), c) for c in clips if ensure_rec_start(store, c) is not None],
+                   key=lambda x: x[0])
+    second, gap = None, 0.0
+    for k in range(1, len(timed)):
+        g = timed[k][0] - (timed[k - 1][0] + float(timed[k - 1][1].get("duration") or 0))
+        if g >= 5 * 60 and g > gap:
+            second, gap = timed[k][1]["id"], g
+    match = store.one("SELECT * FROM matches WHERE id = ?", (match_id,)) or {}
+    return {"clips": [{"id": c["id"], "filename": c["filename"], "rec_start": ts, "duration": c.get("duration")}
+                      for ts, c in timed],
+            "n_without_time": len(clips) - len(timed),
+            "second_clip": second, "gap_minutes": round(gap / 60) if second else None,
+            "kickoff": match.get("kickoff") or (timed[0][0] if timed else None),
+            "kickoff2": match.get("kickoff2") or (next(ts for ts, c in timed if c["id"] == second) if second else None),
+            "half_length": int(match.get("half_length") or 45)}
+
+
+def apply_timeline(store: Store, match_id: int, kickoff: float | None, second_clip: int | None,
+                   kickoff2: float | None, half_length: int) -> int:
+    """Volgorde op opnametijd; helft 1 vóór de gekozen video, helft 2 vanaf die video; minuten vanaf de
+    aftrap van die helft. Video's zonder opnametijd houden hun helft en minuut (en komen achteraan)."""
+    clips = store.all("SELECT * FROM clips WHERE match_id = ? ORDER BY order_idx, id", (match_id,))
+    timed = sorted([c for c in clips if c.get("rec_start") is not None], key=lambda c: c["rec_start"])
+    rest = [c for c in clips if c.get("rec_start") is None]
+    t2 = next((c["rec_start"] for c in timed if c["id"] == second_clip), None)
+    n = 0
+    for k, c in enumerate(timed):
+        second = t2 is not None and c["rec_start"] >= t2
+        if second:
+            ref = kickoff2 if kickoff2 is not None else t2
+            minute = half_length + max(0.0, (c["rec_start"] - ref) / 60)
+        else:
+            ref = kickoff if kickoff is not None else timed[0]["rec_start"]
+            minute = max(0.0, (c["rec_start"] - ref) / 60)
+        store.run("UPDATE clips SET order_idx = ?, period = ?, start_minute = ? WHERE id = ?",
+                  (k, 2 if second else 1, round(minute, 1), c["id"]))
+        n += 1
+    for j, c in enumerate(rest):
+        store.run("UPDATE clips SET order_idx = ? WHERE id = ?", (len(timed) + j, c["id"]))
+    store.run("UPDATE matches SET kickoff = ?, kickoff2 = ?, half_length = ? WHERE id = ?",
+              (kickoff, kickoff2 if second_clip else None, half_length, match_id))
+    return n
