@@ -79,7 +79,7 @@ def fit_keyframe(kf: dict, camera: dict | None = None) -> tuple[np.ndarray, floa
     (een raster uit de lijnen-fit), daar is geen cameramodel of verfijning voor nodig."""
     if kf.get("auto"):
         return _fit_free(kf["points"], refine=False)
-    return fit_calibration(kf["points"], camera=camera)
+    return fit_calibration(kf["points"], camera=kf_camera(camera, kf))
 
 
 def fit_calibration(points: list[dict], camera: dict | None = None) -> tuple[np.ndarray, float]:
@@ -467,7 +467,11 @@ def default_focal(width: int) -> float:
     return (width / 2) / math.tan(math.radians(DEFAULT_HFOV_DEG / 2))
 
 
-def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma0: float = 3.0) -> np.ndarray:
+YAW_SIGMA = math.radians(15)  # zo precies wijst iemand zijn kijkrichting op de tekening aan
+
+
+def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma0: float = 3.0,
+                   data_only: bool = False) -> np.ndarray:
     P = camera_projection(p, size)
     H = normalize_h(P[:, [0, 1, 3]])
     Hinv_T = np.linalg.inv(H).T
@@ -499,7 +503,11 @@ def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma0:
             l = Hinv_T @ _line_coeffs(q["line"])
             n = math.hypot(l[0], l[1]) or 1.0
             r.append((l[0] * x + l[1] * y + l[2]) / n / sigma_px)
+    if data_only:
+        return np.array(r)
     sp = max(3.0, float(prior.get("sigma_pos", 5.0)))
+    if prior.get("yaw") is not None:  # zelf aangegeven kijkrichting (kompas)
+        r.append(((p[3] - prior["yaw"] + math.pi) % (2 * math.pi) - math.pi) / YAW_SIGMA)
     r += [(p[0] - prior["x"]) / sp, (p[1] - prior["y"]) / sp, (p[2] - prior["h"]) / 0.5,
           p[5] / math.radians(4), (p[6] - math.log(prior["f"])) / math.log(2.2)]
     return np.array(r)
@@ -521,7 +529,7 @@ def suspect_point(params, points: list[dict], prior: dict, size) -> int | None:
             spread.append(np.inf)
             continue
         q = _lm(lambda v: _cam_residuals(v, rest, prior, size), p)  # noqa: B023
-        r = _cam_residuals(q, rest, prior, size, sigma0=1.0)[:-5]
+        r = _cam_residuals(q, rest, prior, size, sigma0=1.0, data_only=True)
         spread.append(float(np.sqrt(np.mean(r ** 2))))
     order = np.argsort(spread)
     best, second = spread[order[0]], spread[order[1]]
@@ -570,7 +578,8 @@ def fit_camera(points: list[dict], prior: dict) -> tuple[np.ndarray, dict]:
     fun = lambda p: _cam_residuals(p, points, prior, size)  # noqa: E731
     # Startwaarden: alle kijkrichtingen proberen, de beste verfijnen
     starts = []
-    for yaw in np.radians(np.arange(0, 360, 10)):
+    yaws = np.arange(0, 360, 10) if prior.get("yaw") is None else math.degrees(prior["yaw"]) + np.arange(-40, 41, 10)
+    for yaw in np.radians(yaws):
         for tilt in np.radians([2, 5, 10, 18, 30, 45]):
             p0 = np.array([prior["x"], prior["y"], prior["h"], yaw, tilt, 0.0, math.log(prior["f"])])
             starts.append((float(np.sum(fun(p0) ** 2)), p0))
@@ -654,11 +663,21 @@ def camera_from_homography(K: np.ndarray, size: tuple[int, int]) -> tuple[np.nda
     return p, err
 
 
-def camera_prior(clip: dict) -> dict | None:
-    """Voorkennis over de camera uit de clipgegevens (positie, hoogte), of None."""
+def camera_prior(clip: dict, with_yaw: bool = False) -> dict | None:
+    """Voorkennis over de camera uit de clipgegevens (positie, hoogte), of None.
+    with_yaw: ook de kijkrichting die je nu (voor het ijkmoment in de maak) hebt aangegeven."""
     if clip.get("cam_x") is None or clip.get("cam_y") is None or not clip.get("width"):
         return None
     sigma = 3.0 if clip.get("cam_source") in ("hand", "standplaats") else max(4.0, float(clip.get("gps_acc") or 8.0) + 3.0)
     return {"x": float(clip["cam_x"]), "y": float(clip["cam_y"]), "h": float(clip.get("cam_h") or 1.6),
             "f": float(clip.get("cam_f") or default_focal(int(clip["width"]))), "sigma_pos": sigma,
-            "width": int(clip["width"]), "height": int(clip["height"])}
+            "width": int(clip["width"]), "height": int(clip["height"]),
+            "yaw": None if not with_yaw or clip.get("cam_yaw") is None else math.radians(float(clip["cam_yaw"]))}
+
+
+def kf_camera(prior: dict | None, kf: dict) -> dict | None:
+    """Voorkennis voor één ijkmoment: met de kijkrichting die je op dat moment aangaf (als die er is).
+    De kijkrichting hoort bij een moment, niet bij de video: tijdens het filmen zwenk je."""
+    if prior is None or kf.get("yaw") is None:
+        return prior
+    return {**prior, "yaw": math.radians(float(kf["yaw"]))}

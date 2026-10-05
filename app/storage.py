@@ -211,11 +211,14 @@ class Store:
                 self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
         # Standplaatsen: zoom van de camera (brandpuntsafstand in pixels) en de controle van een
         # automatisch voorgestelde kalibratie ('voorstel', 'goedgekeurd', 'afgekeurd', 'mislukt')
-        for col, typ in (("cam_f", "REAL"), ("calib_review", "TEXT"), ("calib_method", "TEXT"), ("line_score", "REAL")):
+        for col, typ in (("cam_f", "REAL"), ("cam_yaw", "REAL"), ("calib_review", "TEXT"), ("calib_method", "TEXT"), ("line_score", "REAL")):
             if col not in cols:
                 self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
-        if "source" not in {r["name"] for r in self.all("PRAGMA table_info(keyframes)")}:
+        kcols = {r["name"] for r in self.all("PRAGMA table_info(keyframes)")}
+        if "source" not in kcols:
             self.run("ALTER TABLE keyframes ADD COLUMN source TEXT")  # 'standplaats' = voorgesteld door de app
+        if "yaw" not in kcols:  # zelf aangegeven kijkrichting op dat moment (graden op de tekening)
+            self.run("ALTER TABLE keyframes ADD COLUMN yaw REAL")
         # Begin van de opname (seconden sinds 1970), uit de metadata van de video
         if "rec_start" not in cols:
             self.run("ALTER TABLE clips ADD COLUMN rec_start REAL")

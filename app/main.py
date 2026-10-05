@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import analytics, clips as clip_export, config, geo, learning, pitch, render, shots, teams, training
-from .calibration import camera_prior, fit_calibration, fit_camera, normalize_h, suspect_point
+from .calibration import camera_prior, fit_calibration, fit_camera, normalize_h, suspect_point, kf_camera
 from .pipeline import Worker, probe, read_frame
 from .storage import Store, clip_dir
 
@@ -506,7 +506,7 @@ def get_keyframes(clip_id: int):
             kf["error_m"] = None
         else:
             try:
-                kf["error_m"] = round(fit_calibration(kf["points"], camera=prior)[1], 2)
+                kf["error_m"] = round(fit_calibration(kf["points"], camera=kf_camera(prior, kf))[1], 2)
             except ValueError as e:  # bijv. een oude kalibratie die gespiegeld bleek: zeg wat er mis is
                 kf["error_m"], kf["problem"] = None, str(e)
         out.append(kf)
@@ -525,19 +525,21 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
     """data: {t, points: [{name, img: [x, y], pitch: [x, y]}], id?}"""
     clip = _get("clips", clip_id)
     points = data.get("points") or []
+    yaw = clip.get("cam_yaw")  # aangegeven kijkrichting: hoort bij dít moment
     try:
-        _, err = fit_calibration(points, camera=camera_prior(clip))
+        _, err = fit_calibration(points, camera=camera_prior(clip, with_yaw=True))
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
     data["t"] = _snap_time(clip_id, float(data["t"]))
     if data.get("id"):
-        store.run("UPDATE keyframes SET t = ?, points = ?, source = NULL WHERE id = ? AND clip_id = ?",
-                  (data["t"], json.dumps(points), data["id"], clip_id))  # zelf bijgesteld: nu jouw eigen kalibratie
+        store.run("UPDATE keyframes SET t = ?, points = ?, source = NULL, yaw = COALESCE(?, yaw) WHERE id = ? AND clip_id = ?",
+                  (data["t"], json.dumps(points), yaw, data["id"], clip_id))  # zelf bijgesteld: nu jouw eigen kalibratie
         kid = data["id"]
     else:
-        kid = store.run("INSERT INTO keyframes (clip_id, t, points) VALUES (?,?,?)",
-                        (clip_id, data["t"], json.dumps(points)))
-    store.run("UPDATE clips SET calib_review = NULL WHERE id = ?", (clip_id,))
+        kid = store.run("INSERT INTO keyframes (clip_id, t, points, yaw) VALUES (?,?,?,?)",
+                        (clip_id, data["t"], json.dumps(points), yaw))
+    # opgeslagen bij het ijkmoment; voor een volgend moment (na zwenken) geef je hem zo nodig opnieuw aan
+    store.run("UPDATE clips SET calib_review = NULL, cam_yaw = NULL WHERE id = ?", (clip_id,))
     analytics.invalidate(clip_id=clip_id)
     _start_autocalib(clip)
     return {"id": kid, "t": data["t"], "error_m": round(err, 2)}
@@ -548,7 +550,7 @@ def calibrate_preview(clip_id: int, data: dict = Body(...)):
     """Live voorbeeld tijdens het klikken (met cameramodel): veld -> beeld, fout en camera."""
     clip = _get("clips", clip_id)
     points = data.get("points") or []
-    prior = camera_prior(clip)
+    prior = camera_prior(clip, with_yaw=True)
     try:
         K, err = fit_calibration(points, camera=prior)
     except (ValueError, np.linalg.LinAlgError) as e:
@@ -586,12 +588,15 @@ def _goal_outlines(params, size, geom) -> list[list[list[float]]]:
 
 @app.patch("/api/clips/{clip_id}/camera")
 def set_camera(clip_id: int, data: dict = Body(...)):
-    """Waar stond de camera? data: {x, y, h, source: 'hand'|'gps'} (x/y null = wissen)."""
+    """Waar stond de camera? data: {x, y, h, yaw, source: 'hand'|'gps'} (x/y null = wissen).
+    yaw: kijkrichting in graden op de veldtekening (0 = naar rechts, 90 = naar onderen), null = onbekend."""
     _get("clips", clip_id)
     fields = {}
-    for k in ("x", "y", "h"):
+    for k in ("x", "y", "h", "yaw"):
         if k in data:
             fields[f"cam_{k}"] = None if data[k] is None else float(data[k])
+    if "x" in data and data["x"] is None:
+        fields["cam_yaw"] = None  # plek gewist: kijkrichting ook
     if "source" in data:
         fields["cam_source"] = data["source"]
     if fields:
@@ -639,7 +644,7 @@ def propose_calibration(clip_id: int, t: float = 0.0):
     from .autocalib import propose
 
     clip = _get("clips", clip_id)
-    prior = camera_prior(clip)
+    prior = camera_prior(clip, with_yaw=True)
     if prior is None:
         raise HTTPException(400, "Stel eerst in waar je stond (📍 of via GPS); dan kan de app het veld zelf zoeken")
     t = _snap_time(clip_id, t)

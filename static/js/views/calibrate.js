@@ -19,6 +19,7 @@ export async function render(root, ctx) {
   let t = 0, img = null, pairs = [], pendingImg = null, pendingPitch = null, editingId = null;
   let predicted = [], showPred = true, drag = null, keyframes = [];
   let fit = { H: null, err: null, cam: null, msg: '' }, placingCam = false, osmSize = null;
+  let placingDir = false, dirDrag = null, skipClick = false;  // kijkrichting aangeven (klikken of slepen)
   let frameT = null;            // tijd van het beeld dat nu getoond wordt
   let proposal = null;          // automatisch voorstel dat nog bevestigd moet worden
   let proposing = false;        // de app zoekt nu het veld
@@ -180,6 +181,8 @@ export async function render(root, ctx) {
   pitchCanvas.addEventListener('click', async e => {
     const r = pitchCanvas.getBoundingClientRect();
     const [mx, my] = pv.toM(e.clientX - r.left, e.clientY - r.top);
+    if (skipClick) { skipClick = false; return; }
+    if (placingDir && hasCam()) { placingDir = false; await setYaw(mx, my); return; }
     if (placingCam) {
       placingCam = false;
       await setCamera({ x: Math.round(mx * 10) / 10, y: Math.round(my * 10) / 10, h: clip.cam_h || 1.6, source: 'hand' });
@@ -204,6 +207,32 @@ export async function render(root, ctx) {
     if (!best) return toast('Klik dichter bij een wit punt of een lijn op het veld, of kies hieronder uit de lijst');
     pick(best);
   });
+
+  // kijkrichting: sleep vanaf je blauwe stip, of klik op 🧭 en dan op het veld
+  pitchCanvas.addEventListener('mousedown', e => {
+    if (!hasCam() || placingCam) return;
+    const r = pitchCanvas.getBoundingClientRect();
+    const [mx, my] = pv.toM(e.clientX - r.left, e.clientY - r.top);
+    const cx = fit.cam ? fit.cam.x : clip.cam_x, cy = fit.cam ? fit.cam.y : clip.cam_y;
+    if (Math.hypot(mx - cx, my - cy) < 3.5) { dirDrag = [mx, my]; e.preventDefault(); }
+  });
+  const dirMove = e => {
+    if (!dirDrag) return;
+    const r = pitchCanvas.getBoundingClientRect();
+    dirDrag = pv.toM(e.clientX - r.left, e.clientY - r.top); drawPitch();
+  };
+  const dirUp = async () => {
+    if (!dirDrag) return;
+    const [mx, my] = dirDrag; dirDrag = null;
+    if (Math.hypot(mx - clip.cam_x, my - clip.cam_y) > 4) { skipClick = true; await setYaw(mx, my); }
+    else drawPitch();
+  };
+  window.addEventListener('mousemove', dirMove); window.addEventListener('mouseup', dirUp);
+  async function setYaw(mx, my) {
+    const yaw = Math.round(Math.atan2(my - clip.cam_y, mx - clip.cam_x) * 180 / Math.PI);
+    await setCamera({ yaw });  // zoekt zelf opnieuw als er nog geen ijkmoment is
+    if (!pairs.length && !proposing && keyframes.some(k => !k.auto)) runPropose();  // ook dan: met kompas opnieuw zoeken
+  }
 
   function pick(lm) {
     if (pendingImg) { addPair(lm, pendingImg, pendingZoom); pendingImg = null; }
@@ -375,6 +404,15 @@ export async function render(root, ctx) {
           } finally { drawCamPanel(); }
         } }, '📡 Zoek via GPS') : null,
         hasCam() ? h('button', { onclick: () => setCamera({ x: null, y: null, source: null }) }, 'Wissen') : null),
+      hasCam() ? h('div', { style: { marginTop: '10px' } },
+        h('div', { className: 'small', style: { marginBottom: '4px' } }, 'Waar keek je op dit moment naartoe? (helpt de app, vooral met weinig punten)'),
+        h('div', { className: 'row' },
+          h('button', { className: placingDir ? 'primary' : '', onclick: () => { placingDir = !placingDir; placingCam = false; drawCamPanel(); } },
+            placingDir ? 'Klik nu op het veld waar het midden van je beeld is…' : '🧭 Geef kijkrichting aan'),
+          clip.cam_yaw != null ? h('button', { onclick: () => setCamera({ yaw: null }) }, 'Wissen') : null,
+          h('span', { className: 'small muted' }, clip.cam_yaw != null ? '✓ aangegeven (blauwe pijl)' : 'of sleep vanaf je blauwe stip')),
+        h('div', { className: 'small muted', style: { marginTop: '4px' } },
+          'Wordt bij het opslaan bewaard bij dit ijkmoment. Zwenk je later in de video, geef hem dan voor dat moment opnieuw aan.')) : null,
       h('div', { style: { marginTop: '10px' } }, h('div', { className: 'small', style: { marginBottom: '4px' } }, 'Hoe hoog hield je de telefoon?'),
         heightField(hNow, v => hasCam() ? setCamera({ h: v }) : (clip.cam_h = v), fit.cam ? fit.cam.h : null)),
       gpsError ? h('div', { className: 'hint warn-hint', style: { marginTop: '8px' } }, h('b', {}, 'Zoeken via GPS lukte niet. '), gpsError,
@@ -434,9 +472,10 @@ export async function render(root, ctx) {
       const Hp = toImageH(predicted);
       if (Hp) drawLines(Hp, 'rgba(255,214,0,.85)', [8 * pxPerCss(), 6 * pxPerCss()]);
     }
-    if (fit.H) drawLines(fit.H, 'rgba(255,255,255,.9)', []);
+    const bad = badFit(), col = bad ? 'rgba(255,90,95,.95)' : 'rgba(255,255,255,.9)', dash = bad ? [10 * pxPerCss(), 7 * pxPerCss()] : [];
+    if (fit.H) drawLines(fit.H, col, dash);
     for (const g of fit.goals || []) {  // de doelen volgens het cameramodel (palen en lat)
-      c.save(); c.strokeStyle = 'rgba(255,255,255,.9)'; c.lineWidth = lw; c.beginPath();
+      c.save(); c.strokeStyle = col; c.setLineDash(dash); c.lineWidth = lw; c.beginPath();
       g.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y))); c.stroke(); c.restore();
     }
     const r = 7 * pxPerCss();
@@ -448,6 +487,11 @@ export async function render(root, ctx) {
     if (pendingImg) {
       c.beginPath(); c.arc(pendingImg[0], pendingImg[1], r, 0, 2 * Math.PI);
       c.strokeStyle = '#ffd600'; c.lineWidth = lw; c.stroke();
+    }
+    const tip = nextTip();
+    if (tip?.at) {  // voorgesteld volgend punt: gele ring waar de app het verwacht
+      c.save(); c.beginPath(); c.arc(tip.at[0], tip.at[1], r * 2.4, 0, 2 * Math.PI);
+      c.strokeStyle = '#ffd600'; c.lineWidth = lw; c.setLineDash([5 * pxPerCss(), 4 * pxPerCss()]); c.stroke(); c.restore();
     }
   }
 
@@ -466,6 +510,33 @@ export async function render(root, ctx) {
       const n = used.get(lm.name);
       if (n) pv.dot(lm.x, lm.y, '#ff2d55', 7, String(n));
       else pv.dot(lm.x, lm.y, pendingPitch?.name === lm.name ? '#ffd600' : 'rgba(255,255,255,.9)', 3.5);
+    }
+    // punten in de lucht (bovenkant paal, lat): net achter het doel getekend, met een streepje naar de paal
+    pairs.forEach((p, i) => {
+      const pts = p.pitch3 ? [p.pitch3] : p.line3 || null;
+      if (!pts) return;
+      const out = pts[0][0] < pitchInfo.length / 2 ? -3.2 : 3.2;
+      c.save(); c.strokeStyle = '#ff2d55'; c.lineWidth = 2;
+      if (p.line3) {
+        c.lineWidth = 4; c.beginPath(); c.moveTo(...pv.toPx(pts[0][0] + out / 2, pts[0][1])); c.lineTo(...pv.toPx(pts[1][0] + out / 2, pts[1][1])); c.stroke();
+        c.restore(); pv.dot(pts[0][0] + out, (pts[0][1] + pts[1][1]) / 2, '#ff2d55', 7, String(i + 1));
+      } else {
+        c.beginPath(); c.moveTo(...pv.toPx(pts[0][0], pts[0][1])); c.lineTo(...pv.toPx(pts[0][0] + out, pts[0][1])); c.stroke();
+        c.restore(); pv.dot(pts[0][0] + out, pts[0][1], '#ff2d55', 7, String(i + 1));
+        c.save(); c.font = '600 10px sans-serif'; c.fillStyle = '#fff'; c.textAlign = 'center';
+        c.fillText('↑', ...pv.toPx(pts[0][0] + out * 1.75, pts[0][1] + 0.5)); c.restore();
+      }
+    });
+    if (hasCam()) {  // aangegeven kijkrichting: gestippelde pijl
+      const yaw = dirDrag ? Math.atan2(dirDrag[1] - clip.cam_y, dirDrag[0] - clip.cam_x) * 180 / Math.PI : clip.cam_yaw;
+      if (yaw != null) {
+        const a = yaw * Math.PI / 180, L = 28, [x0, y0] = [clip.cam_x, clip.cam_y], [x1, y1] = [x0 + L * Math.cos(a), y0 + L * Math.sin(a)];
+        c.save(); c.strokeStyle = '#4db5ff'; c.fillStyle = '#4db5ff'; c.lineWidth = 3; c.setLineDash([7, 5]);
+        c.beginPath(); c.moveTo(...pv.toPx(x0, y0)); c.lineTo(...pv.toPx(x1, y1)); c.stroke(); c.setLineDash([]);
+        const [hx, hy] = pv.toPx(x1, y1), b = Math.atan2(...[pv.toPx(x1, y1)[1] - pv.toPx(x0, y0)[1], pv.toPx(x1, y1)[0] - pv.toPx(x0, y0)[0]]);
+        c.beginPath(); c.moveTo(hx, hy); c.lineTo(hx - 12 * Math.cos(b - .45), hy - 12 * Math.sin(b - .45));
+        c.lineTo(hx - 12 * Math.cos(b + .45), hy - 12 * Math.sin(b + .45)); c.closePath(); c.fill(); c.restore();
+      }
     }
     if (hasCam()) {  // jouw plek + kijkrichting (als die al bekend is)
       const cx = fit.cam ? fit.cam.x : clip.cam_x, cy = fit.cam ? fit.cam.y : clip.cam_y;
@@ -487,13 +558,39 @@ export async function render(root, ctx) {
       h('b', {}, i + 1), h('span', { style: { flex: 1 } }, p.line ? `op lijn: ${p.name}` : p.line3 ? `op de lat: ${p.name}` : label(p.name),
         offScreen(p.img) ? h('span', { className: 'muted small', title: 'Dit punt ligt nu buiten beeld (gezet op een ander moment). Het telt gewoon mee.' }, ' · buiten beeld') : null),
       h('button', { onclick: () => { pairs.splice(i, 1); redraw(); } }, '×'))));
-    fitWarn.replaceChildren(badFitHint() || '');
+    const tip = badFit() ? null : nextTip();
+    fitWarn.replaceChildren(badFitHint() || (tip ? h('div', { className: 'hint', style: { margin: '8px 0' } }, h('b', {}, 'Tip: '), tip.text) : ''));
     if (!pairs.length) pairList.append(h('div', { className: 'muted small' },
       pendingImg ? 'Klik nu het bijbehorende punt op het veld.' : pendingPitch ? `Klik nu ${pendingPitch.line || pendingPitch.line3 ? 'een plek op ' : ''}"${label(pendingPitch.name)}" in het beeld.` : 'Nog geen punten.'));
   }
 
   // Past één klik niet bij de rest? Dan trekt die de hele kalibratie scheef (ook de kijkrichting).
   // De server zoekt de klik zonder welke de rest wél klopt. Index, of -1 (niets verdachts of onduidelijk).
+  function badFit() { return !!(fit.H && fit.err != null && fit.err >= 1); }
+
+  // Welk punt helpt nu het meest? Zoals een plank vastpakken: aan de uiteinden, niet met de handen
+  // naast elkaar. De app kiest het herkenbare punt in beeld dat het verst van je klikken ligt.
+  function nextTip() {
+    if (!img || !fit.H || badFit() || !pairs.length || pairs.length >= 6 || pendingImg || pendingPitch) return null;
+    const W = frameCanvas.width, Hh = frameCanvas.height;
+    const pts = pairs.map(p => p.img).filter(q => !offScreen(q));
+    if (!pts.length) return null;
+    const used = new Set(pairs.map(p => p.name));
+    let best = null;
+    for (const lm of pitchInfo.landmarks) {
+      if (used.has(lm.name)) continue;
+      const [u, v, w] = apply(fit.H, [lm.x, lm.y]);
+      if (!(w > 0) || u < 0.04 * W || u > 0.96 * W || v < 0.04 * Hh || v > 0.96 * Hh) continue;
+      const d = Math.min(...pts.map(q => Math.hypot(q[0] - u, q[1] - v)));
+      if (!best || d > best.d) best = { d, lm, at: [u, v] };
+    }
+    if (best && best.d > 0.3 * W) return { text: `Klik ook "${label(best.lm.name)}" aan (gele ring in het beeld): ver van je andere punten, dus het maakt de kalibratie stabieler.`, at: best.at, lm: best.lm };
+    const ys = pts.map(q => q[1]);
+    if (Math.max(...ys) < 0.55 * Hh) return { text: 'Klik ook iets dichtbij aan, onderin je beeld, bijvoorbeeld een plek op de zijlijn voor je.' };
+    if (Math.min(...ys) > 0.45 * Hh) return { text: 'Klik ook iets ver weg aan, bovenin je beeld: de verre zijlijn, een hoekvlag of een doel.' };
+    return null;
+  }
+
   function suspect() {
     if (!fit.H || fit.err == null || fit.err < 1) return -1;
     const i = fit.cam?.suspect;
@@ -529,7 +626,8 @@ export async function render(root, ctx) {
       [step, text] = ['!', `De punten passen nog niet bij elkaar (${fit.err.toFixed(1)} m ernaast). ` +
         (i >= 0 ? `Punt ${i + 1} (${label(pairs[i].name)}) is de vreemde eend: verwijder het (×) of sleep het naar de goede plek.` : 'Controleer de punten in de lijst: is er één verkeerd gekoppeld?')];
     } else {
-      [step, text] = ['3', 'Liggen de witte lijnen nu op het veld? Sla dan op. Nog niet goed? Sleep een punt of klik er een bij.'];
+      const tip = nextTip();
+      [step, text] = ['3', 'Liggen de witte lijnen nu op het veld? Sla dan op. Nog niet goed? Sleep een punt of klik er een bij.' + (tip ? ' Tip: ' + tip.text : '')];
       extra = h('button', { className: 'primary', onclick: save }, '✓ Opslaan');
     }
     if (proposal?.failed && !proposing) text = `De app vond het veld niet zelf (${proposal.failed}). ` + text;
@@ -708,6 +806,7 @@ export async function render(root, ctx) {
     if (!info.ok) return toast(`Nog niet genoeg: ${info.hint}`);
     const res = await api(`/clips/${clip.id}/keyframes`, { json: { id: editingId, t, points: pairs } });
     editingId = res.id; proposal = null; drawProposal();
+    clip.cam_yaw = null;  // bewaard bij dit ijkmoment
     ctx.refreshSteps?.();
     t = res.t;
     toast(`Ijkmoment opgeslagen (afwijking ${res.error_m} m)${clip.status === 'klaar' ? ' – de app stelt nu de rest van de video automatisch bij' : ''}`);

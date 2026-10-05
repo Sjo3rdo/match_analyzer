@@ -37,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.18 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.19 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. Ziet de app er na een update vreemd uit, druk dan één keer op ⌥⌘R in Safari.
 
 Wil je ook rugnummers automatisch laten lezen? Installeer dan:
@@ -148,11 +148,25 @@ minimap**, **Statistieken** en **Clips & delen**.
      kun je die met één klik overnemen. Dan rekent de app met een
      cameramodel en is **1 punt + 1 lijn** al genoeg, bijvoorbeeld een doelpaal en de zijlijn voor je.
      Nog beter is 2 punten + 1 lijn of 1 punt + 2 lijnen; dan rekent de app ook uit of je hebt ingezoomd.
+   - **Kijkrichting (kompas).** Klik bij **🧭 Geef kijkrichting aan** op de plek op het veld die in
+     het midden van je beeld staat, of sleep een pijl vanaf je blauwe stip. Dan zoekt de app alleen
+     in die richting, zoals iemand met een kompas niet de hele horizon afspeurt. Vooral handig met
+     weinig punten. De richting wordt bewaard bij het ijkmoment dat je opslaat; zwenk je later in
+     de video, geef hem voor een nieuw ijkmoment dan opnieuw aan.
+   - **Welke punten helpen het meest?** Zie het als een plank vastpakken: aan de uiteinden ligt hij
+     meteen stil, met je handen naast elkaar blijft hij wiebelen. Kies punten ver uit elkaar in het
+     beeld (links én rechts, dichtbij én ver weg), liever vaste punten (een hoek telt dubbel) dan
+     plekken op een lijn, en niet allemaal op één rechte lijn. De twee doelpalen staan maar 7 m uit
+     elkaar en helpen samen dus minder dan ze lijken; de bovenkant van een paal helpt wel extra voor
+     afstand en zoom. Na een paar punten stelt de app zelf het volgende punt voor, met een gele
+     ring in het beeld waar hij het verwacht. Punten in de lucht (bovenkant paal, lat) staan op de
+     veldtekening net achter het doel, met een ↑.
    - **Klopt een punt niet?** De blauwe kijkhoek op de tekening en de witte lijnen in het beeld volgen
      uit al je punten samen. Is er één verkeerd gekoppeld (bijvoorbeeld linker- en rechterpaal
      verwisseld), dan trekt die alles scheef. De app ziet dat aan de afwijking en zoekt de vreemde
      eend: hij laat om de beurt één punt weg en kijkt bij welk punt de rest ineens wél klopt. Dat punt
-     krijgt een gele markering en er verschijnt een duidelijke waarschuwing; de kijkhoek kleurt rood.
+     krijgt een gele markering en er verschijnt een duidelijke waarschuwing; de kijkhoek kleurt rood en
+     de witte lijnen en het getekende doel worden rood gestippeld, zodat je ziet dat ze nog niet kloppen.
      Verwijder het (×) of sleep het naar de goede plek.
    - **Veldmaten.** De app gaat uit van 105 × 68 m. Amateurvelden zijn vaak kleiner, bijvoorbeeld
      100 × 64. Vul de echte maten in bij **Veldmaten** (op de pagina Kalibratie); dan kloppen
