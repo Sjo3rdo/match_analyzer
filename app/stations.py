@@ -37,12 +37,30 @@ MAX_H_DIFF_M = 2.5
 # --- 1. groeperen --------------------------------------------------------------------------
 
 def group(store: Store, match_id: int) -> list[dict]:
-    """Video's per standplaats: GPS-positie (met de nauwkeurigheid die de telefoon erbij opgeeft) en
-    opnametijd. Twee video's horen bij dezelfde plek als ze dichter bij elkaar liggen dan hun
-    onnauwkeurigheid samen (minstens 6 m). Video's zonder GPS gaan naar de plek van de video die er
-    qua opnametijd het dichtst bij ligt."""
+    """Video's per standplaats, per helft (je staat vaak per helft ergens anders): GPS-positie (met de
+    nauwkeurigheid die de telefoon erbij opgeeft) en opnametijd. Twee video's horen bij dezelfde plek
+    als ze dichter bij elkaar liggen dan hun onnauwkeurigheid samen (minstens 6 m). Video's zonder GPS
+    gaan naar de plek van de video die er qua opnametijd het dichtst bij ligt."""
     clips = store.all("SELECT * FROM clips WHERE match_id = ? ORDER BY COALESCE(rec_start, 1e18), order_idx, id",
                       (match_id,))
+    periods = sorted({int(c.get("period") or 1) for c in clips})
+    out = []
+    for per in periods:
+        mine = [c for c in clips if int(c.get("period") or 1) == per]
+        groups = _group_clips(mine)
+        name = f"{per}e helft" if per <= 2 else f"Verlenging {per - 2}"
+        many = len([g for g in groups if not g.get("no_gps")]) > 1
+        for k, g in enumerate(groups):
+            members = sorted(g["clips"], key=lambda c: (c.get("rec_start") or 1e18, c["order_idx"]))
+            label = (f"{name} – zonder GPS" if g.get("no_gps") else f"{name} – standplaats {k + 1}" if many else name)
+            out.append({"id": len(out) + 1, "period": per, "label": label,
+                        "lat": g["lat"], "lon": g["lon"], "acc_m": round(g["acc"], 1) if g["acc"] else None,
+                        "precision_m": round(1 / math.sqrt(sum(g["_w"])), 1) if g.get("_w") else None,
+                        "clips": members, "no_gps": bool(g.get("no_gps"))})
+    return out
+
+
+def _group_clips(clips: list[dict]) -> list[dict]:
     groups: list[dict] = []
     for c in clips:
         if c.get("gps_lat") is None:
@@ -74,18 +92,38 @@ def group(store: Store, match_id: int) -> list[dict]:
         near = [x for x in near if x[0] <= 20 * 60]
         if near:
             min(near, key=lambda x: x[0])[1]["clips"].append(c)
+        elif len(groups) == 1:  # maar één plek in deze helft: daar hoort hij vast bij
+            groups[0]["clips"].append(c)
         else:
             loose.append(c)
     if loose:
         groups.append({"lat": None, "lon": None, "acc": None, "clips": loose, "no_gps": True})
-    out = []
-    for k, g in enumerate(groups):
-        members = sorted(g["clips"], key=lambda c: (c.get("rec_start") or 1e18, c["order_idx"]))
-        out.append({"id": k + 1, "label": "Zonder GPS" if g.get("no_gps") else f"Standplaats {k + 1}",
-                    "lat": g["lat"], "lon": g["lon"], "acc_m": round(g["acc"], 1) if g["acc"] else None,
-                    "precision_m": round(1 / math.sqrt(sum(g["_w"])), 1) if g.get("_w") else None,
-                    "clips": members, "no_gps": bool(g.get("no_gps"))})
-    return out
+    return groups
+
+
+def best_clip(store: Store, station: dict, max_candidates: int = 12) -> dict | None:
+    """De video van deze standplaats met het meeste veld (veldlijnen) in beeld: die is het makkelijkst
+    om zelf te kalibreren. De score wordt per video bewaard."""
+    from .autocalib import detect_lines
+    from .pipeline import read_frame
+    cands = [c for c in station["clips"] if c.get("path") and Path(c["path"]).exists()]
+    if not cands:
+        return None
+    if len(cands) > max_candidates:
+        cands = [cands[i] for i in np.linspace(0, len(cands) - 1, max_candidates).astype(int)]
+    best, best_s = None, -1.0
+    for c in cands:
+        score = c.get("line_score")
+        if score is None:
+            try:
+                frame, _ = read_frame(Path(c["path"]), float(c.get("duration") or 2) / 2)
+                score = float((detect_lines(frame) > 0).sum())
+            except (ValueError, OSError):
+                score = 0.0
+            store.run("UPDATE clips SET line_score = ? WHERE id = ?", (score, c["id"]))
+        if score > best_s:
+            best, best_s = c, score
+    return best
 
 
 # --- 2. de camera van de standplaats -----------------------------------------------------------

@@ -248,8 +248,11 @@ def update_match(match_id: int, data: dict = Body(...)):
         set_pitch_size(match_id, data.get("pitch_length"), data.get("pitch_width"))
     if "half_length" in data and data["half_length"] is not None:
         data = {**data, "half_length": int(data["half_length"])}
+    for k in ("wizard_step", "wizard_done"):
+        if k in data and data[k] is not None:
+            data = {**data, k: int(data[k])}
     return _update("matches", match_id, data, {"name", "date", "team0_name", "team1_name", "team0_color", "team1_color",
-                                                "half_length"})
+                                                "half_length", "wizard_step", "wizard_done"})
 
 
 def set_pitch_size(match_id: int, length: float | None, width: float | None) -> pitch.Geometry:
@@ -478,12 +481,14 @@ def _snap_time(clip_id: int, t: float) -> float:
 
 
 @app.get("/api/clips/{clip_id}/frame")
-def clip_frame(clip_id: int, t: float = 0.0):
+def clip_frame(clip_id: int, t: float = 0.0, w: int | None = None):
     c = _get("clips", clip_id)
     try:
         frame, ft = read_frame(Path(c["path"]), _snap_time(clip_id, t))
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    if w and w < frame.shape[1]:  # klein plaatje (voorvertoning)
+        frame = cv2.resize(frame, None, fx=w / frame.shape[1], fy=w / frame.shape[1], interpolation=cv2.INTER_AREA)
     ok, buf = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
     return Response(buf.tobytes(), media_type="image/jpeg",
                     headers={"X-Frame-Time": f"{ft:.4f}", "Access-Control-Expose-Headers": "X-Frame-Time"})
@@ -1255,10 +1260,42 @@ def get_stations(match_id: int):
             p = a[1]
             cam = {"clip_id": a[0]["id"], "filename": a[0]["filename"], "x": round(float(p[0]), 1), "y": round(float(p[1]), 1),
                    "h": round(float(p[2]), 1)}
-        out.append({"id": st["id"], "label": st["label"], "acc_m": st["acc_m"], "precision_m": st["precision_m"],
+        out.append({"id": st["id"], "label": st["label"], "period": st["period"], "acc_m": st["acc_m"], "precision_m": st["precision_m"],
                     "no_gps": st["no_gps"], "anchor": cam, "clips": clips})
     return {"stations": out, "job": {"status": m.get("stations_status"), "progress": m.get("stations_progress"),
                                      "message": m.get("stations_message")}}
+
+
+@app.get("/api/matches/{match_id}/stations/{station_id}/best")
+def station_best_clip(match_id: int, station_id: int):
+    """De video van deze standplaats met het meeste veld in beeld (om zelf te kalibreren)."""
+    from . import stations
+    st = next((x for x in stations.group(store, match_id) if x["id"] == station_id), None)
+    if st is None:
+        raise HTTPException(404, "Standplaats niet gevonden")
+    c = stations.best_clip(store, st)
+    if c is None:
+        raise HTTPException(404, "Geen video gevonden")
+    return _get("clips", c["id"])
+
+
+@app.get("/api/matches/{match_id}/timeline")
+def timeline_guess(match_id: int):
+    from . import order
+    _get("matches", match_id)
+    return order.timeline_guess(store, match_id)
+
+
+@app.post("/api/matches/{match_id}/timeline")
+def timeline_apply(match_id: int, data: dict = Body(...)):
+    """data: {kickoff, second_clip, kickoff2, half_length} (tijden in seconden sinds 1970)."""
+    from . import order
+    _get("matches", match_id)
+    num = lambda k: float(data[k]) if data.get(k) is not None else None  # noqa: E731
+    n = order.apply_timeline(store, match_id, num("kickoff"), int(data["second_clip"]) if data.get("second_clip") else None,
+                             num("kickoff2"), int(data.get("half_length") or 45))
+    analytics.invalidate()
+    return {"updated": n}
 
 
 @app.post("/api/matches/{match_id}/stations/run")
