@@ -562,11 +562,78 @@ def fit_camera(points: list[dict], prior: dict) -> tuple[np.ndarray, dict]:
     return K, cam
 
 
+def camera_from_homography(K: np.ndarray, size: tuple[int, int]) -> tuple[np.ndarray, float] | None:
+    """Waar stond de camera (en hoe ver ingezoomd) bij kalibratie K (beeld -> veld)?
+
+    Metafoor: een schaduw op de grond verraadt waar de lamp hangt. Uit hoe het veld vervormd in
+    beeld komt, volgen plek, hoogte en zoom van de camera. Geeft (params [x, y, h, yaw, tilt, roll,
+    log_f], gemiddelde fout in pixels) of None als het niet lukt."""
+    W, Hh = size
+    try:
+        G = np.linalg.inv(K)  # veld -> beeld
+    except np.linalg.LinAlgError:
+        return None
+    G = G / np.linalg.norm(G[:, 0])
+    cx, cy = W / 2, Hh / 2
+    g = G.T  # g[0], g[1], g[2] = kolommen
+    a = [(g[k][0] - cx * g[k][2], g[k][1] - cy * g[k][2], g[k][2]) for k in range(2)]
+    f2 = None
+    den = a[0][2] * a[1][2]
+    if abs(den) > 1e-12:  # r1 loodrecht op r2
+        v = -(a[0][0] * a[1][0] + a[0][1] * a[1][1]) / den
+        f2 = v if v > 0 else None
+    if f2 is None:  # r1 en r2 even lang
+        den = a[1][2] ** 2 - a[0][2] ** 2
+        if abs(den) > 1e-12:
+            v = (a[0][0] ** 2 + a[0][1] ** 2 - a[1][0] ** 2 - a[1][1] ** 2) / den
+            f2 = v if v > 0 else None
+    f = math.sqrt(f2) if f2 and W / 8 < math.sqrt(f2) < W * 8 else default_focal(W)
+    Kc = np.array([[f, 0, cx], [0, f, cy], [0, 0, 1.0]])
+    M = np.linalg.inv(Kc) @ G
+    lam = 2.0 / (np.linalg.norm(M[:, 0]) + np.linalg.norm(M[:, 1]))
+    r1, r2, tt = lam * M[:, 0], lam * M[:, 1], lam * M[:, 2]
+    R = np.column_stack([r1, r2, np.cross(r1, r2)])
+    C = -R.T @ tt
+    if C[2] > 0:  # Z wijst omlaag: de camera hangt boven het veld (Z < 0)
+        R = np.column_stack([-r1, -r2, np.cross(r1, r2)])
+        C = -R.T @ (-tt)
+    x0, y0, h0 = float(C[0]), float(C[1]), float(max(0.5, -C[2]))
+    # nauwkeurig maken met ons cameramodel: projectie van een raster veldpunten moet kloppen
+    xs, ys = np.meshgrid(np.linspace(-10, 115, 26), np.linspace(-10, 78, 18))
+    world = np.stack([xs.ravel(), ys.ravel()], 1)
+    hom = np.hstack([world, np.ones((len(world), 1))]) @ G.T
+    ok = hom[:, 2] > 1e-9
+    img = hom[:, :2] / np.where(ok, hom[:, 2], 1)[:, None]
+    ok &= (img[:, 0] > -0.3 * W) & (img[:, 0] < 1.3 * W) & (img[:, 1] > -0.3 * Hh) & (img[:, 1] < 1.3 * Hh)
+    world, img = world[ok], img[ok]
+    if len(world) < 8:
+        return None
+
+    def res(p):
+        Hq = camera_homography(p, size)
+        with np.errstate(all="ignore"):
+            q = apply_h(Hq, world)
+        r = (q - img) / 10.0
+        return np.where(np.isfinite(r), r, 1e3).ravel()
+    starts = []
+    for yaw in np.radians(np.arange(0, 360, 15)):
+        for tilt in np.radians([3, 8, 15, 30]):
+            p0 = np.array([x0, y0, h0, yaw, tilt, 0.0, math.log(f)])
+            starts.append((float(np.sum(res(p0) ** 2)), p0))
+    starts.sort(key=lambda c: c[0])
+    fits = [_lm(res, p0, iters=60) for _, p0 in starts[:3]]
+    p = min(fits, key=lambda q: float(np.sum(res(q) ** 2)))
+    err = float(np.mean(np.linalg.norm(res(p).reshape(-1, 2) * 10.0, axis=1)))
+    if not np.all(np.isfinite(p)) or p[2] <= 0:
+        return None
+    return p, err
+
+
 def camera_prior(clip: dict) -> dict | None:
     """Voorkennis over de camera uit de clipgegevens (positie, hoogte), of None."""
     if clip.get("cam_x") is None or clip.get("cam_y") is None or not clip.get("width"):
         return None
-    sigma = 3.0 if clip.get("cam_source") == "hand" else max(4.0, float(clip.get("gps_acc") or 8.0) + 3.0)
+    sigma = 3.0 if clip.get("cam_source") in ("hand", "standplaats") else max(4.0, float(clip.get("gps_acc") or 8.0) + 3.0)
     return {"x": float(clip["cam_x"]), "y": float(clip["cam_y"]), "h": float(clip.get("cam_h") or 1.6),
-            "f": default_focal(int(clip["width"])), "sigma_pos": sigma,
+            "f": float(clip.get("cam_f") or default_focal(int(clip["width"]))), "sigma_pos": sigma,
             "width": int(clip["width"]), "height": int(clip["height"])}
