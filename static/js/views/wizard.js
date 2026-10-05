@@ -3,6 +3,7 @@ import { api, h, toast, fmtTime, teamName, TEAM_COLORS } from '../util.js';
 import { PitchView, setPitchSize, pitchPolylines } from '../pitch.js';
 import * as calibrate from './calibrate.js';
 import { stationsPanel } from './stations.js';
+import { heightField } from './camheight.js';
 
 const STEPS = [
   ['wedstrijd', 'Wedstrijd'], ['videos', "Video's"], ['tijdlijn', 'Tijdlijn'], ['analyse', 'Analyseren'],
@@ -306,10 +307,7 @@ export async function render(root, ctx) {
       const picker = pitchPicker({ drag: true, acc: clip.cam_source === 'gps' ? Math.max(5, clip.gps_acc || 8) : null, onPick: async (x, y) => {
         await setCam({ x, y, source: 'hand' }); saved.textContent = '✓ opgeslagen';
       } });
-      const heights = [[1.6, 'Staand langs de lijn (± 1,6 m)'], [2.5, 'Op een bankje of heuvel (± 2,5 m)'], [4, 'Tribune (± 4 m)'], [6, 'Hoge tribune (± 6 m)']];
-      const hNow = clip.cam_h || 1.6;
-      const height = h('select', { onchange: async e => { await setCam({ h: Number(e.target.value) }); saved.textContent = '✓ opgeslagen'; } },
-        heights.map(([v, l]) => h('option', { value: v, selected: Math.abs(hNow - v) < 0.05 }, l)));
+      const height = heightField(clip.cam_h || 1.6, async v => { await setCam({ h: v }); saved.textContent = '✓ opgeslagen'; });
       const len = h('input', { type: 'number', min: 50, max: 120, step: 0.5, value: match.pitch_length || 105, style: { width: '80px' } });
       const wid = h('input', { type: 'number', min: 30, max: 90, step: 0.5, value: match.pitch_width || 68, style: { width: '80px' } });
       const saveSize = async () => {
@@ -322,7 +320,7 @@ export async function render(root, ctx) {
         h('p', { className: 'lead' }, 'Klopt de plek? Sleep de 📍 naar waar je echt stond: hoe preciezer, hoe beter de app straks het veld vindt. Vul ook in hoe hoog je stond en hoe groot het veld is.'),
         picker.el,
         h('div', { className: 'form-grid', style: { marginTop: '12px' } },
-          h('label', {}, 'Hoe hoog stond je?', height),
+          h('div', {}, h('div', { style: { marginBottom: '4px' } }, 'Hoe hoog hield je de telefoon?'), height),
           h('label', {}, 'Veldmaten (lengte × breedte, meter)', h('div', { className: 'row' }, len, '×', wid)),
           osmDiff ? h('div', { className: 'hint' }, `OpenStreetMap zegt ${osm[0]} × ${osm[1]} m. `,
             h('button', { className: 'small', onclick: () => { len.value = osm[0]; wid.value = osm[1]; saveSize(); } }, 'Overnemen')) : null),

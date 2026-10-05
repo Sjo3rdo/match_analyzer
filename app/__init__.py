@@ -1,3 +1,3 @@
 """Match Analyzer: voetbalwedstrijden analyseren op basis van telefoonbeelden."""
 
-__version__ = "0.17"
+__version__ = "0.18"

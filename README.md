@@ -37,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.17 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.18 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. Ziet de app er na een update vreemd uit, druk dan één keer op ⌥⌘R in Safari.
 
 Wil je ook rugnummers automatisch laten lezen? Installeer dan:
@@ -135,15 +135,25 @@ minimap**, **Statistieken** en **Clips & delen**.
      beeld een paar plekken op aan, verspreid over de lijn. Samen met je positie en één ander punt of
      lijn ligt het veld dan vast.
    - **Het doel.** Klik je in de veldtekening bij een doel, dan kies je wat je in het beeld aanklikt:
-     de **voet** van een paal (waar hij de grond raakt), de **bovenkant** van een paal (waar de lat
-     begint, 2,44 m hoog) of een plek **op de lat**. De bovenkant en de lat hangen in de lucht en
+     van de **linkerpaal** of de **rechterpaal** de **onderkant** (waar hij de grond raakt) of de
+     **bovenkant** (waar de lat begint, 2,44 m hoog), of een plek **op de lat**. Links en rechts zoals
+     jij het doel zag vanaf je plek; de app rekent dat zelf om naar de tekening. De bovenkant en de lat hangen in de lucht en
      vertellen de app hoe ver weg het doel is en hoeveel je hebt ingezoomd. Ze tellen mee zodra de app
      weet waar je stond (zie hieronder). Na het klikken tekent de app het doel in het beeld, zodat je
      ziet of het klopt.
    - **Vertel de app waar je stond.** Klik bij **📍 Waar stond je bij het filmen?** op de veldtekening
-     waar je ongeveer stond, en kies je hoogte (staand, heuvel of tribune). Dan rekent de app met een
+     waar je ongeveer stond, en vul in hoe hoog je de telefoon hield. Standaard is dat 1,6 m: ooghoogte
+     als je staat. Hield je hem boven je hoofd, stond je op een bankje of op de tribune, vul dan de
+     echte hoogte in (of kies een snelkeuze). Rekent de app uit je klikken een andere hoogte uit, dan
+     kun je die met één klik overnemen. Dan rekent de app met een
      cameramodel en is **1 punt + 1 lijn** al genoeg, bijvoorbeeld een doelpaal en de zijlijn voor je.
      Nog beter is 2 punten + 1 lijn of 1 punt + 2 lijnen; dan rekent de app ook uit of je hebt ingezoomd.
+   - **Klopt een punt niet?** De blauwe kijkhoek op de tekening en de witte lijnen in het beeld volgen
+     uit al je punten samen. Is er één verkeerd gekoppeld (bijvoorbeeld linker- en rechterpaal
+     verwisseld), dan trekt die alles scheef. De app ziet dat aan de afwijking en zoekt de vreemde
+     eend: hij laat om de beurt één punt weg en kijkt bij welk punt de rest ineens wél klopt. Dat punt
+     krijgt een gele markering en er verschijnt een duidelijke waarschuwing; de kijkhoek kleurt rood.
+     Verwijder het (×) of sleep het naar de goede plek.
    - **Veldmaten.** De app gaat uit van 105 × 68 m. Amateurvelden zijn vaak kleiner, bijvoorbeeld
      100 × 64. Vul de echte maten in bij **Veldmaten** (op de pagina Kalibratie); dan kloppen
      afstanden en posities beter. Het strafschopgebied en de middencirkel zijn altijd even groot.

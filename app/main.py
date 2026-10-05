@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import analytics, clips as clip_export, config, geo, learning, pitch, render, shots, teams, training
-from .calibration import camera_prior, fit_calibration, fit_camera, normalize_h
+from .calibration import camera_prior, fit_calibration, fit_camera, normalize_h, suspect_point
 from .pipeline import Worker, probe, read_frame
 from .storage import Store, clip_dir
 
@@ -558,6 +558,9 @@ def calibrate_preview(clip_id: int, data: dict = Body(...)):
         try:
             full = fit_camera(points, prior)[1]
             cam = {k: round(v, 1) for k, v in full.items() if k != "params"}
+            if err >= 1:  # past niet goed: zoek de klik die niet bij de rest past
+                cam["suspect"] = suspect_point(full["params"], points, prior,
+                                               (int(clip["width"]), int(clip["height"])))
             goals = _goal_outlines(full["params"], (int(clip["width"]), int(clip["height"])),
                                    pitch.of_match(_get("matches", clip["match_id"])))
         except ValueError:

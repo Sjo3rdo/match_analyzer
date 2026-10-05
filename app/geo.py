@@ -36,7 +36,7 @@ OVERPASS_URLS = (
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
 )
-USER_AGENT = "match-analyzer/0.17 (lokale voetbalanalyse; https://github.com/sjo3rdo/match_analyzer)"
+USER_AGENT = "match-analyzer/0.18 (lokale voetbalanalyse; https://github.com/sjo3rdo/match_analyzer)"
 OSM_API = "https://api.openstreetmap.org/api/0.6/map"
 
 
