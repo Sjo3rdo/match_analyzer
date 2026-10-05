@@ -23,7 +23,7 @@ import numpy as np
 
 from . import geo, pitch
 from .calibration import (apply_h, camera_from_homography, camera_homography, default_focal, fit_calibration,
-                          fit_camera, camera_prior, mirrored, normalize_h, orient_by_points)
+                          fit_camera, camera_prior, kf_camera, mirrored, normalize_h, orient_by_points)
 from .storage import Store
 
 log = logging.getLogger(__name__)
@@ -139,7 +139,7 @@ def clip_camera(store: Store, clip: dict) -> np.ndarray | None:
     for kf in _manual_keyframes(store, clip["id"]):
         try:
             if prior is not None:
-                return np.array(fit_camera(kf["points"], prior)[1]["params"])
+                return np.array(fit_camera(kf["points"], kf_camera(prior, kf))[1]["params"])
             K, _ = fit_calibration(kf["points"])
         except (ValueError, np.linalg.LinAlgError):
             continue

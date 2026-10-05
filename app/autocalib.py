@@ -27,7 +27,7 @@ import cv2
 import numpy as np
 
 from . import pitch
-from .calibration import (CameraModel, Keyframe, apply_h, camera_prior, cumulative, fit_calibration, fit_camera,
+from .calibration import (CameraModel, Keyframe, apply_h, camera_prior, cumulative, fit_calibration, fit_camera, kf_camera,
                           normalize_h)
 
 log = logging.getLogger(__name__)
@@ -667,7 +667,7 @@ def _focal(clip: dict, manual: list[dict]) -> float:
     if prior is not None:
         for kf in manual:
             try:
-                _, cam = fit_camera(kf["points"], prior)
+                _, cam = fit_camera(kf["points"], kf_camera(prior, kf))
                 return (clip["width"] / 2) / math.tan(math.radians(cam["hfov_deg"]) / 2)
             except ValueError:
                 continue
@@ -694,7 +694,7 @@ def run_autocalib(store, clip_id: int, every_s: float = 1.0, progress=None) -> d
     accepted: dict[int, np.ndarray] = {}  # frame-index -> K (beeld -> veld)
     for kf in manual:
         try:
-            K, _ = fit_calibration(kf["points"], camera=prior)
+            K, _ = fit_calibration(kf["points"], camera=kf_camera(prior, kf))
         except ValueError:
             continue
         accepted[int(np.argmin(np.abs(t - kf["t"])))] = K
@@ -715,7 +715,7 @@ def run_autocalib(store, clip_id: int, every_s: float = 1.0, progress=None) -> d
     if prior is not None:
         for kf in manual:
             try:
-                _, cam = fit_camera(kf["points"], prior)
+                _, cam = fit_camera(kf["points"], kf_camera(prior, kf))
             except ValueError:
                 continue
             p = np.array(cam["params"])
@@ -992,7 +992,9 @@ def propose(frame: np.ndarray, prior: dict, boxes: np.ndarray | None = None,
         for dy in offs:
             px, py = cx + dx, cy + dy
             ang = np.degrees(np.arctan2(corners[:, 1] - py, corners[:, 0] - px))
-            if 0 <= px <= L and 0 <= py <= Wp:
+            if prior.get("yaw") is not None:  # zelf aangegeven kijkrichting: alleen daaromheen zoeken
+                yaws = math.degrees(prior["yaw"]) + np.arange(-35, 35.1, 2.0)
+            elif 0 <= px <= L and 0 <= py <= Wp:
                 yaws = np.arange(0, 360, 2.0)
             else:  # kijkrichtingen tussen de uiterste hoekpunten (plus wat marge)
                 rel = (ang - ang[4] + 180) % 360 - 180

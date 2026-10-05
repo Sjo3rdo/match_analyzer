@@ -277,3 +277,18 @@ def test_swapped_goal_post_is_the_suspect_point():
     bad = [dict(p) for p in pts]
     bad[0]["pitch"] = list(L["Doelpaal rechts onder"])  # linker- en rechterpaal verwisseld
     assert suspect_point(fit_camera(bad, prior)[1]["params"], bad, prior, size) == 0
+
+
+def test_own_view_direction_steers_the_camera_fit():
+    """Kijkrichting zelf aangegeven (kompas): de fit zoekt alleen in die richting en blijft er dichtbij."""
+    import math
+    from app.calibration import default_focal, fit_camera, kf_camera
+    size, true, H = _sideline_camera()
+    pts = _items(H, [("pt", (88.5, 13.84)), ("ln", ("Zijlijn onder", 0.7))])
+    prior = {**PRIOR, "f": default_focal(1920)}
+    wrong = {**prior, "yaw": true[3] + math.radians(150)}  # bewust de verkeerde kant op
+    right = kf_camera(prior, {"yaw": math.degrees(true[3]) + 8})
+    yaw = lambda cam: (cam["yaw_deg"] - math.degrees(true[3]) + 180) % 360 - 180  # noqa: E731
+    assert abs(yaw(fit_camera(pts, right)[1])) < 6
+    assert abs(yaw(fit_camera(pts, wrong)[1])) > 60  # het kompas weegt echt mee
+    assert kf_camera(prior, {"yaw": None}) is prior

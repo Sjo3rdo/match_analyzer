@@ -238,7 +238,7 @@ export async function render(root, ctx) {
     }
 
     // een veldtekening waarop je je plek ziet (en aanklikt of versleept)
-    function pitchPicker({ onPick, drag = false, acc = null }) {
+    function pitchPicker({ onPick, drag = false, acc = null, dir = null }) {
       const canvas = h('canvas', { style: { cursor: 'crosshair', borderRadius: '10px', maxWidth: '760px' } });
       const pv = new PitchView(canvas, { margin: 14 });
       let dragging = false;
@@ -249,17 +249,38 @@ export async function render(root, ctx) {
             const c = pv.ctx, [px, py] = pv.toPx(clip.cam_x, clip.cam_y);
             c.beginPath(); c.arc(px, py, acc * pv.scale, 0, 2 * Math.PI); c.fillStyle = 'rgba(255,214,0,.18)'; c.fill();
           }
+          const yaw = aim ? Math.atan2(aim[1] - clip.cam_y, aim[0] - clip.cam_x) * 180 / Math.PI : clip.cam_yaw;
+          if (yaw != null) {  // kijkrichting: gestippelde pijl
+            const c = pv.ctx, a = yaw * Math.PI / 180, [x0, y0] = pv.toPx(clip.cam_x, clip.cam_y);
+            const [x1, y1] = pv.toPx(clip.cam_x + 28 * Math.cos(a), clip.cam_y + 28 * Math.sin(a)), b = Math.atan2(y1 - y0, x1 - x0);
+            c.save(); c.strokeStyle = c.fillStyle = '#4db5ff'; c.lineWidth = 3; c.setLineDash([7, 5]);
+            c.beginPath(); c.moveTo(x0, y0); c.lineTo(x1, y1); c.stroke(); c.setLineDash([]);
+            c.beginPath(); c.moveTo(x1, y1); c.lineTo(x1 - 12 * Math.cos(b - .45), y1 - 12 * Math.sin(b - .45));
+            c.lineTo(x1 - 12 * Math.cos(b + .45), y1 - 12 * Math.sin(b + .45)); c.closePath(); c.fill(); c.restore();
+          }
           pv.dot(clip.cam_x, clip.cam_y, '#ffd600', 9, '📍');
         }
       };
+      let aim = null;  // kijkrichting die je nu aanwijst (klikken of slepen)
       const at = e => { const r = canvas.getBoundingClientRect(); return pv.toM(e.clientX - r.left, e.clientY - r.top); };
       canvas.addEventListener('mousedown', e => {
         const [x, y] = at(e);
+        if (dir?.active() && clip.cam_x != null) { aim = [x, y]; draw(); return; }
         if (drag && clip.cam_x != null && Math.hypot(x - clip.cam_x, y - clip.cam_y) < 6) { dragging = true; return; }
         clip.cam_x = x; clip.cam_y = y; draw(); onPick(x, y);
       });
-      const move = e => { if (!dragging) return; const [x, y] = at(e); clip.cam_x = x; clip.cam_y = y; draw(); };
-      const up = () => { if (dragging) { dragging = false; onPick(clip.cam_x, clip.cam_y); } };
+      const move = e => {
+        if (aim) { aim = at(e); draw(); return; }
+        if (!dragging) return; const [x, y] = at(e); clip.cam_x = x; clip.cam_y = y; draw();
+      };
+      const up = () => {
+        if (aim) {
+          const [ax, ay] = aim; aim = null;
+          if (Math.hypot(ax - clip.cam_x, ay - clip.cam_y) > 3) dir.onAim(Math.round(Math.atan2(ay - clip.cam_y, ax - clip.cam_x) * 180 / Math.PI));
+          draw(); return;
+        }
+        if (dragging) { dragging = false; onPick(clip.cam_x, clip.cam_y); }
+      };
       window.addEventListener('mousemove', move); window.addEventListener('mouseup', up);
       subCleanup = () => { window.removeEventListener('mousemove', move); window.removeEventListener('mouseup', up); };
       requestAnimationFrame(draw);
@@ -304,9 +325,20 @@ export async function render(root, ctx) {
     // b) plek verbeteren en extra gegevens
     function subRefine() {
       const saved = h('span', { className: 'small muted' });
+      let aiming = false;
+      const dirBtn = h('button', { onclick: () => { aiming = !aiming; drawDir(); } });
+      const dirClear = h('button', { onclick: async () => { await setCam({ yaw: null }); drawDir(); picker.draw(); } }, 'Wissen');
+      const drawDir = () => {
+        dirBtn.className = aiming ? 'primary' : '';
+        dirBtn.textContent = aiming ? 'Klik of sleep nu op het veld naar waar je keek…' : '🧭 Geef aan waar je naartoe keek';
+        dirClear.style.display = clip.cam_yaw != null ? '' : 'none';
+      };
       const picker = pitchPicker({ drag: true, acc: clip.cam_source === 'gps' ? Math.max(5, clip.gps_acc || 8) : null, onPick: async (x, y) => {
         await setCam({ x, y, source: 'hand' }); saved.textContent = '✓ opgeslagen';
-      } });
+      }, dir: { active: () => aiming, onAim: async yaw => {
+        await setCam({ yaw }); aiming = false; drawDir(); picker.draw(); saved.textContent = '✓ kijkrichting opgeslagen';
+      } } });
+      drawDir();
       const height = heightField(clip.cam_h || 1.6, async v => { await setCam({ h: v }); saved.textContent = '✓ opgeslagen'; });
       const len = h('input', { type: 'number', min: 50, max: 120, step: 0.5, value: match.pitch_length || 105, style: { width: '80px' } });
       const wid = h('input', { type: 'number', min: 30, max: 90, step: 0.5, value: match.pitch_width || 68, style: { width: '80px' } });
@@ -317,8 +349,12 @@ export async function render(root, ctx) {
       len.addEventListener('change', saveSize); wid.addEventListener('change', saveSize);
       const osmDiff = osm && (Math.abs(osm[0] - (match.pitch_length || 105)) > 1 || Math.abs(osm[1] - (match.pitch_width || 68)) > 1);
       body.append(
-        h('p', { className: 'lead' }, 'Klopt de plek? Sleep de 📍 naar waar je echt stond: hoe preciezer, hoe beter de app straks het veld vindt. Vul ook in hoe hoog je stond en hoe groot het veld is.'),
+        h('p', { className: 'lead' }, 'Klopt de plek? Sleep de 📍 naar waar je echt stond: hoe preciezer, hoe beter de app straks het veld vindt. Geef ook aan waar je naartoe keek, hoe hoog je de telefoon hield en hoe groot het veld is.'),
         picker.el,
+        h('div', { style: { marginTop: '10px' } },
+          h('div', { style: { marginBottom: '4px' } }, 'Waar keek je naartoe? (niet verplicht, maar het helpt de app de goede kant op te zoeken)'),
+          h('div', { className: 'row' }, dirBtn, dirClear),
+          h('div', { className: 'small muted', style: { marginTop: '4px' } }, 'Klik op het veld wat ongeveer in het midden van je beeld stond, of sleep een pijl die kant op. Zwenkte je veel? Kies dan het midden van wat je filmde.')),
         h('div', { className: 'form-grid', style: { marginTop: '12px' } },
           h('div', {}, h('div', { style: { marginBottom: '4px' } }, 'Hoe hoog hield je de telefoon?'), height),
           h('label', {}, 'Veldmaten (lengte × breedte, meter)', h('div', { className: 'row' }, len, '×', wid)),
