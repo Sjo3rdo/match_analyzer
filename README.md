@@ -37,7 +37,7 @@ minuten. Daarna opent de app zich in je browser op http://127.0.0.1:8000, zodra 
 met opstarten. Het detectiemodel (ca. 40 MB) wordt bij de eerste analyse automatisch gedownload.
 
 **Bijwerken.** Haal de nieuwste versie op met `git pull` en start opnieuw met `./run.sh`. Rechtsboven
-in de app staat de versie en de commit (bijv. `versie 0.19 · 7e771cd`); die moet gelijk zijn aan
+in de app staat de versie en de commit (bijv. `versie 0.20 · 7e771cd`); die moet gelijk zijn aan
 `git log -1 --oneline`. Ziet de app er na een update vreemd uit, druk dan één keer op ⌥⌘R in Safari.
 
 Wil je ook rugnummers automatisch laten lezen? Installeer dan:
@@ -186,11 +186,19 @@ minimap**, **Statistieken** en **Clips & delen**.
      standplaatsen in: op GPS-positie (met de nauwkeurigheid die de iPhone erbij opslaat; precieze
      metingen tellen zwaarder) en op opnametijd. Kalibreer per standplaats één video zelf; daar volgt
      uit waar je stond, hoe hoog en hoe ver ingezoomd (ook als je je positie niet hebt ingesteld).
-     Klik daarna **🤖 Kalibreer de rest automatisch**. De app legt elke andere video als een
-     puzzelstuk tegen de al gekalibreerde beelden: bomen, huizen, borden en het hek staan vanaf
-     dezelfde plek altijd op dezelfde plek, zoals bij een panoramafoto. Lukt dat niet (weinig
-     overlap), dan zoekt hij de veldlijnen vanaf jouw plek. Een voorstel dat een camera op een
-     andere plek zou opleveren, gooit de app zelf weg. Daarna loop je de plaatjes langs: liggen de
+     Klik daarna **🤖 Kalibreer de rest automatisch**. De app maakt van je zelf gekalibreerde video
+     eerst een panorama: vanaf je ijkmoment geeft elk beeld (elke seconde) zijn kalibratie door aan
+     het volgende, als een rij dominostenen, zodat ook de kanten waar je naartoe zwenkte bekend zijn.
+     Daarna legt hij elke andere video, om de paar seconden, als een puzzelstuk tegen dat panorama:
+     bomen, huizen, borden en het hek staan vanaf dezelfde plek altijd op dezelfde plek. Elk passend
+     moment wordt een ijkmoment, zodat ook zwenken binnen een video goed gevolgd wordt. Gelukte
+     video's worden zelf weer stukken panorama voor de rest (in rondes). Pas als de omgeving niets
+     oplevert, zoekt hij (trager) de veldlijnen vanaf jouw plek. Een voorstel dat niet past bij een
+     camera op jouw standplaats, gooit de app zelf weg.
+     **Onzeker** staat erbij als een video ver (meer dan 45°) is weggedraaid van je ijkmoment: hoe
+     verder het panorama doordraait, hoe meer kleine afwijkingen in de zoom van de lens optellen.
+     Kijk die extra goed na, of kalibreer zelf één video die die kant op kijkt; dan worden de
+     voorstellen aan die kant net zo nauwkeurig als je eigen ijkmoment. Daarna loop je de plaatjes langs: liggen de
      gele lijnen op de witte? **✓** keurt goed, **✗** haalt het voorstel weg, **✎** opent de video
      om het zelf te doen. Klik op een plaatje om het groot te zien. Goedgekeurde video's helpen bij
      de volgende ronde weer mee als puzzelstuk.

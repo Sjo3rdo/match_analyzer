@@ -292,3 +292,24 @@ def test_own_view_direction_steers_the_camera_fit():
     assert abs(yaw(fit_camera(pts, right)[1])) < 6
     assert abs(yaw(fit_camera(pts, wrong)[1])) > 60  # het kompas weegt echt mee
     assert kf_camera(prior, {"yaw": None}) is prior
+
+
+def test_low_camera_looking_at_far_goal_is_found():
+    """Echte kliks (iPhone, 1,15 m hoog langs de lijn, ver doel, alleen de palen): vroeger won een
+    kijkrichting waarin alles áchter de camera lag (yaw 0), en ontbraken omhoog-kantelingen."""
+    from app.calibration import default_focal, fit_camera
+    pts = [{"img": [1055, 711], "pitch": [0.0, 37.66]}, {"img": [1211, 712], "pitch": [0.0, 30.34]},
+           {"img": [1055, 631], "pitch3": [0.0, 37.66, 2.44]}, {"img": [1210, 639], "pitch3": [0.0, 30.34, 2.44]}]
+    prior = {"x": 34.0, "y": 75.8, "h": 1.6, "f": default_focal(1920), "sigma_pos": 2.0, "width": 1920, "height": 1080}
+    cam = fit_camera(pts, prior)[1]
+    assert 200 < cam["yaw_deg"] < 245 and cam["tilt_deg"] < 0
+
+
+def test_runaway_zoom_does_not_crash():
+    """Een stap naar een onmogelijke zoom (log_f enorm) mag de optimalisatie niet laten crashen."""
+    from app.calibration import _lm, camera_homography
+    def fun(p):
+        H = camera_homography(np.array([50.0, 80.0, 1.5, p[0], 0.05, 0.0, p[1]]), (1920, 1080))
+        return np.array([np.tanh(H[0, 0]), 1e4 - p[1]])  # trekt log_f naar 10000 (e^10000 bestaat niet)
+    p = _lm(fun, np.array([4.0, 7.5]), iters=20)
+    assert np.all(np.isfinite(p))

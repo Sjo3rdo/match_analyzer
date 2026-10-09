@@ -83,6 +83,8 @@ export function stationsPanel(match, openClip) {
         h('span', { className: 'muted', title: c.filename, style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '150px' } }, c.filename),
         h('span', { className: `badge ${cls}` }, text)),
       c.method && c.state === 'voorstel' ? h('div', { className: 'small muted' }, c.method === 'omgeving' ? 'via de omgeving' : 'via de veldlijnen') : null,
+      c.uncertain && c.state === 'voorstel' ? h('div', { className: 'small warn', title: 'Het panorama is vanaf je ijkmoment ver doorgedraaid; kleine afwijkingen in de zoom tellen dan op.' },
+        `Onzeker: ${c.turn_deg}° weggedraaid van je ijkmoment. Controleer goed, of kalibreer een video die deze kant op kijkt zelf.`) : null,
       h('div', { className: 'row small', style: { marginTop: '4px' } },
         c.state === 'voorstel' ? h('button', { className: 'small primary', onclick: () => review('goedgekeurd'), title: 'De gele lijnen liggen op de witte' }, '✓') : null,
         c.state === 'voorstel' ? h('button', { className: 'small danger', onclick: () => review('afgekeurd'), title: 'Klopt niet: weghalen' }, '✗') : null,
