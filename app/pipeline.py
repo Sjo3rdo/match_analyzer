@@ -543,6 +543,8 @@ class Worker:
             kind, clip_id = self.q.get()
             with self._lock:
                 self._pending.discard((kind, clip_id))
+            if kind != "stations" and not self.store.one("SELECT 1 AS x FROM clips WHERE id = ?", (clip_id,)):
+                continue  # video is intussen verwijderd
             if kind == "process":
                 try:
                     process_clip(self.store, clip_id)

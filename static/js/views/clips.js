@@ -1,5 +1,5 @@
 // Stap 1: video's uploaden, ordenen en laten analyseren.
-import { api, h, fmtTime, toast } from '../util.js';
+import { api, h, fmtTime, toast, deleteAllClips } from '../util.js';
 
 const BUSY = ['wachtrij', 'preview', 'analyse'];
 
@@ -47,7 +47,10 @@ export async function render(root, ctx) {
           '🕒 Volgorde uit opnametijd'),
         h('button', { className: 'primary', disabled: !todo.length, onclick: () => analyzeAll(todo),
           title: 'Zet alle video\'s die nog niet geanalyseerd zijn in de wachtrij (ze worden één voor één gedaan)' },
-          `▶ Analyseer alles${todo.length ? ` (${todo.length})` : ''}`)) : null));
+          `▶ Analyseer alles${todo.length ? ` (${todo.length})` : ''}`),
+        h('button', { className: 'danger', title: 'Alle video\'s van deze wedstrijd in één keer verwijderen',
+          onclick: async () => { if (await deleteAllClips(match, clips.length)) { draw(); ctx.refreshSteps(); } } },
+          '🗑 Alle video\'s verwijderen')) : null));
     if (!clips.length) { panel.append(h('div', { className: 'empty' }, 'Nog geen video\'s.')); return; }
     const patch = (c, data) => api(`/clips/${c.id}`, { method: 'PATCH', json: data });
     const move = async (i, dir) => {

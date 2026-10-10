@@ -482,6 +482,28 @@ def delete_clip(clip_id: int):
     return {"ok": True}
 
 
+@app.delete("/api/matches/{match_id}/clips")
+def delete_all_clips(match_id: int):
+    """Alle video's van deze wedstrijd in één keer weg (met analyse, kalibratie en momenten). De
+    wedstrijd zelf blijft: naam, teams, spelers, veldmaten en de hoeken op de luchtfoto.
+    Een video die nu geanalyseerd wordt blijft staan; die kun je weghalen als hij klaar is."""
+    m = _get("matches", match_id)
+    if m.get("stations_status") in ("wachtrij", "bezig"):
+        raise HTTPException(409, "De app kalibreert nu de video's van deze wedstrijd. Wacht tot dat klaar is.")
+    deleted, kept = 0, []
+    for c in store.all("SELECT id, filename, status, calib_status FROM clips WHERE match_id = ?", (match_id,)):
+        if c["status"] in ("preview", "analyse") or c["calib_status"] == "bezig":
+            kept.append(c["filename"])
+            continue
+        store.run("DELETE FROM clips WHERE id = ?", (c["id"],))
+        shutil.rmtree(config.CLIPS_DIR / str(c["id"]), ignore_errors=True)
+        deleted += 1
+    store.run("UPDATE matches SET stations_status = NULL, stations_progress = NULL, stations_message = NULL WHERE id = ?",
+              (match_id,))
+    analytics.invalidate()
+    return {"deleted": deleted, "kept": kept}
+
+
 @app.post("/api/clips/{clip_id}/process")
 def process(clip_id: int, data: dict = Body(default={})):
     """Analyse starten. data.mode: 'nauwkeurig' (standaard) of 'snel'."""
