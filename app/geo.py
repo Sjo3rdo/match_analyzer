@@ -135,6 +135,24 @@ def parse_iso6709(text: str) -> tuple[float, float] | None:
     return lat, lon
 
 
+def effective_accuracy(lat: float | None, lon: float | None, acc: float | None) -> float | None:
+    """Hoe ver de GPS-plek er echt naast kan zitten (m).
+
+    Een iPhone schrijft de plek in een video met maar 4 decimalen weg: stapjes van 11 m
+    (noord-zuid) en zo'n 7 m (oost-west). De opgegeven nauwkeurigheid ("2 m") gaat over de meting,
+    niet over die afronding; samen kan het zo 7 m schelen. Zie het als een plattegrond met een grof
+    raster: je weet in welk vakje je stond, niet waar in het vakje."""
+    if lat is None or lon is None:
+        return acc
+    acc = float(acc) if acc is not None else 8.0
+    rounded = all(abs(v * 1e4 - round(v * 1e4)) < 1e-6 for v in (lat, lon))
+    if not rounded:
+        return acc
+    half_lat = 0.5e-4 * 111_320
+    half_lon = half_lat * math.cos(math.radians(lat))
+    return round(math.hypot(acc, math.hypot(half_lat, half_lon)), 1)
+
+
 def read_video_metadata(path: Path, ffmpeg: str) -> dict:
     """GPS (lat, lon, nauwkeurigheid in m) en toesteltype uit de containermetadata."""
     r = subprocess.run([ffmpeg, "-hide_banner", "-i", str(path)], capture_output=True, text=True)
@@ -161,6 +179,9 @@ def read_video_metadata(path: Path, ffmpeg: str) -> dict:
             ts = parse_time(val)
             if ts is not None:
                 meta["rec_start_fallback"] = ts
+    if "gps_lat" in meta:
+        meta["gps_acc_raw"] = meta.get("gps_acc")
+        meta["gps_acc"] = effective_accuracy(meta["gps_lat"], meta["gps_lon"], meta.get("gps_acc"))
     if "rec_start" not in meta and "rec_start_fallback" in meta:
         meta["rec_start"] = meta["rec_start_fallback"]
     meta.pop("rec_start_fallback", None)

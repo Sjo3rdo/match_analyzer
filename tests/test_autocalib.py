@@ -118,7 +118,8 @@ def test_autocalib_removes_drift_with_camera_position(tmp_path):
     before, after, res = _run_drift_test(tmp_path, with_camera=True)
     assert res["accepted"] >= 0.5 * res["tried"], res
     assert before[-1] > 20, before  # zonder bijstellen: tientallen pixels weg
-    assert np.median(after) < 3 and after.max() < 6, (before.round(1), after.round(1))
+    # (pixels in een beeld van 57 graden breed; in de oude 64 graden was de grens 6 px)
+    assert np.median(after) < 3 and after.max() < 6.8, (before.round(1), after.round(1))
 
 
 def test_autocalib_without_camera_position_never_worse(tmp_path):
@@ -194,3 +195,83 @@ def test_enhanced_line_search_finds_worn_lines_but_not_grass():
     assert found(enh) > 0.8 and found(enh) > found(base) + 0.3
     assert ((enh > 0) & far).sum() == 0
     assert (ac.detect_lines(grass(), enhance=True) > 0).sum() == 0
+
+
+def _low_camera(yaw_deg=215.0, tilt_deg=1.0):
+    """Telefoon op 1,2 m, 4 m buiten de zijlijn, kijkt schuin over het veld (zoals langs de lijn)."""
+    return np.array([60.0, 72.0, 1.2, math.radians(yaw_deg), math.radians(tilt_deg), 0.0, math.log(default_focal(W))])
+
+
+def _with_goals(frame, cam):
+    """Bomen boven de horizon en witte doelen (palen + lat) in het beeld tekenen."""
+    from app.calibration import camera_projection, project_3d
+    P = camera_projection(cam, (W, H))
+    out = frame.copy()
+    far = project_3d(P, np.array([[x, -15.0, 0.0] for x in np.linspace(-15, 120, 60)]))  # rand achter het veld
+    far = far[np.isfinite(far).all(1)]
+    if len(far):
+        top = int(np.clip(np.nanmin(far[:, 1]), 0, H))
+        out[:top] = (40, 75, 45)
+    for x0 in (0.0, 105.0):
+        a, b = (x0, 34 - 3.66), (x0, 34 + 3.66)
+        frame3 = [(*a, 0.0), (*a, 2.44), (*b, 2.44), (*b, 0.0)]
+        q = project_3d(P, np.array(frame3))
+        if np.isfinite(q).all():
+            cv2.polylines(out, [np.round(q).astype(np.int32)], False, (250, 250, 250), 2)
+    return out
+
+
+def _sample_err(Ha, Hb):
+    img = apply_h(Ha, ac.SAMPLES)
+    ok = (img[:, 0] > 0) & (img[:, 0] < W) & (img[:, 1] > 0) & (img[:, 1] < H)
+    return float(np.median(np.linalg.norm(apply_h(Hb, ac.SAMPLES[ok]) - img[ok], axis=1)))
+
+
+def test_known_position_puts_the_line_back_on_the_sideline():
+    """Doorgegeven kalibratie (via de omgeving) zit 1,5 graad te hoog en 1 graad gedraaid: de gele lijn
+    ligt dan ver boven de zijlijn. Met de bekende plek moet bijstellen hem terugleggen, ook als de
+    fout veel groter is dan de kleine stapjes van het volgen."""
+    tex = _texture()
+    cam = _low_camera()
+    Hc = camera_homography(cam, (W, H))
+    frame = _frame(tex, Hc)
+    bad = cam.copy()
+    bad[3] += math.radians(1.0)
+    bad[4] += math.radians(1.5)
+    H_bad = camera_homography(bad, (W, H))
+    assert _sample_err(Hc, H_bad) > 15
+    camera = {"x": cam[0], "y": cam[1], "h": cam[2], "roll": 0.0, "log_f": cam[6], "q0": bad[3:], "search": True}
+    res = ac.refine(frame, H_bad, None, math.exp(cam[6]), camera=camera)
+    assert res is not None
+    assert _sample_err(Hc, res[0]) < 3, res[1]
+
+
+def test_goal_fixes_the_view_direction_along_a_lone_sideline():
+    """Alleen de zijlijn vlak voor je en een doel in beeld: langs de zijlijn draaien zie je aan de
+    lijn nauwelijks, maar aan het doel wel."""
+    tex = np.full_like(_texture(), (60, 140, 70))  # alleen de zijlijn aan jouw kant (de rest in tegenlicht)
+    y = int((68 + MARGIN) * PX_PER_M)
+    cv2.line(tex, (int(MARGIN * PX_PER_M), y), (int((105 + MARGIN) * PX_PER_M), y), (240, 240, 240), 2)
+    cam = _low_camera(yaw_deg=200.0, tilt_deg=0.5)
+    Hc = camera_homography(cam, (W, H))
+    bad = cam.copy()
+    bad[3] += math.radians(2.0)
+    camera = {"x": cam[0], "y": cam[1], "h": cam[2], "roll": 0.0, "log_f": cam[6], "q0": bad[3:], "search": True}
+    turned = {}
+    for goals in (False, True):
+        frame = _frame(tex, Hc)
+        frame = _with_goals(frame, cam) if goals else frame
+        dbg = {}
+        res = ac.refine(frame, camera_homography(bad, (W, H)), None, math.exp(cam[6]), camera=camera, debug=dbg)
+        assert res is not None, dbg
+        turned[goals] = math.degrees(res[1]["params"][0] - cam[3])
+    assert abs(turned[False] - 2.0) < 0.3, turned  # zonder doel: de draairichting van de voorspelling houden
+    assert abs(turned[True]) < 0.4, turned  # met doel: rechtgezet
+
+
+def test_known_position_refuses_a_frame_without_lines():
+    tex = np.full_like(_texture(), (60, 140, 70))
+    cam = _low_camera()
+    Hc = camera_homography(cam, (W, H))
+    camera = {"x": cam[0], "y": cam[1], "h": cam[2], "roll": 0.0, "log_f": cam[6], "q0": cam[3:]}
+    assert ac.refine(_frame(tex, Hc), Hc, None, math.exp(cam[6]), camera=camera) is None

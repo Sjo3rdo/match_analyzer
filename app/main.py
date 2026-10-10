@@ -453,9 +453,9 @@ def _share_camera(match_id: int) -> int:
 
 def _store_probe(cid: int, path: Path, info: dict, inherit: dict | None = None) -> None:
     """Videogegevens opslaan; bij knippen GPS en camerapositie van het origineel overnemen."""
-    extra = {k: info.get(k) for k in ("gps_lat", "gps_lon", "gps_acc", "device", "rec_start")}
+    extra = {k: info.get(k) for k in ("gps_lat", "gps_lon", "gps_acc", "gps_acc_raw", "device", "rec_start")}
     if inherit:
-        for k in ("gps_lat", "gps_lon", "gps_acc", "device", "cam_x", "cam_y", "cam_h", "cam_source"):
+        for k in ("gps_lat", "gps_lon", "gps_acc", "gps_acc_raw", "device", "cam_x", "cam_y", "cam_h", "cam_source"):
             if extra.get(k) is None:
                 extra[k] = inherit.get(k)
     sets = ", ".join(f"{k} = ?" for k in extra)

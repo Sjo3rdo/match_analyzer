@@ -135,3 +135,10 @@ def test_corners_without_gps_use_the_first_two_clicks_as_your_side():
     tiny = [[53.0, 6.0], [53.0, 6.0002], [53.0001, 6.0002], [53.0001, 6.0]]  # pannakooi
     with pytest.raises(ValueError):
         geo.pitch_from_corners(geo.order_corners(tiny))
+
+
+def test_gps_rounded_to_four_decimals_is_less_precise_than_it_claims():
+    # iPhone-video's: plek op 4 decimalen (stapjes van 11 x 7 m), "2 m nauwkeurig" gaat alleen over de meting
+    assert geo.effective_accuracy(53.2498, 6.3917, 2.0) == pytest.approx(6.8, abs=0.2)
+    assert geo.effective_accuracy(53.24983, 6.39171, 2.0) == 2.0  # niet afgerond: geloven
+    assert geo.effective_accuracy(None, None, 3.0) == 3.0

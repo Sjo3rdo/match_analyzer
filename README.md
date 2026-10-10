@@ -190,8 +190,18 @@ minimap**, **Statistieken** en **Clips & delen**.
      De app vraagt alle OpenStreetMap-zoekservers tegelijk (de eerste die antwoordt wint), en
      antwoordt er geen op tijd, dan haalt hij het kaartje rond je plek rechtstreeks van
      openstreetmap.org. Een gevonden veld onthoudt de app voor die plek. Lukt het toch niet, dan zegt
-     de app in gewone woorden waarom (druk, geen internet of een certificaatprobleem). De
-     iPhone slaat de positie op ongeveer 5 à 10 m nauwkeurig op; klik je plek gerust preciezer aan.
+     de app in gewone woorden waarom (druk, geen internet of een certificaatprobleem). Let op: een
+     iPhone schrijft de plek in een video met maar 4 decimalen weg (stapjes van 11 × 7 m), ook als
+     hij "2 m nauwkeurig" meldt. De app rekent daarom met zo'n 7 m onzekerheid; klik je plek op de
+     luchtfoto aan voor het beste resultaat.
+   - **De lijnen corrigeren de kalibratie zelf.** Is een kalibratie doorgegeven (vanaf een andere
+     video of een ander moment) en ligt de gele lijn naast de zijlijn, dan stelt de app hem bij op
+     de witte lijnen in beeld: eerst grof (tot 5 graden draaien en kantelen), dan precies op de
+     lijnpixels, zoals je een overtrekvel op een foto schuift. Met alleen de zijlijn in beeld kan
+     de app niet zien hoe ver je langs die lijn gedraaid bent; staat er een doel in beeld, dan
+     richt hij daarop (palen en lat op het witte frame), anders houdt hij die draairichting zoals
+     hij was en corrigeert alleen op/neer en scheefstand. Lijnen tussen jou en het veld (de
+     coachzone voor de dug-out) tellen niet mee.
    - **Veel video's? Kalibreer per standplaats maar één.** Zie het als een fotograaf op een statief:
      vanaf dezelfde plek zijn positie, hoogte en zoom gelijk, alleen de kijkrichting verschilt.
      Bovenaan de pagina Kalibratie staat **Alle video's in één keer**. De app deelt je video's in
