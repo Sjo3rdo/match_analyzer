@@ -161,3 +161,15 @@ export function exportPanel() {
   }
   return { el: box, run };
 }
+
+// Alle video's van een wedstrijd in één keer weg (na één bevestiging). Geeft true als er iets weg is.
+export async function deleteAllClips(match, n) {
+  if (!n) return false;
+  if (!confirm(`Alle ${n} video's van deze wedstrijd verwijderen?\n\nOok de analyse, kalibratie en momenten in deze video's ` +
+    'verdwijnen. De wedstrijd zelf (teams, spelers, veldmaten, luchtfoto) blijft staan.\n\nDit kan niet ongedaan worden.')) return false;
+  const r = await api(`/matches/${match.id}/clips`, { method: 'DELETE' });
+  toast(r.kept.length
+    ? `${r.deleted} video('s) verwijderd. ${r.kept.length} wordt nog verwerkt en is blijven staan (${r.kept.join(', ')}); verwijder die als hij klaar is.`
+    : `${r.deleted} video('s) verwijderd`);
+  return r.deleted > 0;
+}

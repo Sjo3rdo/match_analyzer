@@ -1,5 +1,5 @@
 // Begeleide route voor een nieuwe wedstrijd: één vraag per scherm, van uploaden tot spelers.
-import { api, h, toast, fmtTime, teamName, TEAM_COLORS } from '../util.js';
+import { api, h, toast, fmtTime, teamName, TEAM_COLORS, deleteAllClips } from '../util.js';
 import { PitchView, setPitchSize, pitchPolylines } from '../pitch.js';
 import * as calibrate from './calibrate.js';
 import { stationsPanel } from './stations.js';
@@ -95,7 +95,11 @@ export async function render(root, ctx) {
     const zone = h('div', { className: 'dropzone', onclick: () => input.click() },
       h('div', { style: { fontSize: '30px' } }, '🎬'), h('b', {}, 'Sleep al je video\'s van deze wedstrijd hierheen'),
       h('div', {}, 'of klik om ze te kiezen. Alles in één keer mag (ook 60 stuks).'));
+    const delAll = h('button', { className: 'danger small', style: { marginBottom: '8px' }, onclick: async () => {
+      if (await deleteAllClips(match, match.clips.length)) { await reload(); drawList(); }
+    } }, '🗑 Alle video\'s verwijderen');
     const drawList = () => {
+      delAll.style.display = match.clips.length ? '' : 'none';
       list.replaceChildren(...match.clips.map(c => h('div', { className: 'list-item' }, h('span', { style: { flex: 1 } }, c.filename),
         h('span', { className: 'small muted' }, fmtTime(c.duration)),
         h('span', { className: 'small muted' }, c.rec_start ? `gefilmd ${clock(c.rec_start)}` : 'geen opnametijd'),
@@ -122,7 +126,7 @@ export async function render(root, ctx) {
     zone.addEventListener('dragleave', () => zone.classList.remove('over'));
     zone.addEventListener('drop', e => { e.preventDefault(); zone.classList.remove('over'); upload([...e.dataTransfer.files].filter(f => f.type.startsWith('video') || /\.(mov|mp4|m4v)$/i.test(f.name))); });
     add(...title("Video's toevoegen", 'Voeg alle video\'s van deze wedstrijd toe, in willekeurige volgorde: de app zet ze straks zelf op volgorde.'),
-      zone, input, status, h('div', { style: { marginTop: '12px' } }, list));
+      zone, input, status, h('div', { style: { marginTop: '12px' } }, delAll, list));
     drawList();
   }
 
