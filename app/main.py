@@ -17,7 +17,7 @@ from fastapi.responses import FileResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import analytics, clips as clip_export, config, geo, learning, pitch, render, shots, teams, training
-from .calibration import camera_prior, fit_calibration, fit_camera, normalize_h, kf_camera, leave_one_out
+from .calibration import camera_prior, fit_calibration, fit_camera, normalize_h, kf_camera, leave_one_out, pixel_errors, mean_px, bad_px_limit
 from .pipeline import Worker, probe, read_frame
 from .storage import Store, clip_dir
 
@@ -499,15 +499,21 @@ def clip_frame(clip_id: int, t: float = 0.0, w: int | None = None):
 @app.get("/api/clips/{clip_id}/keyframes")
 def get_keyframes(clip_id: int):
     out = []
-    prior = camera_prior(_get("clips", clip_id))
+    clip = _get("clips", clip_id)
+    prior = camera_prior(clip)
+    size = (int(clip.get("width") or 1920), int(clip.get("height") or 1080))
     for kf in store.keyframes(clip_id):
         if kf.get("auto"):
             kf["score"] = json.loads(kf["score"]) if kf.get("score") else None
             kf["error_m"] = None
         else:
             try:
-                kf["error_m"] = round(fit_calibration(kf["points"], camera=kf_camera(prior, kf))[1], 2)
-            except ValueError as e:  # bijv. een oude kalibratie die gespiegeld bleek: zeg wat er mis is
+                K, e_m = fit_calibration(kf["points"], camera=kf_camera(prior, kf))
+                kf["error_m"] = round(e_m, 2)
+                e_px = mean_px(pixel_errors(K, kf["points"], size))
+                kf["error_px"] = None if e_px is None else round(e_px, 1)
+                kf["bad_px"] = round(bad_px_limit(size[0]), 1)
+            except (ValueError, np.linalg.LinAlgError) as e:  # bijv. een oude kalibratie die gespiegeld bleek
                 kf["error_m"], kf["problem"] = None, str(e)
         out.append(kf)
     return out
@@ -527,9 +533,10 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
     points = data.get("points") or []
     yaw = clip.get("cam_yaw")  # aangegeven kijkrichting: hoort bij dít moment
     try:
-        _, err = fit_calibration(points, camera=camera_prior(clip, with_yaw=True))
+        K, err = fit_calibration(points, camera=camera_prior(clip, with_yaw=True))
     except ValueError as e:
         raise HTTPException(400, str(e)) from e
+    err_px = mean_px(pixel_errors(K, points, (int(clip.get("width") or 1920), int(clip.get("height") or 1080))))
     data["t"] = _snap_time(clip_id, float(data["t"]))
     if data.get("id"):
         store.run("UPDATE keyframes SET t = ?, points = ?, source = NULL, yaw = COALESCE(?, yaw) WHERE id = ? AND clip_id = ?",
@@ -542,7 +549,7 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
     store.run("UPDATE clips SET calib_review = NULL, cam_yaw = NULL WHERE id = ?", (clip_id,))
     analytics.invalidate(clip_id=clip_id)
     _start_autocalib(clip)
-    return {"id": kid, "t": data["t"], "error_m": round(err, 2)}
+    return {"id": kid, "t": data["t"], "error_m": round(err, 2), "error_px": None if err_px is None else round(err_px, 1)}
 
 
 @app.post("/api/clips/{clip_id}/calibrate-preview")
@@ -565,13 +572,19 @@ def calibrate_preview(clip_id: int, data: dict = Body(...)):
         except ValueError:
             pass
     H = np.linalg.inv(K)
-    out = {"ok": True, "H": normalize_h(H).tolist(), "error_m": round(err, 2), "camera": cam, "goals": goals}
-    if err >= 1 and len(points) >= 3:  # past niet: per klik of de rest zonder die klik wél klopt
+    size = (int(clip["width"]), int(clip["height"]))
+    px = pixel_errors(K, points, size, full["params"] if cam is not None else None)
+    err_px = mean_px(px)
+    out = {"ok": True, "H": normalize_h(H).tolist(), "error_m": round(err, 2), "camera": cam, "goals": goals,
+           "error_px": None if err_px is None else round(err_px, 1), "point_px": [None if v is None else round(v, 1) for v in px],
+           "bad_px": round(bad_px_limit(size[0]), 1)}
+    # oordeel in beeldpixels: in de verte is 1 pixel al meters, dus meters zeggen daar niets
+    if err_px is not None and err_px > bad_px_limit(size[0]) and len(points) >= 3:  # per klik: klopt de rest zonder?
         try:
             if cam is not None:
-                spread, limit = leave_one_out(points, full["params"], prior, (int(clip["width"]), int(clip["height"])))
+                spread, limit = leave_one_out(points, full["params"], prior, size)
             else:
-                spread, limit = leave_one_out(points)
+                spread, limit = leave_one_out(points, size=size)
             out["without"] = [None if not np.isfinite(v) else round(v, 2) for v in spread]
             out["without_ok"] = round(limit, 2)
         except (ValueError, np.linalg.LinAlgError):
