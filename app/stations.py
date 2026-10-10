@@ -397,7 +397,16 @@ def plausible(K: np.ndarray, cam: np.ndarray, size: tuple[int, int], pts_img) ->
     err, q = best
     p = np.array([cam[0], cam[1], cam[2], *q])
     zoom = math.exp(q[3] - cam[6])
-    return bool(err <= MAX_MODEL_ERR_PX and 0.4 <= zoom <= 6.0 and abs(q[2]) < math.radians(15)), p
+    if err <= MAX_MODEL_ERR_PX and 0.4 <= zoom <= 6.0 and abs(q[2]) < math.radians(15):
+        return True, p
+    # tweede kans: een camera een paar meter verderop (twee eigen ijkmomenten zijn het zelden tot op
+    # de meter eens over je plek, zeker niet als er bij één alleen twee palen zijn aangeklikt)
+    r = camera_from_homography(K, size)
+    if r is not None and r[1] <= MAX_MODEL_ERR_PX:
+        p2 = r[0]
+        if math.hypot(p2[0] - cam[0], p2[1] - cam[1]) <= MAX_POS_DIFF_M / 2 and abs(p2[2] - cam[2]) <= MAX_H_DIFF_M:
+            return True, p2
+    return False, p
 
 
 def _model_err(H: np.ndarray, p: np.ndarray, size: tuple[int, int]) -> float:
