@@ -2,7 +2,7 @@
 // bijbehorende punt (of de lijn) op de veldtekening, of andersom. Weet de app waar je stond
 // (aangeklikt of via GPS), dan rekent hij met een cameramodel en is 1 punt + 1 lijn genoeg.
 import { api, h, fmtTime, toast } from '../util.js';
-import { PitchView, pitchPolylines } from '../pitch.js';
+import { PitchView, pitchPolylines, setPitchSize } from '../pitch.js';
 import { apply, inv, fitCalibration, calibrationInfo, calibrationError } from '../homography.js';
 import { stationsPanel } from './stations.js';
 import { heightField } from './camheight.js';
@@ -15,11 +15,13 @@ export async function render(root, ctx) {
     return;
   }
   const pitchInfo = await api(`/pitch?match_id=${match.id}`);
+  setPitchSize(pitchInfo.length, pitchInfo.width);  // tekening en punten altijd op dezelfde veldmaten
   let clip = clips.find(c => c.id === Number(ctx.params.get('clip'))) || clips[0];
   let t = 0, img = null, pairs = [], pendingImg = null, pendingPitch = null, editingId = null;
   let predicted = [], showPred = true, drag = null, keyframes = [];
   let fit = { H: null, err: null, cam: null, msg: '' }, placingCam = false, osmSize = null;
-  let placingDir = false, dirDrag = null, skipClick = false;  // kijkrichting aangeven (klikken of slepen)
+  let placingDir = false, dirDrag = null, skipClick = false;
+  let touched = null, trigger = null;  // laatst gezette/versleepte klik; de klik waarna het rood werd  // kijkrichting aangeven (klikken of slepen)
   let frameT = null;            // tijd van het beeld dat nu getoond wordt
   let proposal = null;          // automatisch voorstel dat nog bevestigd moet worden
   let proposing = false;        // de app zoekt nu het veld
@@ -171,7 +173,7 @@ export async function render(root, ctx) {
     drawFrame(); scheduleFit();
   });
   window.addEventListener('mouseup', onUp);
-  function onUp() { pan = null; if (drag !== null) { drag = null; redraw(); } }
+  function onUp() { pan = null; if (drag !== null) { touched = pairs[drag]; drag = null; redraw(); } }
   frameCanvas.addEventListener('contextmenu', e => {
     e.preventDefault();
     const p = imgCoords(e), tol = 12 * pxPerCss();
@@ -310,10 +312,12 @@ export async function render(root, ctx) {
     z = Math.round(Math.min(4, Math.max(1, z)) * 10) / 10;
     if (lm.line || lm.line3) {  // meerdere punten op dezelfde lijn mogen
       pairs.push(lm.line ? { name: lm.name, img: p, line: lm.line, z } : { name: lm.name, img: p, line3: lm.line3, z });
+      touched = pairs[pairs.length - 1];
       return;
     }
     pairs = pairs.filter(q => q.name !== lm.name);
     pairs.push(lm.h != null ? { name: lm.name, img: p, pitch3: [lm.x, lm.y, lm.h], z } : { name: lm.name, img: p, pitch: [lm.x, lm.y], z });
+    touched = pairs[pairs.length - 1];
   }
 
   function segDist(p, a, b) {
@@ -358,7 +362,11 @@ export async function render(root, ctx) {
       if (!info.ok) { fit = { H: null, err: null, cam: null, msg: info.hint }; drawFrame(); drawErr(); drawCamPanel(); return; }
       const r = await api(`/clips/${clip.id}/calibrate-preview`, { json: { points: pairs } }).catch(() => null);
       if (seq !== fitSeq) return;
-      fit = r && r.ok ? { H: r.H, err: r.error_m, cam: r.camera, goals: r.goals || [], msg: '' } : { H: null, err: null, cam: null, msg: r?.message || 'mislukt' };
+      const wasBad = badFit();
+      fit = r && r.ok ? { H: r.H, err: r.error_m, cam: r.camera, goals: r.goals || [], msg: '', without: r.without || null, withoutOk: r.without_ok }
+        : { H: null, err: null, cam: null, msg: r?.message || 'mislukt' };
+      if (!badFit()) trigger = null;
+      else if (!wasBad || !pairs.includes(trigger)) trigger = pairs.includes(touched) ? touched : null;
       drawFrame(); drawErr(); drawCamPanel(); drawPitch();
     }, 150);
   }
@@ -479,6 +487,12 @@ export async function render(root, ctx) {
       g.forEach(([x, y], i) => (i ? c.lineTo(x, y) : c.moveTo(x, y))); c.stroke(); c.restore();
     }
     const r = 7 * pxPerCss();
+    for (const i of badFit() ? suspect() : []) {  // botsende punten: gele ring in het beeld
+      const q = pairs[i]?.img;
+      if (!q) continue;
+      c.save(); c.beginPath(); c.arc(q[0], q[1], r * 2.2, 0, 2 * Math.PI);
+      c.strokeStyle = '#ffc53d'; c.lineWidth = lw * 1.2; c.stroke(); c.restore();
+    }
     pairs.forEach((p, i) => {
       c.beginPath(); c.arc(p.img[0], p.img[1], r, 0, 2 * Math.PI);
       c.fillStyle = '#ff2d55'; c.fill(); c.lineWidth = lw * .6; c.strokeStyle = '#fff'; c.stroke();
@@ -554,10 +568,10 @@ export async function render(root, ctx) {
 
   function drawPairs() {
     const bad = suspect();
-    pairList.replaceChildren(...pairs.map((p, i) => h('div', { className: `list-item${i === bad ? ' suspect' : ''}`, title: i === bad ? 'Dit punt past niet bij de rest' : '' },
+    pairList.replaceChildren(...pairs.map((p, i) => h('div', { className: `list-item${bad.includes(i) ? ' suspect' : ''}`, title: bad.includes(i) ? 'Dit punt past niet bij de rest' : '' },
       h('b', {}, i + 1), h('span', { style: { flex: 1 } }, p.line ? `op lijn: ${p.name}` : p.line3 ? `op de lat: ${p.name}` : label(p.name),
         offScreen(p.img) ? h('span', { className: 'muted small', title: 'Dit punt ligt nu buiten beeld (gezet op een ander moment). Het telt gewoon mee.' }, ' · buiten beeld') : null),
-      h('button', { onclick: () => { pairs.splice(i, 1); redraw(); } }, '×'))));
+      h('button', { onclick: () => removePair(i) }, '×'))));
     const tip = badFit() ? null : nextTip();
     fitWarn.replaceChildren(badFitHint() || (tip ? h('div', { className: 'hint', style: { margin: '8px 0' } }, h('b', {}, 'Tip: '), tip.text) : ''));
     if (!pairs.length) pairList.append(h('div', { className: 'muted small' },
@@ -591,19 +605,37 @@ export async function render(root, ctx) {
     return null;
   }
 
-  function suspect() {
-    if (!fit.H || fit.err == null || fit.err < 1) return -1;
-    const i = fit.cam?.suspect;
-    return Number.isInteger(i) && i < pairs.length ? i : -1;
+  // Welke klik veroorzaakt het rood, en met welke andere klik botst hij? Per klik weet de server of
+  // de rest zonder die klik wél klopt (fit.without). Zo vind je de getuige met het afwijkende verhaal.
+  function conflict() {
+    if (!badFit() || !fit.without || fit.without.length !== pairs.length) return null;
+    const ok = fit.without.map((v, i) => [v, i]).filter(([v]) => v != null && v <= fit.withoutOk).sort((a, b) => a[0] - b[0]).map(([, i]) => i);
+    const t = trigger ? pairs.indexOf(trigger) : -1;
+    const nm = i => `punt ${i + 1} (${label(pairs[i].name)})`;
+    const since = t >= 0 ? `Sinds ${nm(t)} klopt het niet meer: ` : '';
+    if (t >= 0 && ok.includes(t)) {
+      const other = ok.find(i => i !== t);
+      if (other != null) return { text: `${since}${nm(t)} en ${nm(other)} spreken elkaar tegen. Eén van beide staat verkeerd.`, remove: [t, other], mark: [t, other] };
+      return { text: `${since}dat punt past niet bij de andere punten. Staat het op de goede plek, en is het goed gekoppeld?`, remove: [t], mark: [t] };
+    }
+    if (ok.length === 1) return { text: `${since}${nm(ok[0])} past niet bij de rest${t >= 0 ? ` (o.a. niet bij punt ${t + 1})` : ''}.`, remove: [ok[0]], mark: [ok[0]] };
+    if (ok.length >= 2) return { text: `${since}${nm(ok[0])} of ${nm(ok[1])} staat verkeerd; zonder één van beide klopt de rest wel.`, remove: [ok[0], ok[1]], mark: [ok[0], ok[1]] };
+    return { text: `${since}geen enkel los punt is de boosdoener; waarschijnlijk staan er meer verkeerd${t >= 0 ? `. Begin bij punt ${t + 1}` : ''}.`, remove: t >= 0 ? [t] : [], mark: t >= 0 ? [t] : [] };
+  }
+  function suspect() { return conflict()?.mark || []; }
+  function removePair(i) {
+    if (pairs[i] === touched) touched = null;
+    pairs.splice(i, 1); redraw();
   }
   function badFitHint() {
-    if (!fit.H || fit.err == null || fit.err < 1) return null;
-    const i = suspect();
+    if (!badFit()) return null;
+    const c = conflict();
     return h('div', { className: 'hint warn-hint', style: { margin: '8px 0' } },
-      h('b', {}, `De punten passen niet goed bij elkaar (gemiddeld ${fit.err.toFixed(1)} m ernaast). `),
-      i >= 0 ? `Waarschijnlijk klopt punt ${i + 1} (${label(pairs[i].name)}) niet: verkeerd gekoppeld, of net naast de plek geklikt. ` : '',
-      'Vaak gaat het om linker- en rechterpaal die verwisseld zijn. Verwijder dat punt (×) of sleep het naar de goede plek. ' +
-      'Zolang dit niet klopt, kloppen ook je kijkrichting op de tekening en de witte lijnen niet.');
+      h('b', {}, `De punten passen niet bij elkaar (gemiddeld ${fit.err.toFixed(1)} m ernaast). `),
+      c ? c.text + ' ' : '',
+      'Haal het weg of sleep het naar de goede plek. Vaak gaat het om linker- en rechterpaal die verwisseld zijn.',
+      c && c.remove.length ? h('div', { className: 'row', style: { marginTop: '6px', gap: '6px' } },
+        c.remove.map(i => h('button', { className: 'small', onclick: () => removePair(i) }, `Punt ${i + 1} weghalen`))) : null);
   }
 
   // Wat moet je nu doen? (alleen in de wizard)
@@ -622,9 +654,11 @@ export async function render(root, ctx) {
     else if (pendingPitch) [step, text] = ['2', 'Klik nu dat punt in het beeld links aan.'];
     else if (!info.ok) [step, text] = ['2', `Klik in het beeld op iets wat je herkent: een hoek van het strafschopgebied, de middenstip, een doelpaal, of een plek op een veldlijn. ${info.hint ? '(' + info.hint + ')' : ''} Zoom in voor precisie.`];
     else if (fit.H && fit.err != null && fit.err >= 1) {
-      const i = suspect();
+      const c = conflict();
       [step, text] = ['!', `De punten passen nog niet bij elkaar (${fit.err.toFixed(1)} m ernaast). ` +
-        (i >= 0 ? `Punt ${i + 1} (${label(pairs[i].name)}) is de vreemde eend: verwijder het (×) of sleep het naar de goede plek.` : 'Controleer de punten in de lijst: is er één verkeerd gekoppeld?')];
+        (c ? c.text + ' Haal het weg (×) of sleep het naar de goede plek.' : 'Controleer de punten in de lijst: is er één verkeerd gekoppeld?')];
+      if (c && c.remove.length) extra = h('div', { className: 'row', style: { gap: '6px' } },
+        c.remove.map(i => h('button', { className: 'small', onclick: () => removePair(i) }, `Punt ${i + 1} weghalen`)));
     } else {
       const tip = nextTip();
       [step, text] = ['3', 'Liggen de witte lijnen nu op het veld? Sla dan op. Nog niet goed? Sleep een punt of klik er een bij.' + (tip ? ' Tip: ' + tip.text : '')];
@@ -686,8 +720,10 @@ export async function render(root, ctx) {
       frameCanvas.width = im.naturalWidth; frameCanvas.height = im.naturalHeight;
       view = { s: 1, ox: 0, oy: 0 };
     }
-    predicted = clip.status === 'klaar' ? await api(`/clips/${clip.id}/predict?t=${t}`) : [];
-    redraw();
+    redraw();  // punten meteen tonen; de gele voorspelling kan even duren
+    const forT = t;
+    const pred = clip.status === 'klaar' ? await api(`/clips/${clip.id}/predict?t=${t}`).catch(() => []) : [];
+    if (forT === t) { predicted = pred; drawFrame(); }
   }
 
   async function loadKeyframes() {
