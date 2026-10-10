@@ -2,7 +2,7 @@
 // bijbehorende punt (of de lijn) op de veldtekening, of andersom. Weet de app waar je stond
 // (aangeklikt of via GPS), dan rekent hij met een cameramodel en is 1 punt + 1 lijn genoeg.
 import { api, h, fmtTime, toast } from '../util.js';
-import { PitchView, pitchPolylines } from '../pitch.js';
+import { PitchView, pitchPolylines, setPitchSize } from '../pitch.js';
 import { apply, inv, fitCalibration, calibrationInfo, calibrationError } from '../homography.js';
 import { stationsPanel } from './stations.js';
 import { heightField } from './camheight.js';
@@ -15,6 +15,7 @@ export async function render(root, ctx) {
     return;
   }
   const pitchInfo = await api(`/pitch?match_id=${match.id}`);
+  setPitchSize(pitchInfo.length, pitchInfo.width);  // tekening en punten altijd op dezelfde veldmaten
   let clip = clips.find(c => c.id === Number(ctx.params.get('clip'))) || clips[0];
   let t = 0, img = null, pairs = [], pendingImg = null, pendingPitch = null, editingId = null;
   let predicted = [], showPred = true, drag = null, keyframes = [];

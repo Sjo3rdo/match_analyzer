@@ -31,7 +31,8 @@ export async function render(root, ctx) {
   const nav = h('div', { className: 'wizard-nav' });
   root.append(stepper, card, nav);
 
-  const reload = async () => { match = await api(`/matches/${match.id}`); return match; };
+  // veldmaten kunnen onderweg veranderen (ingevuld, of herkend bij het uploaden): tekening meenemen
+  const reload = async () => { match = await api(`/matches/${match.id}`); setPitchSize(match.pitch_length, match.pitch_width); return match; };
   async function go(n) {
     cleanupStep(); cleanupStep = () => {};
     step = Math.min(STEPS.length, Math.max(1, n));
