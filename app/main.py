@@ -329,6 +329,8 @@ def upload_clips(match_id: int, files: list[UploadFile] = File(...)):
 
 VENUE_RADIUS_M = 150.0
 SAME_SPOT_M = 8.0
+SAME_PITCH_M = 30.0   # middelpunten van twee keer hetzelfde veld aangeklikt
+NEAR_PITCH_M = 40.0   # zo ver van de rand van een veld sta je nog bij dat veld
 
 
 def _gps_of_match(match_id: int) -> tuple[float, float] | None:
@@ -339,18 +341,65 @@ def _gps_of_match(match_id: int) -> tuple[float, float] | None:
 
 
 def _remember_venue(match_id: int) -> None:
-    """Veldmaten van deze wedstrijd onthouden voor deze plek (GPS)."""
-    m = store.one("SELECT pitch_length, pitch_width FROM matches WHERE id = ?", (match_id,))
+    """Veldmaten (en de hoeken op de luchtfoto) van deze wedstrijd onthouden voor deze plek (GPS)."""
+    m = store.one("SELECT pitch_length, pitch_width, pitch_corners FROM matches WHERE id = ?", (match_id,))
     pos = _gps_of_match(match_id)
-    if not m or pos is None or m["pitch_length"] is None:
+    if not m or m["pitch_length"] is None:
         return
-    for v in store.all("SELECT * FROM venues"):
+    size = (m["pitch_length"], m["pitch_width"])
+    if m["pitch_corners"]:  # het veld zelf is bekend: dat is de plek
+        corners = json.loads(m["pitch_corners"])
+        lat, lon = (sum(c[0] for c in corners) / 4, sum(c[1] for c in corners) / 4)
+        same = [v for v in store.all("SELECT * FROM venues WHERE corners IS NOT NULL")
+                if geo.distance_m(lat, lon, v["lat"], v["lon"]) < SAME_PITCH_M]
+        if not same and pos is not None:  # eerder alleen de maten onthouden voor deze plek
+            same = [v for v in store.all("SELECT * FROM venues WHERE corners IS NULL")
+                    if geo.distance_m(pos[0], pos[1], v["lat"], v["lon"]) < VENUE_RADIUS_M]
+        if same:
+            store.run("UPDATE venues SET lat = ?, lon = ?, pitch_length = ?, pitch_width = ?, corners = ?, "
+                      "updated_at = CURRENT_TIMESTAMP WHERE id = ?", (lat, lon, *size, m["pitch_corners"], same[0]["id"]))
+        else:
+            store.run("INSERT INTO venues (lat, lon, pitch_length, pitch_width, corners) VALUES (?,?,?,?,?)",
+                      (lat, lon, *size, m["pitch_corners"]))
+        return
+    if pos is None:
+        return
+    for v in store.all("SELECT * FROM venues WHERE corners IS NULL"):  # een veld met hoeken wijzigt alleen via de luchtfoto
         if geo.distance_m(pos[0], pos[1], v["lat"], v["lon"]) < VENUE_RADIUS_M:
             store.run("UPDATE venues SET pitch_length = ?, pitch_width = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                      (m["pitch_length"], m["pitch_width"], v["id"]))
+                      (*size, v["id"]))
             return
-    store.run("INSERT INTO venues (lat, lon, pitch_length, pitch_width) VALUES (?,?,?,?)",
-              (pos[0], pos[1], m["pitch_length"], m["pitch_width"]))
+    store.run("INSERT INTO venues (lat, lon, pitch_length, pitch_width) VALUES (?,?,?,?)", (pos[0], pos[1], *size))
+
+
+def _known_pitch(lat: float, lon: float) -> dict | None:
+    """Het veld (met hoeken op de luchtfoto) waar je eerder vanaf deze GPS-plek filmde."""
+    best = None
+    for v in store.all("SELECT * FROM venues WHERE corners IS NOT NULL"):
+        corners = json.loads(v["corners"])
+        d = geo.distance_to_pitch(lat, lon, corners)
+        if d < NEAR_PITCH_M and (best is None or d < best[0]):
+            best = (d, v)
+    return best[1] if best else None
+
+
+def _place_from_corners(match_id: int, only_clip: int | None = None) -> int:
+    """Video's met GPS (en zonder zelf aangeklikte of uitgerekende plek) op het veld zetten via de
+    hoeken op de luchtfoto."""
+    m = _get("matches", match_id)
+    if not m.get("pitch_corners"):
+        return 0
+    corners, geom = json.loads(m["pitch_corners"]), pitch.of_match(m)
+    n = 0
+    for c in store.all("SELECT * FROM clips WHERE match_id = ? AND gps_lat IS NOT NULL", (match_id,)):
+        if (only_clip is not None and c["id"] != only_clip) or c["cam_source"] in ("hand", "standplaats", "kopie"):
+            continue
+        x, y = geo.latlon_to_pitch(c["gps_lat"], c["gps_lon"], corners, geom)
+        store.run("UPDATE clips SET cam_x = ?, cam_y = ?, cam_h = COALESCE(cam_h, 1.6), cam_source = 'gps' WHERE id = ?",
+                  (round(x, 1), round(y, 1), c["id"]))
+        analytics.invalidate(clip_id=c["id"])
+        n += 1
+    return n
 
 
 def _learn_for_new_clip(match_id: int, clip_id: int) -> list[str]:
@@ -361,16 +410,24 @@ def _learn_for_new_clip(match_id: int, clip_id: int) -> list[str]:
         return out
     m = _get("matches", match_id)
     if m.get("pitch_length") is None:  # veldmaten nog niet ingesteld: kennen we dit veld?
-        best = None
-        for v in store.all("SELECT * FROM venues WHERE pitch_length IS NOT NULL"):
-            d = geo.distance_m(c["gps_lat"], c["gps_lon"], v["lat"], v["lon"])
-            if d < VENUE_RADIUS_M and (best is None or d < best[0]):
-                best = (d, v)
-        if best:
-            g = set_pitch_size(match_id, best[1]["pitch_length"], best[1]["pitch_width"])
-            out.append(f"Veldmaten {g.length:g} × {g.width:g} m overgenomen: je hebt eerder op dit veld gefilmd")
+        known = _known_pitch(c["gps_lat"], c["gps_lon"])
+        if known:
+            store.run("UPDATE matches SET pitch_corners = ? WHERE id = ?", (known["corners"], match_id))
+            g = set_pitch_size(match_id, known["pitch_length"], known["pitch_width"])
+            out.append(f"Veld {g.length:g} × {g.width:g} m herkend op de luchtfoto: je hebt hier eerder gefilmd")
+        else:
+            best = None
+            for v in store.all("SELECT * FROM venues WHERE pitch_length IS NOT NULL"):
+                d = geo.distance_m(c["gps_lat"], c["gps_lon"], v["lat"], v["lon"])
+                if d < VENUE_RADIUS_M and (best is None or d < best[0]):
+                    best = (d, v)
+            if best:
+                g = set_pitch_size(match_id, best[1]["pitch_length"], best[1]["pitch_width"])
+                out.append(f"Veldmaten {g.length:g} × {g.width:g} m overgenomen: je hebt eerder op dit veld gefilmd")
     if _share_camera(match_id):
         out.append("Je positie is overgenomen van een andere video die je vanaf dezelfde plek filmde")
+    elif _place_from_corners(match_id, only_clip=clip_id):
+        out.append("Je positie is uitgerekend uit de GPS van de video en het veld op de luchtfoto")
     return out
 
 
@@ -396,9 +453,9 @@ def _share_camera(match_id: int) -> int:
 
 def _store_probe(cid: int, path: Path, info: dict, inherit: dict | None = None) -> None:
     """Videogegevens opslaan; bij knippen GPS en camerapositie van het origineel overnemen."""
-    extra = {k: info.get(k) for k in ("gps_lat", "gps_lon", "gps_acc", "device", "rec_start")}
+    extra = {k: info.get(k) for k in ("gps_lat", "gps_lon", "gps_acc", "gps_acc_raw", "device", "rec_start")}
     if inherit:
-        for k in ("gps_lat", "gps_lon", "gps_acc", "device", "cam_x", "cam_y", "cam_h", "cam_source"):
+        for k in ("gps_lat", "gps_lon", "gps_acc", "gps_acc_raw", "device", "cam_x", "cam_y", "cam_h", "cam_source"):
             if extra.get(k) is None:
                 extra[k] = inherit.get(k)
     sets = ", ".join(f"{k} = ?" for k in extra)
@@ -657,6 +714,62 @@ def camera_from_gps(clip_id: int, data: dict = Body(default={})):
     analytics.invalidate(clip_id=clip_id)
     g = pitch.of_match(_get("matches", c["match_id"]))
     return {**pos, "clip": _get("clips", clip_id), "match_pitch": {"length": g.length, "width": g.width}}
+
+
+# --- luchtfoto (PDOK) -----------------------------------------------------------------------------
+# De browser haalt de luchtfoto zelf op bij PDOK (de gratis luchtfoto van de Nederlandse overheid),
+# pas als de gebruiker hem opent. De app zelf stuurt niets weg.
+
+AERIAL_TILES = "https://service.pdok.nl/hwh/luchtfotorgb/wmts/v1_0/Actueel_orthoHR/EPSG:3857/{z}/{x}/{y}.jpeg"
+
+
+@app.get("/api/matches/{match_id}/aerial")
+def get_aerial(match_id: int):
+    """Wat de luchtfoto nodig heeft: waar het veld ligt (hoeken, als bekend) en waar de video's zijn gefilmd."""
+    m = _get("matches", match_id)
+    pos = _gps_of_match(match_id)
+    corners, known = (json.loads(m["pitch_corners"]) if m.get("pitch_corners") else None), None
+    if corners is None and pos is not None:
+        v = _known_pitch(*pos)
+        if v:
+            corners, known = json.loads(v["corners"]), {"length": v["pitch_length"], "width": v["pitch_width"]}
+    clips = [{k: c[k] for k in ("id", "filename", "gps_lat", "gps_lon", "gps_acc", "cam_x", "cam_y", "cam_source")}
+             for c in store.all("SELECT * FROM clips WHERE match_id = ? ORDER BY order_idx, id", (match_id,))]
+    g = pitch.of_match(m)
+    return {"center": list(pos) if pos else None, "corners": corners, "known": known, "saved": bool(m.get("pitch_corners")),
+            "pitch": {"length": g.length, "width": g.width}, "tiles": AERIAL_TILES, "clips": clips}
+
+
+@app.post("/api/matches/{match_id}/pitch-corners")
+def set_pitch_corners(match_id: int, data: dict = Body(...)):
+    """De 4 hoekvlaggen, aangeklikt op de luchtfoto (lat, lon; volgorde maakt niet uit).
+    Daaruit volgen de veldmaten en, met de GPS van elke video, waar je stond."""
+    _get("matches", match_id)
+    try:
+        corners = [[float(a), float(b)] for a, b in data.get("corners") or []]
+        corners = geo.order_corners(corners, _gps_of_match(match_id))
+        size = geo.pitch_from_corners(corners)
+    except (TypeError, ValueError) as e:
+        raise HTTPException(400, str(e)) from e
+    store.run("UPDATE matches SET pitch_corners = ? WHERE id = ?", (json.dumps(corners), match_id))
+    g = set_pitch_size(match_id, size["length"], size["width"])
+    _remember_venue(match_id)
+    n = _place_from_corners(match_id)
+    return {"corners": corners, "length": g.length, "width": g.width, "placed": n}
+
+
+@app.post("/api/clips/{clip_id}/camera/latlon")
+def camera_from_latlon(clip_id: int, data: dict = Body(...)):
+    """Je plek, aangeklikt op de luchtfoto."""
+    c = _get("clips", clip_id)
+    m = _get("matches", c["match_id"])
+    if not m.get("pitch_corners"):
+        raise HTTPException(400, "Klik eerst de 4 hoeken van het veld aan op de luchtfoto")
+    try:
+        x, y = geo.latlon_to_pitch(float(data["lat"]), float(data["lon"]), json.loads(m["pitch_corners"]), pitch.of_match(m))
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(400, "Ongeldige plek") from e
+    return set_camera(clip_id, {"x": round(x, 1), "y": round(y, 1), "h": c.get("cam_h") or 1.6, "source": "hand"})
 
 
 @app.get("/api/clips/{clip_id}/propose")

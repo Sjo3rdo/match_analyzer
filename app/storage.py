@@ -205,6 +205,15 @@ class Store:
                          ("cam_x", "REAL"), ("cam_y", "REAL"), ("cam_h", "REAL"), ("cam_source", "TEXT")):
             if col not in cols:
                 self.run(f"ALTER TABLE clips ADD COLUMN {col} {typ}")
+        # GPS-nauwkeurigheid inclusief de afronding op 4 decimalen (zie geo.effective_accuracy);
+        # de waarde uit de video zelf blijft bewaard in gps_acc_raw
+        if "gps_acc_raw" not in {r["name"] for r in self.all("PRAGMA table_info(clips)")}:
+            from .geo import effective_accuracy
+            self.run("ALTER TABLE clips ADD COLUMN gps_acc_raw REAL")
+            with self.tx() as c:
+                for r in c.execute("SELECT id, gps_lat, gps_lon, gps_acc FROM clips WHERE gps_lat IS NOT NULL").fetchall():
+                    c.execute("UPDATE clips SET gps_acc_raw = ?, gps_acc = ? WHERE id = ?",
+                              (r["gps_acc"], effective_accuracy(r["gps_lat"], r["gps_lon"], r["gps_acc"]), r["id"]))
         # Analysekeuze (nauwkeurig/snel) en speelrichting per video (NULL = automatisch: 2e helft omdraaien)
         for col, typ in (("analysis_mode", "TEXT"), ("flip", "INTEGER")):
             if col not in cols:
@@ -237,9 +246,12 @@ class Store:
                          ("team1_color", "TEXT"), ("team0_squad", "INTEGER"), ("team1_squad", "INTEGER"),
                          ("half_length", "INTEGER"), ("stations_status", "TEXT"), ("stations_progress", "REAL"),
                          ("stations_message", "TEXT"), ("kickoff", "REAL"), ("kickoff2", "REAL"),
-                         ("wizard_step", "INTEGER"), ("wizard_done", "INTEGER")):
+                         ("wizard_step", "INTEGER"), ("wizard_done", "INTEGER"),
+                         ("pitch_corners", "TEXT")):  # 4 hoeken (lat, lon) van het veld, op de luchtfoto
             if col not in mcols:
                 self.run(f"ALTER TABLE matches ADD COLUMN {col} {typ}")
+        if "corners" not in {r["name"] for r in self.all("PRAGMA table_info(venues)")}:
+            self.run("ALTER TABLE venues ADD COLUMN corners TEXT")
         # Oude 'markers' (één tijdstip) worden clips (begin + eind), zoals in een video-editor
         with self.tx() as c:
             for m in c.execute("SELECT * FROM markers").fetchall():

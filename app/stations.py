@@ -432,7 +432,7 @@ def calibrate_clip(store: Store, clip: dict, cam: np.ndarray, refs: list[_Ref], 
 
     Eerst de omgeving: elke paar seconden een beeld van deze video tegen het panorama leggen; het
     beeld met de meeste overeenkomst wint. Lukt dat niet en `lines`: de veldlijnen zoeken."""
-    from .autocalib import keyframe_points, propose, refine
+    from .autocalib import camera_from_h, keyframe_points, propose, refine
     size = (int(clip["width"]), int(clip["height"]))
     frames = store.all("SELECT t FROM frames WHERE clip_id = ? ORDER BY idx", (clip["id"],))
     if not frames:
@@ -454,12 +454,21 @@ def calibrate_clip(store: Store, clip: dict, cam: np.ndarray, refs: list[_Ref], 
     # elk moment dat klopt wordt een ijkmoment: dan hoeft de gemeten camerabeweging nooit ver te
     # overbruggen (bij zwenken raakt die anders het spoor kwijt)
     extra = []
+    delta = None  # correctie die de lijnen op het eerste moment gaven; geldt ongeveer voor de hele video
     for n_in, ft, (K, info) in sorted(cands, key=lambda c: -c[0]):
         ok, p = plausible(K, cam, size, corners)
         if not ok:
             continue
         H = normalize_h(np.linalg.inv(K))  # veld -> beeld
-        res = refine(shots[ft], H, None, f_full, camera={**cam_dict, "q0": p[3:]}, geom=geom)
+        q_pred = camera_from_h(H, cam_dict, size, p[3:], geom)
+        if delta is None:  # ruim zoeken (tot een paar graden, en op het doel richten)
+            res = refine(shots[ft], H, None, f_full, camera={**cam_dict, "q0": q_pred, "search": True}, geom=geom)
+            if res is not None:
+                delta = np.array(res[1]["params"]) - q_pred
+        else:  # dezelfde correctie alvast toepassen, dan alleen nog fijn bijstellen (veel sneller)
+            q1 = q_pred + delta
+            H1 = normalize_h(camera_homography(np.array([*cam[:3], *q1]), size))
+            res = refine(shots[ft], H1, None, f_full, camera={**cam_dict, "q0": q1}, geom=geom)
         if res is not None:
             H = res[0]
             info = {**info, "lijnen": True}

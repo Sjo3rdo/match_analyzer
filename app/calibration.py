@@ -424,7 +424,7 @@ class CameraModel:
 # Coördinaten: X langs het veld, Y naar de onderste zijlijn, Z omlaag (rechtshandig), dus
 # een camera op 1,6 m hoogte staat op Z = -1,6.
 
-DEFAULT_HFOV_DEG = 64.0  # telefoon, hoofdlens (1x), video met stabilisatie
+DEFAULT_HFOV_DEG = 57.0  # telefoon, hoofdlens (1x), video met stabilisatie (iPhone 15: 54-61 graden gemeten)
 
 
 def camera_homography(params: np.ndarray, size: tuple[int, int]) -> np.ndarray:
@@ -449,10 +449,10 @@ def camera_projection(params: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     W, Hh = size
     f = math.exp(min(max(logf, 0.0), 15.0))  # begrensd: een ontspoorde zoom mag niet crashen
     fwd = np.array([math.cos(yaw) * math.cos(tilt), math.sin(yaw) * math.cos(tilt), math.sin(tilt)])
-    down = np.array([0.0, 0.0, 1.0])
-    right = np.cross(down, fwd)
+    right = np.array([-fwd[1], fwd[0], 0.0])  # (0, 0, 1) x fwd, zonder np.cross (dat is traag)
     right /= np.linalg.norm(right) or 1.0
-    dn = np.cross(fwd, right)
+    dn = np.array([fwd[1] * right[2] - fwd[2] * right[1], fwd[2] * right[0] - fwd[0] * right[2],
+                   fwd[0] * right[1] - fwd[1] * right[0]])
     cr, sr = math.cos(roll), math.sin(roll)
     right, dn = cr * right + sr * dn, -sr * right + cr * dn
     R = np.stack([right, dn, fwd])

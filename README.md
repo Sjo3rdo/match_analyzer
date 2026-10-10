@@ -65,10 +65,13 @@ wedstrijdpagina een knop **Verder met stap …**.
    wachten: ga gerust door.
 5. **Veld vastleggen.** Per helft (je staat vaak per helft ergens anders) en per standplaats één
    video; de app stelt die met het meeste veld in beeld voor. Dat gaat in vier stapjes:
-   - **a. Waar stond je?** Klik **📡 Zoek mijn plek via GPS**: de app zoekt het voetbalveld op in
-     OpenStreetMap en zet je plek als 📍 op een grote veldtekening, met een gele cirkel voor de
-     onnauwkeurigheid. Lukt dat niet, dan blijft de reden in beeld staan en klik je zelf op de
-     tekening waar je stond.
+   - **a. Waar stond je?** Klik **🛰️ Toon de luchtfoto** en klik de 4 hoekvlaggen van het veld aan
+     (volgorde maakt niet uit). De app tekent meteen de veldlijnen geel over de foto: liggen ze op
+     de lijnen van de foto, dan klopt het; anders sleep je een hoek bij. Na **✓ Veld opslaan** weet
+     de app de echte veldmaten en, met de GPS van elke video, waar je stond (blauwe stip met de
+     onzekerheid). Klik op de foto waar je precies stond om dat te verbeteren. Een veld dat je zo
+     hebt vastgelegd onthoudt de app: film je daar weer, dan hoef je alleen te bevestigen.
+     Geen luchtfoto? Onder **Andere manieren** staan OpenStreetMap en zelf klikken op de tekening.
    - **b. Plek verbeteren.** Sleep de 📍 naar waar je echt stond, kies hoe hoog je stond (staand,
      bankje, tribune) en vul de veldmaten in (of neem die van OpenStreetMap over).
    - **c. Veld intekenen.** De app zoekt zelf de witte lijnen en tekent de veldlijnen geel over het
@@ -177,14 +180,28 @@ minimap**, **Statistieken** en **Clips & delen**.
      100 × 64. Vul de echte maten in bij **Veldmaten** (op de pagina Kalibratie); dan kloppen
      afstanden en posities beter. Het strafschopgebied en de middencirkel zijn altijd even groot.
      Na **Zoek via GPS** biedt de app aan om de maten uit OpenStreetMap over te nemen.
+   - **🛰️ Luchtfoto.** Op de pagina Kalibratie staat naast **Zoek via GPS** ook **🛰️ Luchtfoto**:
+     klik de 4 hoekvlaggen aan (veldmaten en ligging) en daarna je eigen plek. De luchtfoto komt van
+     PDOK (de gratis luchtfoto van de overheid, 8 cm per pixel). Alleen je browser haalt de stukjes
+     foto rond het veld op, en pas als je de luchtfoto opent; je video's blijven op je computer.
    - **Zoek via GPS.** iPhone-video's bevatten meestal de GPS-positie. De knop **📡 Zoek via GPS**
      zoekt het voetbalveld op in OpenStreetMap en zet je positie automatisch op de tekening. Daarvoor
      wordt alleen de coördinaat naar OpenStreetMap gestuurd, en alleen als jij op de knop klikt.
      De app vraagt alle OpenStreetMap-zoekservers tegelijk (de eerste die antwoordt wint), en
      antwoordt er geen op tijd, dan haalt hij het kaartje rond je plek rechtstreeks van
      openstreetmap.org. Een gevonden veld onthoudt de app voor die plek. Lukt het toch niet, dan zegt
-     de app in gewone woorden waarom (druk, geen internet of een certificaatprobleem). De
-     iPhone slaat de positie op ongeveer 5 à 10 m nauwkeurig op; klik je plek gerust preciezer aan.
+     de app in gewone woorden waarom (druk, geen internet of een certificaatprobleem). Let op: een
+     iPhone schrijft de plek in een video met maar 4 decimalen weg (stapjes van 11 × 7 m), ook als
+     hij "2 m nauwkeurig" meldt. De app rekent daarom met zo'n 7 m onzekerheid; klik je plek op de
+     luchtfoto aan voor het beste resultaat.
+   - **De lijnen corrigeren de kalibratie zelf.** Is een kalibratie doorgegeven (vanaf een andere
+     video of een ander moment) en ligt de gele lijn naast de zijlijn, dan stelt de app hem bij op
+     de witte lijnen in beeld: eerst grof (tot 5 graden draaien en kantelen), dan precies op de
+     lijnpixels, zoals je een overtrekvel op een foto schuift. Met alleen de zijlijn in beeld kan
+     de app niet zien hoe ver je langs die lijn gedraaid bent; staat er een doel in beeld, dan
+     richt hij daarop (palen en lat op het witte frame), anders houdt hij die draairichting zoals
+     hij was en corrigeert alleen op/neer en scheefstand. Lijnen tussen jou en het veld (de
+     coachzone voor de dug-out) tellen niet mee.
    - **Veel video's? Kalibreer per standplaats maar één.** Zie het als een fotograaf op een statief:
      vanaf dezelfde plek zijn positie, hoogte en zoom gelijk, alleen de kijkrichting verschilt.
      Bovenaan de pagina Kalibratie staat **Alle video's in één keer**. De app deelt je video's in
