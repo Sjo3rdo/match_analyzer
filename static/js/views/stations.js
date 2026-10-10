@@ -47,8 +47,11 @@ export function stationsPanel(match, openClip) {
   }
 
   function station(st) {
-    const todo = st.clips.filter(c => c.state === 'voorstel');
+    const todo = st.clips.filter(c => c.state === 'voorstel' && !c.uncertain);  // onzekere niet in één klik
     const pick = st.clips.find(c => c.state !== 'niet_geanalyseerd') || st.clips[0];
+    // welke video kun je het beste nog zelf kalibreren? De verst weggedraaide onzekere, anders een mislukte
+    const unsure = st.clips.filter(c => c.state === 'voorstel' && c.uncertain).sort((a, b) => (b.turn_deg || 0) - (a.turn_deg || 0));
+    const next = st.anchor ? (unsure[0] || st.clips.find(c => c.state === 'mislukt')) : null;
     return h('div', { className: 'station' },
       h('div', { className: 'row', style: { justifyContent: 'space-between' } },
         h('div', {}, h('b', {}, st.label), ' ',
@@ -64,6 +67,13 @@ export function stationsPanel(match, openClip) {
             for (const c of todo) await api(`/clips/${c.id}/calib-review`, { json: { status: 'goedgekeurd' } });
             toast(`${todo.length} goedgekeurd`); draw();
           } }, `✓ Alle ${todo.length} goedkeuren`) : null)),
+      next ? h('div', { className: 'hint warn-hint', style: { margin: '8px 0' } },
+        h('b', {}, `Kalibreer ook ${next.filename} zelf. `),
+        next.uncertain
+          ? `Die kijkt tot ${next.turn_deg}° een andere kant op dan je eigen ijkmoment. Eén ijkmoment aan die kant (twee doelpalen aanklikken is genoeg) maakt alle voorstellen daar net zo nauwkeurig als aan jouw kant. `
+          : 'Die vond de app niet; een eigen ijkmoment daar helpt de video\'s die dezelfde kant op kijken. ',
+        'Klik daarna opnieuw op 🤖 Kalibreer de rest automatisch.',
+        h('div', { style: { marginTop: '6px' } }, h('button', { className: 'small primary', onclick: () => openClip(next.id) }, `✎ ${next.filename} nu kalibreren`))) : null,
       h('div', { className: 'thumbs' }, st.clips.map(c => card(c))));
   }
 
@@ -84,7 +94,7 @@ export function stationsPanel(match, openClip) {
         h('span', { className: `badge ${cls}` }, text)),
       c.method && c.state === 'voorstel' ? h('div', { className: 'small muted' }, c.method === 'omgeving' ? 'via de omgeving' : 'via de veldlijnen') : null,
       c.uncertain && c.state === 'voorstel' ? h('div', { className: 'small warn', title: 'Het panorama is vanaf je ijkmoment ver doorgedraaid; kleine afwijkingen in de zoom tellen dan op.' },
-        `Onzeker: ${c.turn_deg}° weggedraaid van je ijkmoment. Controleer goed, of kalibreer een video die deze kant op kijkt zelf.`) : null,
+        `Onzeker: tot ${c.turn_deg}° weggedraaid van je ijkmoment. Controleer goed, of kalibreer een video die die kant op kijkt zelf.`) : null,
       h('div', { className: 'row small', style: { marginTop: '4px' } },
         c.state === 'voorstel' ? h('button', { className: 'small primary', onclick: () => review('goedgekeurd'), title: 'De gele lijnen liggen op de witte' }, '✓') : null,
         c.state === 'voorstel' ? h('button', { className: 'small danger', onclick: () => review('afgekeurd'), title: 'Klopt niet: weghalen' }, '✗') : null,

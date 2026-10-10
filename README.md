@@ -197,8 +197,12 @@ minimap**, **Statistieken** en **Clips & delen**.
      camera op jouw standplaats, gooit de app zelf weg.
      **Onzeker** staat erbij als een video ver (meer dan 45°) is weggedraaid van je ijkmoment: hoe
      verder het panorama doordraait, hoe meer kleine afwijkingen in de zoom van de lens optellen.
-     Kijk die extra goed na, of kalibreer zelf één video die die kant op kijkt; dan worden de
-     voorstellen aan die kant net zo nauwkeurig als je eigen ijkmoment. Daarna loop je de plaatjes langs: liggen de
+     De app wijst dan zelf aan welke video je het beste nog met de hand kunt kalibreren (de verst
+     weggedraaide); twee doelpalen aanklikken is genoeg. Klik daarna opnieuw op **🤖 Kalibreer de
+     rest automatisch**: het panorama werkt als een routeplanner en neemt voor elk beeld de kortste
+     weg naar een ijkmoment, ook via een andere video. Zo worden de voorstellen aan die kant net zo
+     nauwkeurig als aan jouw kant. Vuistregel: één eigen ijkmoment per kant van het veld.
+     **✓ Alle goedkeuren** slaat onzekere voorstellen over; die keur je los. Daarna loop je de plaatjes langs: liggen de
      gele lijnen op de witte? **✓** keurt goed, **✗** haalt het voorstel weg, **✎** opent de video
      om het zelf te doen. Klik op een plaatje om het groot te zien. Goedgekeurde video's helpen bij
      de volgende ronde weer mee als puzzelstuk.
