@@ -88,8 +88,10 @@ def test_osm_search_falls_back_and_explains_problems(monkeypatch, tmp_path):
         return urlopen
     monkeypatch.setattr(geo.urllib.request, "urlopen", fake("one-busy"))
     assert len(geo.query_pitches(53.0, 6.0)) == 1  # een andere zoekserver antwoordde
-    calls.clear()
-    assert len(geo.query_pitches(53.0, 6.0)) == 1 and calls == []  # onthouden: niet opnieuw zoeken
+    def no_net(req, timeout=None, context=None):  # onthouden: niet opnieuw zoeken
+        raise AssertionError(f"onnodig opnieuw gezocht: {req.full_url}")
+    monkeypatch.setattr(geo.urllib.request, "urlopen", no_net)
+    assert len(geo.query_pitches(53.0, 6.0)) == 1
     monkeypatch.setattr(geo.urllib.request, "urlopen", fake("overpass-down"))
     polys = geo.query_pitches(53.2, 6.2)
     assert len(polys) == 1 and len(polys[0]) == 5 and any(c.startswith(geo.OSM_API) for c in calls)

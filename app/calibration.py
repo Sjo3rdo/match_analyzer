@@ -447,7 +447,7 @@ def camera_projection(params: np.ndarray, size: tuple[int, int]) -> np.ndarray:
     Een punt op hoogte z heeft Z = -z."""
     cx, cy, h, yaw, tilt, roll, logf = params
     W, Hh = size
-    f = math.exp(logf)
+    f = math.exp(min(max(logf, 0.0), 15.0))  # begrensd: een ontspoorde zoom mag niet crashen
     fwd = np.array([math.cos(yaw) * math.cos(tilt), math.sin(yaw) * math.cos(tilt), math.sin(tilt)])
     down = np.array([0.0, 0.0, 1.0])
     right = np.cross(down, fwd)
@@ -468,6 +468,9 @@ def default_focal(width: int) -> float:
 
 
 YAW_SIGMA = math.radians(15)  # zo precies wijst iemand zijn kijkrichting op de tekening aan
+# Straf voor een punt achter de camera. Moet zwaarder wegen dan elke echte misfit: anders "wint" een
+# kijkrichting waarin alles achter je ligt van een bijna-goede (dat gebeurde bij lage camera's).
+BEHIND = 1e3
 
 
 def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma0: float = 3.0,
@@ -482,13 +485,13 @@ def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma0:
         if q.get("pitch3") is not None:  # punt in de lucht (bovenkant van een doelpaal)
             v = project_3d(P, q["pitch3"])[0]
             if not np.isfinite(v).all():
-                r += [50.0, 50.0]
+                r += [BEHIND, BEHIND]
                 continue
             r += [(v[0] - x) / sigma_px, (v[1] - y) / sigma_px]
         elif q.get("line3"):  # ergens op een lijn in de lucht (de lat)
             a, b = project_3d(P, q["line3"])
             if not (np.isfinite(a).all() and np.isfinite(b).all()):
-                r.append(50.0)
+                r.append(BEHIND)
                 continue
             l = _line_coeffs((a, b))
             r.append((l[0] * x + l[1] * y + l[2]) / sigma_px)
@@ -496,7 +499,7 @@ def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma0:
             X, Y = q["pitch"]
             v = H @ np.array([X, Y, 1.0])
             if v[2] <= 1e-6:  # achter de camera: zware straf
-                r += [50.0, 50.0]
+                r += [BEHIND, BEHIND]
                 continue
             r += [(v[0] / v[2] - x) / sigma_px, (v[1] / v[2] - y) / sigma_px]
         else:
@@ -556,8 +559,12 @@ def _lm(fun, p0: np.ndarray, iters: int = 60) -> np.ndarray:
                 step = np.linalg.solve(A + lam * np.diag(np.diag(A) + 1e-9), -g)
             except np.linalg.LinAlgError:
                 break
-            r_new = fun(p + step)
-            if np.all(np.isfinite(r_new)) and r_new @ r_new < r @ r:
+            try:
+                with np.errstate(all="ignore"):
+                    r_new = fun(p + step)
+            except (OverflowError, ValueError, ZeroDivisionError, np.linalg.LinAlgError):
+                r_new = None  # ontspoorde stap (bijv. een onmogelijke zoom): kleiner proberen
+            if r_new is not None and np.all(np.isfinite(r_new)) and r_new @ r_new < r @ r:
                 p, r, lam, improved = p + step, r_new, max(lam / 3, 1e-7), True
                 break
             lam *= 4
@@ -579,10 +586,12 @@ def fit_camera(points: list[dict], prior: dict) -> tuple[np.ndarray, dict]:
     # Startwaarden: alle kijkrichtingen proberen, de beste verfijnen
     starts = []
     yaws = np.arange(0, 360, 10) if prior.get("yaw") is None else math.degrees(prior["yaw"]) + np.arange(-40, 41, 10)
+    # ook licht omhoog kijken (laag langs de lijn, richting horizon) en ingezoomd
     for yaw in np.radians(yaws):
-        for tilt in np.radians([2, 5, 10, 18, 30, 45]):
-            p0 = np.array([prior["x"], prior["y"], prior["h"], yaw, tilt, 0.0, math.log(prior["f"])])
-            starts.append((float(np.sum(fun(p0) ** 2)), p0))
+        for tilt in np.radians([-4, 0, 2, 5, 10, 18, 30, 45]):
+            for zoom in (1.0, 1.6, 2.5):
+                p0 = np.array([prior["x"], prior["y"], prior["h"], yaw, tilt, 0.0, math.log(prior["f"] * zoom)])
+                starts.append((float(np.sum(fun(p0) ** 2)), p0))
     starts.sort(key=lambda c: c[0])
     fits = [_lm(fun, p0) for _, p0 in starts[:4]]
     p = min(fits, key=lambda q: float(np.sum(fun(q) ** 2)))
@@ -651,7 +660,7 @@ def camera_from_homography(K: np.ndarray, size: tuple[int, int]) -> tuple[np.nda
         return np.where(np.isfinite(r), r, 1e3).ravel()
     starts = []
     for yaw in np.radians(np.arange(0, 360, 15)):
-        for tilt in np.radians([3, 8, 15, 30]):
+        for tilt in np.radians([-2, 3, 8, 15, 30]):
             p0 = np.array([x0, y0, h0, yaw, tilt, 0.0, math.log(f)])
             starts.append((float(np.sum(res(p0) ** 2)), p0))
     starts.sort(key=lambda c: c[0])

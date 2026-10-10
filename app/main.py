@@ -1259,7 +1259,12 @@ def get_stations(match_id: int):
             prop = [k for k in kfs if k.get("source") == "standplaats"]
             state = ("eigen" if own else c.get("calib_review") if prop or c.get("calib_review") in ("mislukt", "afgekeurd")
                      else "niet_geanalyseerd" if c["status"] != "klaar" else "open")
+            scores = [k["score"] if isinstance(k.get("score"), dict) else json.loads(k.get("score") or "{}") for k in prop]
+            zwaai = [float(x["zwaai"]) for x in scores if x.get("zwaai") is not None]
             clips.append({"id": c["id"], "filename": c["filename"], "status": c["status"], "state": state,
+                          # het verst weggedraaide moment telt: ook halverwege wegzwenken maakt (dat deel) onzeker
+                          "uncertain": bool(zwaai) and max(zwaai) > stations.TRUST_DEG,
+                          "turn_deg": round(max(zwaai)) if zwaai else None,
                           "method": c.get("calib_method"), "gps_acc": c.get("gps_acc"), "rec_start": c.get("rec_start"),
                           "period": c.get("period"), "start_minute": c.get("start_minute"),
                           "has_calibration": bool(own or prop), "calib_status": c.get("calib_status")})
