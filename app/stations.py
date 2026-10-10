@@ -158,13 +158,23 @@ def clip_camera(store: Store, clip: dict) -> np.ndarray | None:
 
 
 def anchor(store: Store, station: dict) -> tuple[dict, np.ndarray] | None:
-    """De video van deze standplaats die je zelf hebt gekalibreerd (met de camera die eruit volgt)."""
+    """De video van deze standplaats die je zelf hebt gekalibreerd (met de camera die eruit volgt).
+    Zijn er meer, dan de best vastgelegde (meeste punten): daar liggen plek, hoogte en zoom het
+    zekerst vast. Twee doelpalen alleen laten bijv. de zoom vrij wankel."""
+    from .calibration import calibration_dof
+    best = None
     for c in station["clips"]:
         if c["status"] == "klaar" or c.get("width"):
+            kfs = _manual_keyframes(store, c["id"])
+            if not kfs:
+                continue
             p = clip_camera(store, c)
-            if p is not None:
-                return c, p
-    return None
+            if p is None:
+                continue
+            dof = max(calibration_dof(k["points"], elevated=True) for k in kfs)
+            if best is None or dof > best[0]:
+                best = (dof, c, p)
+    return None if best is None else (best[1], best[2])
 
 
 # --- 3. omgeving herkennen -------------------------------------------------------------------
@@ -547,9 +557,12 @@ def run(store: Store, match_id: int, progress=None, worker=None) -> dict:
         a = anchor(store, st)
         if a is not None and any(item[0]["id"] == st["id"] for item in pending):
             refs_of[st["id"]] = references(store, st)
-            if anchor_moments(store, a, refs_of[st["id"]], geom) and worker is not None:
-                worker.submit_autocalib(a[0]["id"])
-            analytics.invalidate(clip_id=a[0]["id"])
+            for c in st["clips"]:
+                if not _manual_keyframes(store, c["id"]):
+                    continue
+                if anchor_moments(store, (c, a[1]), refs_of[st["id"]], geom) and worker is not None:
+                    worker.submit_autocalib(c["id"])
+                analytics.invalidate(clip_id=c["id"])
     progress_made = True
     while pending and progress_made:  # rondes via de omgeving
         progress_made = False
