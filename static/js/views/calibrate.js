@@ -363,7 +363,7 @@ export async function render(root, ctx) {
       const r = await api(`/clips/${clip.id}/calibrate-preview`, { json: { points: pairs } }).catch(() => null);
       if (seq !== fitSeq) return;
       const wasBad = badFit();
-      fit = r && r.ok ? { H: r.H, err: r.error_m, cam: r.camera, goals: r.goals || [], msg: '', without: r.without || null, withoutOk: r.without_ok }
+      fit = r && r.ok ? { H: r.H, err: r.error_m, errPx: r.error_px, badPx: r.bad_px, cam: r.camera, goals: r.goals || [], msg: '', without: r.without || null, withoutOk: r.without_ok }
         : { H: null, err: null, cam: null, msg: r?.message || 'mislukt' };
       if (!badFit()) trigger = null;
       else if (!wasBad || !pairs.includes(trigger)) trigger = pairs.includes(touched) ? touched : null;
@@ -556,7 +556,7 @@ export async function render(root, ctx) {
       const cx = fit.cam ? fit.cam.x : clip.cam_x, cy = fit.cam ? fit.cam.y : clip.cam_y;
       if (fit.cam) {
         const a = fit.cam.yaw_deg * Math.PI / 180, half = fit.cam.hfov_deg * Math.PI / 360;
-        c.save(); c.fillStyle = fit.err >= 1 ? 'rgba(255,90,95,.16)' : 'rgba(10,132,255,.18)'; c.beginPath(); c.moveTo(...pv.toPx(cx, cy));
+        c.save(); c.fillStyle = badFit() ? 'rgba(255,90,95,.16)' : 'rgba(10,132,255,.18)'; c.beginPath(); c.moveTo(...pv.toPx(cx, cy));
         c.lineTo(...pv.toPx(cx + 60 * Math.cos(a - half), cy + 60 * Math.sin(a - half)));
         c.lineTo(...pv.toPx(cx + 60 * Math.cos(a + half), cy + 60 * Math.sin(a + half))); c.closePath(); c.fill(); c.restore();
       }
@@ -580,7 +580,10 @@ export async function render(root, ctx) {
 
   // Past één klik niet bij de rest? Dan trekt die de hele kalibratie scheef (ook de kijkrichting).
   // De server zoekt de klik zonder welke de rest wél klopt. Index, of -1 (niets verdachts of onduidelijk).
-  function badFit() { return !!(fit.H && fit.err != null && fit.err >= 1); }
+  // Oordeel in beeldpixels: in de verte is 1 pixel al meters, dus een nette klik op een verre hoekvlag
+  // mag niet als 'fout' tellen. Zonder pixelmaat (snelle schatting in de browser) nog niet oordelen.
+  function badFit() { return !!(fit.H && fit.errPx != null && fit.errPx > (fit.badPx || 12)); }
+  const errText = () => `${fit.errPx.toFixed(0)} pixels${fit.err != null ? ` (≈ ${fit.err.toFixed(1)} m)` : ''}`;
 
   // Welk punt helpt nu het meest? Zoals een plank vastpakken: aan de uiteinden, niet met de handen
   // naast elkaar. De app kiest het herkenbare punt in beeld dat het verst van je klikken ligt.
@@ -631,7 +634,7 @@ export async function render(root, ctx) {
     if (!badFit()) return null;
     const c = conflict();
     return h('div', { className: 'hint warn-hint', style: { margin: '8px 0' } },
-      h('b', {}, `De punten passen niet bij elkaar (gemiddeld ${fit.err.toFixed(1)} m ernaast). `),
+      h('b', {}, `De punten passen niet bij elkaar (gemiddeld ${errText()} ernaast). `),
       c ? c.text + ' ' : '',
       'Haal het weg of sleep het naar de goede plek. Vaak gaat het om linker- en rechterpaal die verwisseld zijn.',
       c && c.remove.length ? h('div', { className: 'row', style: { marginTop: '6px', gap: '6px' } },
@@ -653,9 +656,9 @@ export async function render(root, ctx) {
     } else if (pendingImg) [step, text] = ['2', 'Klik nu hetzelfde punt (of dezelfde lijn) aan in de veldtekening rechts, of kies het in de lijst eronder.'];
     else if (pendingPitch) [step, text] = ['2', 'Klik nu dat punt in het beeld links aan.'];
     else if (!info.ok) [step, text] = ['2', `Klik in het beeld op iets wat je herkent: een hoek van het strafschopgebied, de middenstip, een doelpaal, of een plek op een veldlijn. ${info.hint ? '(' + info.hint + ')' : ''} Zoom in voor precisie.`];
-    else if (fit.H && fit.err != null && fit.err >= 1) {
+    else if (badFit()) {
       const c = conflict();
-      [step, text] = ['!', `De punten passen nog niet bij elkaar (${fit.err.toFixed(1)} m ernaast). ` +
+      [step, text] = ['!', `De punten passen nog niet bij elkaar (${errText()} ernaast). ` +
         (c ? c.text + ' Haal het weg (×) of sleep het naar de goede plek.' : 'Controleer de punten in de lijst: is er één verkeerd gekoppeld?')];
       if (c && c.remove.length) extra = h('div', { className: 'row', style: { gap: '6px' } },
         c.remove.map(i => h('button', { className: 'small', onclick: () => removePair(i) }, `Punt ${i + 1} weghalen`)));
@@ -672,8 +675,12 @@ export async function render(root, ctx) {
   function drawErr() {
     drawCoach(); drawPairs();
     const info = needInfo(), need = hasCam() ? 3 : 8;
-    if (fit.H && fit.err != null) {
-      errLabel.replaceChildren(h('span', { className: `badge ${fit.err < 1 ? 'ok' : 'err'}` }, `afwijking ${fit.err.toFixed(2)} m`));
+    if (fit.H && fit.errPx != null) {
+      errLabel.replaceChildren(h('span', { className: `badge ${badFit() ? 'err' : 'ok'}`,
+        title: 'Hoe ver je kliks gemiddeld naast de kalibratie liggen, in beeldpixels (en ongeveer in meters op het veld; in de verte is 1 pixel al meters)' },
+        `afwijking ${errText()}`));
+    } else if (fit.H && fit.err != null) {
+      errLabel.replaceChildren(h('span', { className: 'badge' }, `afwijking ≈ ${fit.err.toFixed(1)} m`));
     } else errLabel.replaceChildren(h('span', { className: 'muted small' },
       `${Math.min(info.dof, need)}/${need} · ${fit.msg || info.hint || 'niet eenduidig'}`));
   }
@@ -733,7 +740,8 @@ export async function render(root, ctx) {
       t = kf.t; slider.value = t; pairs = kf.points.map(p => ({ ...p })); editingId = kf.id; proposal = null; loadFrame();
     } },
       h('b', {}, fmtTime(kf.t)), h('span', { style: { flex: 1 } }, `${kf.points.length} punten`),
-      kf.error_m != null ? h('span', { className: `badge ${kf.error_m < 1 ? 'ok' : 'err'}` }, `${kf.error_m} m`)
+      kf.error_px != null ? h('span', { className: `badge ${kf.error_px > (kf.bad_px || 12) ? 'err' : 'ok'}`, title: `≈ ${kf.error_m} m op het veld` }, `${kf.error_px} px`)
+        : kf.error_m != null ? h('span', { className: 'badge' }, `${kf.error_m} m`)
         : kf.problem ? h('span', { className: 'badge err', title: kf.problem }, '⚠ klopt niet') : null,
       editingId === kf.id ? h('span', { className: 'badge busy' }, 'bewerken') : null,
       h('button', { className: 'danger', onclick: async e => {
@@ -845,7 +853,7 @@ export async function render(root, ctx) {
     clip.cam_yaw = null;  // bewaard bij dit ijkmoment
     ctx.refreshSteps?.();
     t = res.t;
-    toast(`Ijkmoment opgeslagen (afwijking ${res.error_m} m)${clip.status === 'klaar' ? ' – de app stelt nu de rest van de video automatisch bij' : ''}`);
+    toast(`Ijkmoment opgeslagen (afwijking ${res.error_px != null ? res.error_px + ' px' : res.error_m + ' m'})${clip.status === 'klaar' ? ' – de app stelt nu de rest van de video automatisch bij' : ''}`);
     setTimeout(refreshClip, 500);
     await loadKeyframes(); stations.refresh();
     if (wiz) return wiz.onSaved(clip);

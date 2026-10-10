@@ -516,10 +516,60 @@ def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma0:
     return np.array(r)
 
 
+def pixel_errors(K: np.ndarray, points: list[dict], size, params=None) -> list[float | None]:
+    """Per klik: hoeveel beeldpixels ligt de klik naast waar kalibratie K (beeld -> veld) dat punt of die
+    lijn tekent. Punten in de lucht alleen met cameraparameters (anders None). Pixels zijn de eerlijke
+    maat: in de verte is 1 pixel al meters, dichtbij een paar centimeter."""
+    G = np.linalg.inv(K)
+    P = camera_projection(np.asarray(params, float), size) if params is not None else None
+    behind = float(np.hypot(*size))  # ligt het punt volgens K achter de camera: zo fout als het maar kan
+    out = []
+    for q in points:
+        c = np.asarray(q["img"], float)
+        if q.get("pitch") is not None:
+            v = G @ np.array([*q["pitch"], 1.0])
+            out.append(float(np.hypot(*(v[:2] / v[2] - c))) if v[2] > 1e-9 else behind)
+        elif q.get("line"):
+            a, b = (np.asarray(x, float) for x in q["line"])
+            S = np.array([a + t * (b - a) for t in np.linspace(0, 1, 41)])
+            hom = np.c_[S, np.ones(len(S))] @ G.T
+            ok = hom[:, 2] > 1e-9
+            if ok.sum() < 2:
+                out.append(behind)
+                continue
+            V = hom[ok, :2] / hom[ok, 2:]
+            d = V[-1] - V[0]
+            n = np.linalg.norm(d)
+            out.append(float(abs(d[0] * (c[1] - V[0][1]) - d[1] * (c[0] - V[0][0])) / n) if n > 1e-9 else None)
+        elif P is not None and q.get("pitch3") is not None:
+            v = project_3d(P, np.array([q["pitch3"]], float))[0]
+            out.append(float(np.hypot(*(v - c))) if np.all(np.isfinite(v)) else behind)
+        elif P is not None and q.get("line3"):
+            A, B = project_3d(P, np.array(q["line3"], float))
+            if not (np.all(np.isfinite(A)) and np.all(np.isfinite(B))) or np.linalg.norm(B - A) < 1e-9:
+                out.append(None)
+                continue
+            d = B - A
+            out.append(float(abs(d[0] * (c[1] - A[1]) - d[1] * (c[0] - A[0])) / np.linalg.norm(d)))
+        else:
+            out.append(None)
+    return out
+
+
+def mean_px(errs: list[float | None]) -> float | None:
+    vals = [e for e in errs if e is not None]
+    return float(np.mean(vals)) if vals else None
+
+
+def bad_px_limit(width: int) -> float:
+    """Vanaf hoeveel pixels gemiddeld de punten 'niet bij elkaar passen' (ongeveer 12 px bij 1920 breed)."""
+    return 0.006 * float(width)
+
+
 def leave_one_out(points: list[dict], params=None, prior: dict | None = None, size=None) -> tuple[list[float], float]:
     """Per klik: hoe goed passen de ánderen bij elkaar als je die klik weglaat? Geeft (score per klik,
-    drempel): onder de drempel klopt de rest zonder die klik. Met camera (params/prior) in pixels,
-    anders (vrije homografie) in meters op het veld. inf = zonder die klik te weinig over.
+    drempel): onder de drempel klopt de rest zonder die klik. Altijd in beeldpixels, met camera
+    (params/prior) of als vrije homografie. inf = zonder die klik te weinig over.
 
     Metafoor: één getuige vertelt een ander verhaal. Laat je om de beurt één getuige weg, dan zijn
     de anderen het pas onderling eens als juist die ene ontbreekt."""
@@ -544,17 +594,18 @@ def leave_one_out(points: list[dict], params=None, prior: dict | None = None, si
                 if len(r):
                     best = min(best, float(np.sqrt(np.mean(r ** 2))))
             out.append(best)
-        return out, 0.006 * size[0]
+        return out, bad_px_limit(size[0])
     for i in range(len(points)):
         rest = points[:i] + points[i + 1:]
         if calibration_dof(rest) < 8:
             out.append(float("inf"))
             continue
         try:
-            out.append(float(_fit_free(rest)[1]))
+            m = mean_px(pixel_errors(_fit_free(rest)[0], rest, size))
+            out.append(float("inf") if m is None else m)
         except (ValueError, np.linalg.LinAlgError):
             out.append(float("inf"))
-    return out, 0.5
+    return out, bad_px_limit(size[0])
 
 
 def suspect_point(params, points: list[dict], prior: dict, size) -> int | None:

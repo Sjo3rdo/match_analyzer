@@ -313,3 +313,31 @@ def test_runaway_zoom_does_not_crash():
         return np.array([np.tanh(H[0, 0]), 1e4 - p[1]])  # trekt log_f naar 10000 (e^10000 bestaat niet)
     p = _lm(fun, np.array([4.0, 7.5]), iters=20)
     assert np.all(np.isfinite(p))
+
+
+def test_far_clicks_are_judged_in_pixels_not_meters():
+    """Laag langs de lijn met een paar pixels klikruis en een verre hoekvlag: in meters lijkt dat fout
+    (1 pixel is daar meters), in pixels is het netjes. De app moet in pixels oordelen."""
+    import math
+    from app import pitch
+    from app.calibration import (bad_px_limit, camera_homography, default_focal, fit_calibration, mean_px,
+                                 pixel_errors)
+    size = (1920, 1080)
+    true = np.array([65.0, 72.0, 1.2, math.radians(200), math.radians(1.0), 0.0, math.log(1700.0)])
+    H = camera_homography(true, size)
+    L = pitch.LANDMARKS
+    rng = np.random.default_rng(1)
+    names = ["Hoekvlag linksboven", "Middenlijn onder", "Middencirkel onder", "Middenstip", "Middencirkel links",
+             "Strafschopgebied links hoek onder", "Strafschopgebied links hoek boven", "Doelpaal links onder",
+             "Doelpaal links boven", "Hoekvlag linksonder", "Strafschopstip links"]
+    pts = []
+    for n in names:
+        img = apply_h(H, np.array([L[n]], float))[0]
+        if 0 <= img[0] < 1920 and 0 <= img[1] < 1080:
+            pts.append({"name": n, "img": (img + rng.normal(0, 2.0, 2)).tolist(), "pitch": list(L[n])})
+    assert len(pts) >= 4
+    prior = {"x": 64.0, "y": 73.0, "h": 1.6, "f": default_focal(1920), "sigma_pos": 3.0, "width": 1920, "height": 1080}
+    K, err_m = fit_calibration(pts, camera=prior)
+    err_px = mean_px(pixel_errors(K, pts, size))
+    assert err_px < bad_px_limit(1920)  # netjes in beeld ...
+    assert err_m >= 1.0  # ... terwijl de oude meters-maat (grens 1 m) hier ten onrechte 'fout' zei

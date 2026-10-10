@@ -163,7 +163,10 @@ minimap**, **Statistieken** en **Clips & delen**.
      veldtekening net achter het doel, met een ↑.
    - **Klopt een punt niet?** De blauwe kijkhoek op de tekening en de witte lijnen in het beeld volgen
      uit al je punten samen. Eén verkeerd gekoppeld punt (bijvoorbeeld linker- en rechterpaal
-     verwisseld) trekt alles scheef: lijnen en doel worden rood gestippeld. De app onthoudt welk punt
+     verwisseld) trekt alles scheef: lijnen en doel worden rood gestippeld. De app beoordeelt dat in
+     beeldpixels (gemiddeld meer dan ongeveer 12 pixels naast je kliks = rood), niet in meters: in de
+     verte is 1 pixel al meters, dus een nette klik op een verre hoekvlag telt niet als fout. Achter de
+     afwijking in pixels staat ter informatie ook de afwijking in meters. De app onthoudt welk punt
      je als laatste zette of versleepte en zegt dan precies wat er aan de hand is, bijvoorbeeld
      "Sinds punt 7 klopt het niet meer: punt 7 en punt 3 spreken elkaar tegen" of "punt 2 past niet bij
      de rest (o.a. niet bij punt 7)". Daarvoor laat hij om de beurt één punt weg en kijkt bij welk
