@@ -4,6 +4,7 @@ import { PitchView, setPitchSize, pitchPolylines } from '../pitch.js';
 import * as calibrate from './calibrate.js';
 import { stationsPanel } from './stations.js';
 import { heightField } from './camheight.js';
+import { aerialPanel } from './aerial.js';
 
 const STEPS = [
   ['wedstrijd', 'Wedstrijd'], ['videos', "Video's"], ['tijdlijn', 'Tijdlijn'], ['analyse', 'Analyseren'],
@@ -288,39 +289,68 @@ export async function render(root, ctx) {
       return { el: canvas, draw };
     }
 
-    // a) waar stond je?
+    // a) waar stond je? Met GPS: op de luchtfoto (hoeken van het veld + je plek); anders op de tekening
     function subPlace() {
       const status = h('div');
-      const picker = pitchPicker({ onPick: async (x, y) => {
-        await setCam({ x, y, h: clip.cam_h || 1.6, source: 'hand' });
-        status.replaceChildren(h('div', { className: 'hint' }, '📍 Je plek staat op de tekening.'));
-        nextBtn.disabled = false;
-      } });
       const nextBtn = h('button', { className: 'primary', disabled: clip.cam_x == null, onclick: () => show('verbeter') }, 'Volgende: plek verbeteren →');
-      const gpsBtn = clip.gps_lat != null ? h('button', { className: 'primary', onclick: async () => {
-        gpsBtn.disabled = true; gpsBtn.textContent = '📡 Zoeken in OpenStreetMap…';
-        status.replaceChildren(h('div', { className: 'small muted' }, 'De app stuurt alleen de GPS-positie van deze video naar OpenStreetMap en zoekt het voetbalveld dat daar ligt.'));
+      const drawing = h('div');
+      const showDrawing = () => {
+        const before = subCleanup;
+        const picker = pitchPicker({ onPick: async (x, y) => {
+          await setCam({ x, y, h: clip.cam_h || 1.6, source: 'hand' });
+          status.replaceChildren(h('div', { className: 'hint' }, '📍 Je plek staat op de tekening.'));
+          nextBtn.disabled = false;
+        } });
+        const mine = subCleanup;
+        subCleanup = () => { before(); mine(); };
+        drawing.replaceChildren(h('p', { className: 'small muted' }, 'Klik op de tekening waar je ongeveer stond (naast het veld mag ook).'), picker.el);
+        return picker;
+      };
+      if (clip.gps_lat == null) {
+        body.append(h('p', { className: 'lead' }, 'Deze video bevat geen GPS-positie. Klik op de tekening waar je ongeveer stond (naast het veld mag ook).'),
+          status, drawing, h('div', { className: 'row', style: { marginTop: '12px' } }, nextBtn));
+        showDrawing();
+        if (clip.cam_x != null) status.replaceChildren(h('div', { className: 'hint' }, gpsMsg || '📍 Je plek staat al op de tekening.'));
+        return;
+      }
+      const aerialBox = h('div');
+      let aerial = null;
+      const openAerial = () => {
+        aerial?.destroy();
+        aerial = aerialPanel({ match, clip,
+          onCorners: async () => { await reload(); nextBtn.disabled = clip.cam_x == null; },
+          onCamera: () => { nextBtn.disabled = false; } });
+        aerialBox.replaceChildren(aerial.el);
+        aerialBtn.remove();
+      };
+      const prev = subCleanup;
+      subCleanup = () => { prev(); aerial?.destroy(); };
+      const aerialBtn = h('button', { className: 'primary', onclick: openAerial }, '🛰️ Toon de luchtfoto');
+      const osmBtn = h('button', { onclick: async () => {
+        osmBtn.disabled = true; osmBtn.textContent = '📡 Zoeken in OpenStreetMap…';
         try {
           const r = await fetch(`/api/clips/${clip.id}/camera/gps`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
           const j = await r.json();
           if (!r.ok) throw new Error(j.detail || r.statusText);
           Object.assign(clip, j.clip);
           osm = [j.pitch_length, j.pitch_width];
-          gpsMsg = `Gevonden: een veld van ${j.pitch_length} × ${j.pitch_width} m. Je plek staat op de tekening (GPS ± ${Math.max(5, Math.round(clip.gps_acc || 8))} m; de gele cirkel).`;
+          gpsMsg = `Gevonden in OpenStreetMap: een veld van ${j.pitch_length} × ${j.pitch_width} m. Je plek staat op de tekening.`;
           status.replaceChildren(h('div', { className: 'hint' }, '✓ ', gpsMsg));
-          picker.draw(); nextBtn.disabled = false;
+          nextBtn.disabled = false;
         } catch (err) {
-          status.replaceChildren(h('div', { className: 'hint warn-hint' }, h('b', {}, 'Zoeken via GPS lukte niet. '), String(err.message || err),
-            h('div', { style: { marginTop: '4px' } }, 'Geen probleem: klik hieronder zelf op de tekening waar je stond.')));
-        } finally { gpsBtn.disabled = false; gpsBtn.textContent = '📡 Zoek mijn plek via GPS'; }
-      } }, '📡 Zoek mijn plek via GPS') : null;
+          status.replaceChildren(h('div', { className: 'hint warn-hint' }, h('b', {}, 'Zoeken in OpenStreetMap lukte niet. '), String(err.message || err)));
+        } finally { osmBtn.disabled = false; osmBtn.textContent = '📡 Zoek in OpenStreetMap'; }
+      } }, '📡 Zoek in OpenStreetMap');
       body.append(
-        h('p', { className: 'lead' }, clip.gps_lat != null
-          ? 'Je video weet ongeveer waar je stond. Klik op de knop: de app zoekt het voetbalveld op en zet je plek op de tekening. Lukt dat niet, klik dan zelf op de tekening.'
-          : 'Deze video bevat geen GPS-positie. Klik op de tekening waar je ongeveer stond (naast het veld mag ook).'),
-        h('div', { className: 'row', style: { marginBottom: '10px' } }, gpsBtn), status, picker.el,
+        h('p', { className: 'lead' }, 'Je video weet ongeveer waar je stond. Op de luchtfoto klik je één keer de 4 hoekvlaggen van het veld aan: ',
+          'daaruit volgen de echte veldmaten, en voor elke video je plek. Daarna kun je je plek nog preciezer aanklikken. ',
+          'Ken de app dit veld al, dan hoef je alleen te bevestigen.'),
+        h('div', { className: 'row', style: { marginBottom: '10px' } }, aerialBtn), aerialBox, status,
+        h('details', { style: { marginTop: '10px' } }, h('summary', { className: 'small muted' }, 'Geen luchtfoto? Andere manieren'),
+          h('div', { className: 'row', style: { margin: '8px 0' } }, osmBtn,
+            h('button', { onclick: () => showDrawing() }, '📍 Zelf op de tekening klikken')), drawing),
         h('div', { className: 'row', style: { marginTop: '12px' } }, nextBtn));
-      if (clip.cam_x != null) status.replaceChildren(h('div', { className: 'hint' }, gpsMsg || '📍 Je plek staat al op de tekening.'));
+      if (clip.cam_x != null && gpsMsg) status.replaceChildren(h('div', { className: 'hint' }, gpsMsg));
     }
 
     // b) plek verbeteren en extra gegevens

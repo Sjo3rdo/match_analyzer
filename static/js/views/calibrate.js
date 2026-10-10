@@ -6,6 +6,7 @@ import { PitchView, pitchPolylines, setPitchSize } from '../pitch.js';
 import { apply, inv, fitCalibration, calibrationInfo, calibrationError } from '../homography.js';
 import { stationsPanel } from './stations.js';
 import { heightField } from './camheight.js';
+import { aerialPanel } from './aerial.js';
 
 export async function render(root, ctx) {
   const { match } = ctx;
@@ -20,6 +21,9 @@ export async function render(root, ctx) {
   let t = 0, img = null, pairs = [], pendingImg = null, pendingPitch = null, editingId = null;
   let predicted = [], showPred = true, drag = null, keyframes = [];
   let fit = { H: null, err: null, cam: null, msg: '' }, placingCam = false, osmSize = null;
+  let aerial = null;  // luchtfoto (PDOK), open voor de video `aerial.clipId`
+  const aerialBox = h('div', { style: { marginTop: '10px' } });
+  const closeAerial = () => { aerial?.destroy(); aerial = null; aerialBox.replaceChildren(); };
   let placingDir = false, dirDrag = null, skipClick = false;
   let touched = null, trigger = null;  // laatst gezette/versleepte klik; de klik waarna het rood werd  // kijkrichting aangeven (klikken of slepen)
   let frameT = null;            // tijd van het beeld dat nu getoond wordt
@@ -411,7 +415,21 @@ export async function render(root, ctx) {
             proposeIfEmpty();
           } finally { drawCamPanel(); }
         } }, '📡 Zoek via GPS') : null,
+        clip.gps_lat != null ? h('button', { className: aerial ? 'primary' : '', title: 'Klik op de luchtfoto de hoeken van het veld en je plek aan',
+          onclick: () => {
+            if (aerial) { closeAerial(); return drawCamPanel(); }
+            const forClip = clip;
+            aerial = aerialPanel({ match, clip: forClip,
+              onCorners: () => { toast('Veld vastgelegd; de pagina laadt opnieuw met de nieuwe veldmaten'); ctx.reload(); },
+              onCamera: async c => {
+                if (clip !== forClip) return;
+                drawCamPanel(); drawPitch(); scheduleFit(); await loadKeyframes(); proposeIfEmpty();
+              } });
+            aerial.clipId = forClip.id;
+            aerialBox.replaceChildren(aerial.el); drawCamPanel();
+          } }, aerial ? '🛰️ Luchtfoto sluiten' : '🛰️ Luchtfoto') : null,
         hasCam() ? h('button', { onclick: () => setCamera({ x: null, y: null, source: null }) }, 'Wissen') : null),
+      aerialBox,
       hasCam() ? h('div', { style: { marginTop: '10px' } },
         h('div', { className: 'small', style: { marginBottom: '4px' } }, 'Waar keek je op dit moment naartoe? (helpt de app, vooral met weinig punten)'),
         h('div', { className: 'row' },
@@ -878,6 +896,7 @@ export async function render(root, ctx) {
   });
 
   async function loadClip() {
+    if (aerial && aerial.clipId !== clip.id) closeAerial();
     placingCam = false; drawCamPanel();
     slider.max = clip.duration || 0; t = 0; slider.value = 0; pairs = []; editingId = null; proposal = null; frameT = null;
     view = { s: 1, ox: 0, oy: 0 };
@@ -931,7 +950,7 @@ export async function render(root, ctx) {
   const onResize = () => { pv.resize(); drawPitch(); };
   window.addEventListener('resize', onResize);
   return () => {
-    stations.cleanup();
+    stations.cleanup(); closeAerial();
     clearTimeout(calibTimer); window.removeEventListener('mouseup', onUp); window.removeEventListener('mousemove', onPan);
     window.removeEventListener('resize', onResize);
   };

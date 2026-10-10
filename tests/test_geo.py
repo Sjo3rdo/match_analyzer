@@ -1,6 +1,7 @@
 import math
 
 import numpy as np
+import pytest
 
 from app import geo
 
@@ -101,3 +102,36 @@ def test_osm_search_falls_back_and_explains_problems(monkeypatch, tmp_path):
     monkeypatch.setattr(geo.urllib.request, "urlopen", fake("busy"))
     with pytest.raises(geo.OsmError, match="druk"):
         geo.query_pitches(53.4, 6.4)
+
+
+def _ll(lat0, lon0, p):
+    r = 6371000.0
+    return [lat0 + math.degrees(p[1] / r), lon0 + math.degrees(p[0] / (r * math.cos(math.radians(lat0))))]
+
+
+def test_corners_on_aerial_photo_in_any_order_give_size_and_your_place():
+    lat0, lon0 = 53.2499, 6.3917
+    for rot in (0, 30, 115, 200):
+        poly, u, v = _pitch_polygon(lat0, lon0, rot, 100.0, 64.0)
+        corners = [list(c) for c in poly[:4]]
+        cam = _ll(lat0, lon0, 20 * u + (32 + 6) * v)  # 6 m buiten de zijlijn aan de +v-kant
+        for order in ((0, 1, 2, 3), (2, 0, 3, 1), (3, 2, 1, 0)):
+            ordered = geo.order_corners([corners[i] for i in order], tuple(cam))
+            size = geo.pitch_from_corners(ordered)
+            assert size == {"length": 100.0, "width": 64.0}
+            x, y = geo.latlon_to_pitch(*cam, ordered, geo.pitch.geometry(100, 64))
+            # jij staat onder (y = 64 + 6); kijk je het veld in, dan ligt +u links van je
+            assert abs(y - 70) < 0.3 and abs(x - 30) < 0.3, (rot, order, x, y)
+        assert geo.distance_to_pitch(*cam, corners) == pytest.approx(6, abs=0.3)
+
+
+def test_corners_without_gps_use_the_first_two_clicks_as_your_side():
+    poly, u, v = _pitch_polygon(53.0, 6.0, 40)
+    c = [list(p) for p in poly[:4]]  # (-u,-v), (+u,-v), (+u,+v), (-u,+v)
+    ordered = geo.order_corners([c[0], c[1], c[3], c[2]])  # eerst de 2 hoeken aan de -v-kant
+    assert {tuple(ordered[0]), tuple(ordered[1])} == {tuple(c[0]), tuple(c[1])}
+    with pytest.raises(ValueError):
+        geo.pitch_from_corners([c[0], c[1], c[2]])
+    tiny = [[53.0, 6.0], [53.0, 6.0002], [53.0001, 6.0002], [53.0001, 6.0]]  # pannakooi
+    with pytest.raises(ValueError):
+        geo.pitch_from_corners(geo.order_corners(tiny))

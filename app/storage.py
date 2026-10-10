@@ -237,9 +237,12 @@ class Store:
                          ("team1_color", "TEXT"), ("team0_squad", "INTEGER"), ("team1_squad", "INTEGER"),
                          ("half_length", "INTEGER"), ("stations_status", "TEXT"), ("stations_progress", "REAL"),
                          ("stations_message", "TEXT"), ("kickoff", "REAL"), ("kickoff2", "REAL"),
-                         ("wizard_step", "INTEGER"), ("wizard_done", "INTEGER")):
+                         ("wizard_step", "INTEGER"), ("wizard_done", "INTEGER"),
+                         ("pitch_corners", "TEXT")):  # 4 hoeken (lat, lon) van het veld, op de luchtfoto
             if col not in mcols:
                 self.run(f"ALTER TABLE matches ADD COLUMN {col} {typ}")
+        if "corners" not in {r["name"] for r in self.all("PRAGMA table_info(venues)")}:
+            self.run("ALTER TABLE venues ADD COLUMN corners TEXT")
         # Oude 'markers' (één tijdstip) worden clips (begin + eind), zoals in een video-editor
         with self.tx() as c:
             for m in c.execute("SELECT * FROM markers").fetchall():

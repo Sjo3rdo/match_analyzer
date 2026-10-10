@@ -36,7 +36,7 @@ OVERPASS_URLS = (
     "https://overpass.kumi.systems/api/interpreter",
     "https://overpass.private.coffee/api/interpreter",
 )
-USER_AGENT = "match-analyzer/0.20 (lokale voetbalanalyse; https://github.com/sjo3rdo/match_analyzer)"
+USER_AGENT = "match-analyzer/0.21 (lokale voetbalanalyse; https://github.com/sjo3rdo/match_analyzer)"
 OSM_API = "https://api.openstreetmap.org/api/0.6/map"
 
 
@@ -267,6 +267,70 @@ def camera_on_pitch(lat: float, lon: float, polygons: list[list[tuple[float, flo
     y = geom.width / 2 + (rel @ v) * geom.width / width
     return {"x": round(float(x), 1), "y": round(float(y), 1), "pitch_length": round(float(length), 1),
             "pitch_width": round(float(width), 1), "distance_to_pitch": round(float(best[0]), 1)}
+
+
+# --- veld op de luchtfoto -------------------------------------------------------------------------
+# De gebruiker klikt de 4 hoekvlaggen aan, in willekeurige volgorde. De app zet ze in vaste volgorde,
+# gezien vanaf de kant waar je filmde: linksonder, rechtsonder, rechtsboven, linksboven (onder = jouw
+# kant). Zo liggen links/rechts en boven/onder net als op de veldtekening.
+
+def order_corners(corners: list[list[float]], near: tuple[float, float] | None = None) -> list[list[float]]:
+    """Hoeken (lat, lon) in vaste volgorde zetten. near: waar je ongeveer stond (GPS); zonder GPS
+    gelden de eerste 2 aangeklikte hoeken als jouw kant."""
+    if len(corners) != 4:
+        raise ValueError("Klik precies 4 hoeken van het veld aan")
+    lat0 = sum(c[0] for c in corners) / 4
+    lon0 = sum(c[1] for c in corners) / 4
+    loc = [to_local(c[0], c[1], lat0, lon0) for c in corners]  # meters oost, noord
+    # tegen de klok in rond het midden: zo vormen ze een rechthoek, geen strik
+    order = sorted(range(4), key=lambda i: math.atan2(loc[i][1], loc[i][0]))
+    pts = [loc[i] for i in order]
+    side = lambda i: float(np.linalg.norm(pts[(i + 1) % 4] - pts[i]))  # noqa: E731
+    longs = (0, 2) if side(0) + side(2) >= side(1) + side(3) else (1, 3)
+    if near is not None:
+        me = to_local(near[0], near[1], lat0, lon0)
+    else:
+        me = (loc[0] + loc[1]) / 2
+    mid = lambda i: (pts[i] + pts[(i + 1) % 4]) / 2  # noqa: E731
+    i = min(longs, key=lambda k: float(np.linalg.norm(mid(k) - me)))
+    # tegen de klok in ligt het veld links van de zijde i -> i+1; kijk je het veld in, dan is
+    # hoek i links en hoek i+1 rechts van je
+    return [corners[order[(i + k) % 4]] for k in range(4)]
+
+
+def pitch_from_corners(corners: list[list[float]]) -> dict:
+    """Veldmaten (m) uit de 4 hoeken (lat, lon) in vaste volgorde (zie order_corners)."""
+    if len(corners) != 4:
+        raise ValueError("Klik precies 4 hoeken van het veld aan")
+    lat0 = sum(c[0] for c in corners) / 4
+    lon0 = sum(c[1] for c in corners) / 4
+    p = [to_local(c[0], c[1], lat0, lon0) for c in corners]
+    d = lambda a, b: float(np.linalg.norm(p[a] - p[b]))  # noqa: E731
+    length, width = (d(0, 1) + d(3, 2)) / 2, (d(0, 3) + d(1, 2)) / 2
+    if not (40 <= length <= 130 and 25 <= width <= 100):
+        raise ValueError(f"Dat lijkt geen voetbalveld ({length:.0f} × {width:.0f} m). Klik de 4 hoekvlaggen aan")
+    if width > length:
+        raise ValueError("Het veld is breder dan lang: klik eerst de 2 hoeken aan jouw kant (links, dan rechts)")
+    # op halve meters: een klik op de luchtfoto is niet preciezer, en zo blijven de maten rustig
+    return {"length": round(length * 2) / 2, "width": round(width * 2) / 2}
+
+
+def latlon_to_pitch(lat: float, lon: float, corners: list[list[float]], geom: pitch.Geometry) -> tuple[float, float]:
+    """Een plek op de luchtfoto (lat, lon) in veldcoördinaten (x, y) van de wedstrijd."""
+    lat0 = sum(c[0] for c in corners) / 4
+    lon0 = sum(c[1] for c in corners) / 4
+    src = np.float32([to_local(c[0], c[1], lat0, lon0) for c in corners])
+    L, W = geom.length, geom.width
+    dst = np.float32([[0, W], [L, W], [L, 0], [0, 0]])
+    M = cv2.getPerspectiveTransform(src, dst)
+    v = M @ np.array([*to_local(lat, lon, lat0, lon0), 1.0])
+    return float(v[0] / v[2]), float(v[1] / v[2])
+
+
+def distance_to_pitch(lat: float, lon: float, corners: list[list[float]]) -> float:
+    """Afstand (m) van een plek tot de rand van het veld; 0 als je op het veld staat."""
+    pts = np.float32([to_local(c[0], c[1], lat, lon) for c in corners])
+    return max(0.0, -float(cv2.pointPolygonTest(pts.reshape(-1, 1, 2), (0.0, 0.0), True)))
 
 
 def distance_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
