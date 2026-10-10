@@ -306,7 +306,31 @@ def references(store: Store, station: dict, limit: int = MAX_REFS) -> list[_Ref]
             except (ValueError, np.linalg.LinAlgError):
                 continue
             out += chain(c, float(kf["t"]), K)
-    return _thin(_shortest(out), limit)
+    return _thin(_relay(_shortest(out)), limit)
+
+
+def _relay(refs: list[_Ref], min_gain: float = 10.0) -> list[_Ref]:
+    """Neem de kalibratie van een referentiebeeld over via een dichterbij liggend ijkmoment uit een
+    andere video, als die er is. Metafoor: een routeplanner die niet per se via je eigen straat
+    hoeft. Zo hangen bijv. de late beelden van een lange zwaai niet meer aan een lange ketting als je
+    elders zelf een video kalibreerde die die kant op kijkt."""
+    far = sorted((r for r in refs if r.turn > TRUST_DEG / 2), key=lambda r: -r.turn)
+    for r in far:
+        best = None
+        for q in refs:
+            if q.clip["id"] == r.clip["id"] or q.turn > r.turn - min_gain:
+                continue
+            m = _pair(r, q)  # beeld r -> beeld q
+            if m is None or m[1] < 2 * MIN_INLIERS:
+                continue
+            K = q.K @ m[0]
+            yq, yr = _yaw(q.K, q.clip), _yaw(K, r.clip)
+            turn = q.turn + (0.0 if yq is None or yr is None else abs((yr - yq + 180) % 360 - 180))
+            if turn < r.turn - min_gain and (best is None or turn < best[0]):
+                best = (turn, K)
+        if best is not None:
+            r.turn, r.K = best
+    return refs
 
 
 def _shortest(refs: list[_Ref]) -> list[_Ref]:
