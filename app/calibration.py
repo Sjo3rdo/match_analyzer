@@ -516,27 +516,55 @@ def _cam_residuals(p: np.ndarray, points: list[dict], prior: dict, size, sigma0:
     return np.array(r)
 
 
-def suspect_point(params, points: list[dict], prior: dict, size) -> int | None:
-    """Welke klik past niet bij de rest? Geeft de index, of None als dat niet duidelijk is.
+def leave_one_out(points: list[dict], params=None, prior: dict | None = None, size=None) -> tuple[list[float], float]:
+    """Per klik: hoe goed passen de ánderen bij elkaar als je die klik weglaat? Geeft (score per klik,
+    drempel): onder de drempel klopt de rest zonder die klik. Met camera (params/prior) in pixels,
+    anders (vrije homografie) in meters op het veld. inf = zonder die klik te weinig over.
 
     Metafoor: één getuige vertelt een ander verhaal. Laat je om de beurt één getuige weg, dan zijn
-    de anderen het pas onderling eens als juist die ene ontbreekt. Per klik wordt dus opnieuw
-    gefit zonder die klik; de klik waarbij de rest ineens goed klopt, is de verdachte."""
-    p = np.asarray(params, float)
-    if len(points) < 4:
-        return None
-    spread = []
+    de anderen het pas onderling eens als juist die ene ontbreekt."""
+    out = []
+    if prior is not None:
+        p = np.asarray(params, float)
+        for i in range(len(points)):
+            rest = points[:i] + points[i + 1:]
+            if calibration_dof(rest, elevated=True) < 3:
+                out.append(float("inf"))
+                continue
+            # niet alleen bijschaven vanaf de (door de foute klik scheefgetrokken) oplossing, maar ook
+            # opnieuw zoeken rond deze kijkrichting; anders blijft de rest in die fout hangen
+            cands = [_lm(lambda v: _cam_residuals(v, rest, prior, size), p)]  # noqa: B023
+            try:
+                cands.append(np.asarray(fit_camera(rest, {**prior, "yaw": float(p[3])})[1]["params"], float))
+            except (ValueError, np.linalg.LinAlgError):
+                pass
+            best = float("inf")
+            for q in cands:
+                r = _cam_residuals(q, rest, prior, size, sigma0=1.0, data_only=True)
+                if len(r):
+                    best = min(best, float(np.sqrt(np.mean(r ** 2))))
+            out.append(best)
+        return out, 0.006 * size[0]
     for i in range(len(points)):
         rest = points[:i] + points[i + 1:]
-        if calibration_dof(rest, elevated=True) < 3:
-            spread.append(np.inf)
+        if calibration_dof(rest) < 8:
+            out.append(float("inf"))
             continue
-        q = _lm(lambda v: _cam_residuals(v, rest, prior, size), p)  # noqa: B023
-        r = _cam_residuals(q, rest, prior, size, sigma0=1.0, data_only=True)
-        spread.append(float(np.sqrt(np.mean(r ** 2))))
+        try:
+            out.append(float(_fit_free(rest)[1]))
+        except (ValueError, np.linalg.LinAlgError):
+            out.append(float("inf"))
+    return out, 0.5
+
+
+def suspect_point(params, points: list[dict], prior: dict, size) -> int | None:
+    """Welke klik past niet bij de rest? Geeft de index, of None als dat niet duidelijk is."""
+    if len(points) < 4:
+        return None
+    spread, limit = leave_one_out(points, params, prior, size)
     order = np.argsort(spread)
     best, second = spread[order[0]], spread[order[1]]
-    if best < 0.006 * size[0] and second > 3 * best + 3:
+    if best < limit and second > 3 * best + 3:
         return int(order[0])
     return None
 

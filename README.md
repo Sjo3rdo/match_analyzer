@@ -162,12 +162,14 @@ minimap**, **Statistieken** en **Clips & delen**.
      ring in het beeld waar hij het verwacht. Punten in de lucht (bovenkant paal, lat) staan op de
      veldtekening net achter het doel, met een ↑.
    - **Klopt een punt niet?** De blauwe kijkhoek op de tekening en de witte lijnen in het beeld volgen
-     uit al je punten samen. Is er één verkeerd gekoppeld (bijvoorbeeld linker- en rechterpaal
-     verwisseld), dan trekt die alles scheef. De app ziet dat aan de afwijking en zoekt de vreemde
-     eend: hij laat om de beurt één punt weg en kijkt bij welk punt de rest ineens wél klopt. Dat punt
-     krijgt een gele markering en er verschijnt een duidelijke waarschuwing; de kijkhoek kleurt rood en
-     de witte lijnen en het getekende doel worden rood gestippeld, zodat je ziet dat ze nog niet kloppen.
-     Verwijder het (×) of sleep het naar de goede plek.
+     uit al je punten samen. Eén verkeerd gekoppeld punt (bijvoorbeeld linker- en rechterpaal
+     verwisseld) trekt alles scheef: lijnen en doel worden rood gestippeld. De app onthoudt welk punt
+     je als laatste zette of versleepte en zegt dan precies wat er aan de hand is, bijvoorbeeld
+     "Sinds punt 7 klopt het niet meer: punt 7 en punt 3 spreken elkaar tegen" of "punt 2 past niet bij
+     de rest (o.a. niet bij punt 7)". Daarvoor laat hij om de beurt één punt weg en kijkt bij welk
+     punt de rest weer klopt, zoals bij getuigen: wie een ander verhaal vertelt, valt op als je hem
+     even wegdenkt. De verdachte punten krijgen een gele ring in het beeld en in de lijst, met een
+     knop om ze weg te halen.
    - **Veldmaten.** De app gaat uit van 105 × 68 m. Amateurvelden zijn vaak kleiner, bijvoorbeeld
      100 × 64. Vul de echte maten in bij **Veldmaten** (op de pagina Kalibratie); dan kloppen
      afstanden en posities beter. Het strafschopgebied en de middencirkel zijn altijd even groot.
