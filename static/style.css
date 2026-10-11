@@ -253,3 +253,31 @@ td.rust { color: var(--warn); padding: 6px 10px; }
 .form-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px 18px; }
 .form-grid label { display: flex; flex-direction: column; gap: 6px; font-size: 13px; color: var(--muted); }
 .form-grid label input, .form-grid label select { color: var(--text); }
+
+/* Kalibratie: groot beeld links, zijbalk met tabbladen rechts; alles op één scherm */
+.calib { display: grid; grid-template-columns: minmax(0, 1fr) 410px; gap: 14px; align-items: start; }
+.calib-main { padding: 10px; }
+.calib-main .frame-wrap canvas { width: auto; max-width: 100%; display: block; margin: 0 auto; }
+.calib-main input[type=range] { flex: 1; min-width: 160px; }
+.calib-side { position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
+.calib-side .panel { margin: 0; }
+.panel.tight { padding: 10px 12px; }
+.calib-side canvas { max-height: 230px; }
+.side-tabs { display: flex; gap: 2px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 3px; }
+.side-tabs button { flex: 1; text-align: center; justify-content: center; border: 0; background: transparent; padding: 6px 8px; font-size: 12.5px; }
+.side-tabs button.on { background: var(--accent); color: var(--accent-ink); }
+.calib-toolbar { margin-bottom: 8px; }
+.calib-toolbar select { max-width: 420px; }
+.calib-help { margin-bottom: 10px; }
+@media (max-width: 1100px) {
+  .calib { grid-template-columns: 1fr; }
+  .calib-side { position: static; max-height: none; }
+}
+
+/* Statusbalk: wat de app op de achtergrond doet en wat jij nu het best kunt doen */
+.jobbar { display: flex; align-items: center; gap: 12px; padding: 10px 14px; margin-bottom: 10px; border-radius: 12px;
+  background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--accent); font-size: 13px; }
+.jobbar:empty { display: none; }
+.jobbar.busy { border-left-color: #18a7ff; }
+.jobbar.done { border-left-color: var(--accent); }
+.jobbar .progress { flex: none; }

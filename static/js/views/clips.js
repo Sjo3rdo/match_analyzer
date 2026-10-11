@@ -39,6 +39,7 @@ export async function render(root, ctx) {
   const draw = async () => {
     const m = await api(`/matches/${match.id}`);
     const clips = m.clips;
+    const conf = clips.length ? await api(`/matches/${match.id}/confidence`).catch(() => ({})) : {};
     const todo = clips.filter(c => c.status !== 'klaar' && !BUSY.includes(c.status));
     panel.replaceChildren(h('div', { className: 'row', style: { justifyContent: 'space-between' } },
       h('h2', {}, 'Video\'s van deze wedstrijd'),
@@ -85,8 +86,13 @@ export async function render(root, ctx) {
                 ? h('div', { className: 'badge busy', title: 'De app volgt de bal nu beter (inzoomen als hij kwijt is). Klik op "Opnieuw" om dat ook voor deze video te gebruiken. Je kalibratie blijft bewaard; spelers koppelen moet je daarna opnieuw doen.' }, 'betere baldetectie: opnieuw analyseren') : null,
             busy ? h('div', { className: 'progress', title: c.message }, h('div', { style: { width: `${Math.round(100 * c.progress)}%` } })) : null,
             h('div', { className: 'muted small' }, c.message || '')),
-          h('td', {}, c.n_keyframes ? h('span', { className: 'badge ok' }, `${c.n_keyframes} ijkmoment(s)`)
-            : h('a', { href: `#/match/${match.id}/kalibratie?clip=${c.id}` }, 'Kalibreren')),
+          h('td', {}, (() => {
+            const k = conf[c.id];
+            const link = h('a', { href: `#/match/${match.id}/kalibratie?clip=${c.id}` }, k?.pct != null ? 'bekijken' : 'Kalibreren');
+            if (k?.pct == null) return h('div', {}, link, k?.why && k.why !== 'nog niet gekalibreerd' ? h('div', { className: 'small muted' }, k.why) : null);
+            return h('div', { title: `Schatting van hoe goed de kalibratie klopt: ${k.why}` },
+              h('span', { className: `badge ${k.pct >= 85 ? 'ok' : k.pct >= 65 ? 'busy' : 'err'}` }, `${k.pct}% zeker`), ' ', link);
+          })()),
           h('td', {},
             h('select', { disabled: busy, title: 'Nauwkeurig: vindt ook spelers ver weg en de bal het best. Snel: ongeveer 2x zo snel, mist vaker verre spelers en de bal.',
               onchange: e => { c.analysis_mode = e.target.value; } },

@@ -5,6 +5,7 @@ import json
 import logging
 import mimetypes
 import shutil
+import time
 import subprocess
 import sys
 from contextlib import asynccontextmanager
@@ -628,7 +629,22 @@ def save_keyframe(clip_id: int, data: dict = Body(...)):
     store.run("UPDATE clips SET calib_review = NULL, cam_yaw = NULL WHERE id = ?", (clip_id,))
     analytics.invalidate(clip_id=clip_id)
     _start_autocalib(clip)
-    return {"id": kid, "t": data["t"], "error_m": round(err, 2), "error_px": None if err_px is None else round(err_px, 1)}
+    others = _start_stations_if_useful(clip["match_id"])
+    return {"id": kid, "t": data["t"], "error_m": round(err, 2), "error_px": None if err_px is None else round(err_px, 1),
+            "others": others}
+
+
+def _start_stations_if_useful(match_id: int) -> int:
+    """Na een eigen ijkmoment de video's zonder eigen kalibratie (vanaf dezelfde standplaats) laten
+    kalibreren. Geeft het aantal video's dat daarop wacht (0 = niets te doen)."""
+    if worker is None:
+        return 0
+    n = store.one("SELECT COUNT(*) AS n FROM clips c WHERE c.match_id = ? AND c.status = 'klaar' "
+                  "AND COALESCE(c.calib_review, '') != 'goedgekeurd' AND NOT EXISTS (SELECT 1 FROM keyframes k "
+                  "WHERE k.clip_id = c.id AND k.auto = 0 AND COALESCE(k.source, '') != 'standplaats')", (match_id,))["n"]
+    if n:
+        worker.submit_stations(match_id)
+    return int(n)
 
 
 @app.post("/api/clips/{clip_id}/calibrate-preview")
@@ -1423,7 +1439,8 @@ def get_stations(match_id: int):
                           "turn_deg": round(max(zwaai)) if zwaai else None,
                           "method": c.get("calib_method"), "gps_acc": c.get("gps_acc"), "rec_start": c.get("rec_start"),
                           "period": c.get("period"), "start_minute": c.get("start_minute"),
-                          "has_calibration": bool(own or prop), "calib_status": c.get("calib_status")})
+                          "has_calibration": bool(own or prop), "calib_status": c.get("calib_status"),
+                          "confidence": stations.confidence(store, c, kfs)})
         cam = None
         if a is not None:
             p = a[1]
@@ -1433,6 +1450,67 @@ def get_stations(match_id: int):
                     "no_gps": st["no_gps"], "anchor": cam, "clips": clips})
     return {"stations": out, "job": {"status": m.get("stations_status"), "progress": m.get("stations_progress"),
                                      "message": m.get("stations_message")}}
+
+
+@app.get("/api/matches/{match_id}/jobs")
+def match_jobs(match_id: int):
+    """Wat de app nu op de achtergrond doet voor deze wedstrijd (voor de statusbalk)."""
+    m = _get("matches", match_id)
+    clips = store.all("SELECT id, filename, status, progress, calib_status, calib_progress FROM clips WHERE match_id = ?",
+                      (match_id,))
+    busy = ("wachtrij", "preview", "analyse")
+    analysis = {"total": len(clips), "done": sum(c["status"] == "klaar" for c in clips),
+                "queued": sum(c["status"] == "wachtrij" for c in clips),
+                "running": [{"filename": c["filename"], "progress": c["progress"] or 0}
+                            for c in clips if c["status"] in ("preview", "analyse")]}
+    autocalib = {"queued": sum(c["calib_status"] == "wachtrij" for c in clips),
+                 "running": [{"filename": c["filename"], "progress": c["calib_progress"] or 0}
+                             for c in clips if c["calib_status"] == "bezig"]}
+    st = {"status": m.get("stations_status"), "progress": m.get("stations_progress"), "message": m.get("stations_message"),
+          "eta_s": None}
+    if st["status"] == "bezig" and m.get("stations_started") and (st["progress"] or 0) > 0.03:
+        elapsed = time.time() - float(m["stations_started"])
+        st["eta_s"] = int(elapsed / st["progress"] * (1 - st["progress"]))
+    return {"analysis": analysis, "autocalib": autocalib, "stations": st,
+            "busy": bool(analysis["queued"] or analysis["running"] or autocalib["queued"] or autocalib["running"]
+                         or st["status"] in ("wachtrij", "bezig")),
+            "analysis_busy": any(c["status"] in busy for c in clips)}
+
+
+@app.get("/api/matches/{match_id}/confidence")
+def match_confidence(match_id: int):
+    """Per video: hoe zeker de kalibratie is (schatting, 0-100) en waarom."""
+    from . import stations
+    _get("matches", match_id)
+    return {str(c["id"]): stations.confidence(store, c)
+            for c in store.all("SELECT * FROM clips WHERE match_id = ?", (match_id,))}
+
+
+@app.post("/api/matches/{match_id}/calibration/reset")
+def reset_calibration(match_id: int):
+    """Hele wedstrijd opnieuw kalibreren: alles weg wat met kalibreren te maken heeft. De ijkmomenten
+    van alle video's, waar je stond (en hoe hoog, kijkrichting, zoom), de veldmaten, de hoeken op de
+    luchtfoto, en wat de app voor deze plek onthouden had. De video's en hun analyse blijven."""
+    m = _get("matches", match_id)
+    if m.get("stations_status") in ("wachtrij", "bezig") or store.one(
+            "SELECT 1 AS x FROM clips WHERE match_id = ? AND calib_status = 'bezig'", (match_id,)):
+        raise HTTPException(409, "De app is nog aan het kalibreren. Wacht tot dat klaar is (zie de statusbalk).")
+    pos = _gps_of_match(match_id)
+    ids = [c["id"] for c in store.all("SELECT id FROM clips WHERE match_id = ?", (match_id,))]
+    with store.tx() as c:
+        for cid in ids:
+            c.execute("DELETE FROM keyframes WHERE clip_id = ?", (cid,))
+        c.execute("UPDATE clips SET cam_x = NULL, cam_y = NULL, cam_h = NULL, cam_yaw = NULL, cam_f = NULL, "
+                  "cam_source = NULL, calib_review = NULL, calib_method = NULL, calib_status = NULL, "
+                  "calib_progress = NULL, calib_message = NULL, line_score = NULL WHERE match_id = ?", (match_id,))
+        c.execute("UPDATE matches SET pitch_length = NULL, pitch_width = NULL, pitch_corners = NULL, stations_status = NULL, "
+                  "stations_progress = NULL, stations_message = NULL, stations_started = NULL WHERE id = ?", (match_id,))
+        if pos is not None:  # ook niet meer 'herkennen' bij een volgende upload
+            for v in c.execute("SELECT id, lat, lon FROM venues").fetchall():
+                if geo.distance_m(pos[0], pos[1], v["lat"], v["lon"]) < VENUE_RADIUS_M:
+                    c.execute("DELETE FROM venues WHERE id = ?", (v["id"],))
+    analytics.invalidate()
+    return {"ok": True, "clips": len(ids)}
 
 
 @app.get("/api/matches/{match_id}/stations/{station_id}/best")

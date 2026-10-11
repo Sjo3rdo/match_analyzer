@@ -121,7 +121,20 @@ minimap**, **Statistieken** en **Clips & delen**.
 
 2. **Kalibratie.** Je camera ziet het veld schuin, en daardoor lijken spelers die verder weg staan
    kleiner en dichter bij elkaar. Met kalibratie leg je als het ware een doorzichtige plattegrond
-   over het beeld:
+   over het beeld. Het scherm: links het beeld zo groot mogelijk, rechts de veldtekening met drie
+   tabbladen (**Punten**, **📍 Plek**, **IJkmomenten**); de uitleg staat achter **ⓘ Uitleg**.
+   - **De balk bovenaan** zegt wat de app op de achtergrond doet ("De andere video's kalibreren: 4
+     van 8 · nog ± 3 min") en wat jij nu het best kunt doen, met een knop ernaartoe. Na
+     **IJkmoment opslaan** stelt de app de rest van die video bij en kalibreert hij vanzelf de andere
+     video's vanaf dezelfde plek. Je kunt gewoon doorgaan; je krijgt een melding als het klaar is.
+   - **Hoe zeker?** Bij elke video (keuzelijst, pagina Video's en de kaartjes) staat een
+     percentage: een schatting uit hoe de kalibratie tot stand kwam (eigen ijkmoment, op de
+     veldlijnen bijgesteld, ver weggedraaid) en hoe veel van de video dicht bij een ijkmoment ligt.
+     Wijs het percentage aan voor de reden. Laag (rood/geel)? Kijk die video na.
+   - **↺ Hele wedstrijd opnieuw** wist alle kalibraties van de wedstrijd (ijkmomenten, plekken,
+     veldmaten, luchtfoto-hoeken en wat de app voor deze plek onthouden had). De video's en hun
+     analyse blijven.
+   Zo werkt het klikken:
    - Klik in het beeld op een herkenbaar punt, zoals een hoek van het strafschopgebied, de
      middenstip of het punt waar de middenlijn de zijlijn raakt.
    - Klik daarna hetzelfde punt aan op de veldtekening.
@@ -208,7 +221,7 @@ minimap**, **Statistieken** en **Clips & delen**.
      standplaatsen in: op GPS-positie (met de nauwkeurigheid die de iPhone erbij opslaat; precieze
      metingen tellen zwaarder) en op opnametijd. Kalibreer per standplaats één video zelf; daar volgt
      uit waar je stond, hoe hoog en hoe ver ingezoomd (ook als je je positie niet hebt ingesteld).
-     Klik daarna **🤖 Kalibreer de rest automatisch**. De app maakt van je zelf gekalibreerde video
+     Dat start na het opslaan vanzelf (of met **🤖 Kalibreer de rest automatisch**). De app maakt van je zelf gekalibreerde video
      eerst een panorama: vanaf je ijkmoment geeft elk beeld (elke seconde) zijn kalibratie door aan
      het volgende, als een rij dominostenen, zodat ook de kanten waar je naartoe zwenkte bekend zijn.
      Daarna legt hij elke andere video, om de paar seconden, als een puzzelstuk tegen dat panorama:

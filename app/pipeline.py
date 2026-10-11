@@ -580,6 +580,7 @@ class Worker:
             self.store.run("UPDATE matches SET stations_status = 'bezig', stations_progress = ?, stations_message = ? "
                            "WHERE id = ?", (frac, msg, match_id))
         try:
+            self.store.run("UPDATE matches SET stations_started = ? WHERE id = ?", (time.time(), match_id))
             progress(0.0, "Beginnen")
             r = stations.run(self.store, match_id, progress=progress, worker=self)
             parts = [f"{r['ok']} voorgesteld"]
