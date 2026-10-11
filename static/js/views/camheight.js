@@ -2,7 +2,7 @@
 // staande volwassene: daar houd je een telefoon meestal als je langs de lijn filmt.
 import { h } from '../util.js';
 
-export const HEIGHTS = [[1.6, 'Staand (ooghoogte)'], [2.1, 'Boven je hoofd'], [2.5, 'Bankje / heuvel'], [4, 'Tribune'], [6, 'Hoge tribune']];
+export const HEIGHTS = [[1.2, 'Borsthoogte'], [1.6, 'Ooghoogte'], [2.1, 'Boven je hoofd'], [2.5, 'Bankje / heuvel'], [4, 'Tribune'], [6, 'Hoge tribune']];
 
 export function heightField(value, onChange, estimate = null) {
   const v0 = Number(value) || 1.6;
@@ -26,5 +26,5 @@ export function heightField(value, onChange, estimate = null) {
           `Neem ${String(estimate).replace('.', ',')} m over (berekend)`) : null),
     presets,
     h('div', { className: 'small muted', style: { marginTop: '4px' } },
-      'Bedoeld is de hoogte van de telefoon, niet van jezelf. Staand langs de lijn is dat ooghoogte (± 1,6 m). Op een tribune: tel de hoogte van je rij erbij op.'));
+      'De hoogte van de telefoon (niet van jezelf). Op een tribune: tel de hoogte van je rij erbij op.'));
 }

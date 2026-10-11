@@ -247,7 +247,7 @@ class Store:
                          ("half_length", "INTEGER"), ("stations_status", "TEXT"), ("stations_progress", "REAL"),
                          ("stations_message", "TEXT"), ("kickoff", "REAL"), ("kickoff2", "REAL"),
                          ("wizard_step", "INTEGER"), ("wizard_done", "INTEGER"),
-                         ("pitch_corners", "TEXT")):  # 4 hoeken (lat, lon) van het veld, op de luchtfoto
+                         ("pitch_corners", "TEXT"), ("stations_started", "REAL")):  # 4 hoeken (lat, lon) van het veld, op de luchtfoto
             if col not in mcols:
                 self.run(f"ALTER TABLE matches ADD COLUMN {col} {typ}")
         if "corners" not in {r["name"] for r in self.all("PRAGMA table_info(venues)")}:

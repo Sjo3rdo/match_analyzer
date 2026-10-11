@@ -471,7 +471,7 @@ def calibrate_clip(store: Store, clip: dict, cam: np.ndarray, refs: list[_Ref], 
             res = refine(shots[ft], H1, None, f_full, camera={**cam_dict, "q0": q1}, geom=geom)
         if res is not None:
             H = res[0]
-            info = {**info, "lijnen": True}
+            info = {**info, "lijnen": True, "draairichting_onzeker": bool(res[1].get("yaw_uncertain"))}
         if found is None:
             found = (ft, H, "omgeving", info)
         else:
@@ -571,13 +571,13 @@ def run(store: Store, match_id: int, progress=None, worker=None) -> dict:
             store.run("DELETE FROM keyframes WHERE clip_id = ? AND source = 'standplaats'", (c["id"],))
             pending.append((st, a, c))
     refs_of: dict[int, list] = {}
-    steps, total = 0, max(1, 2 * len(pending))
+    total = max(1, len(pending))
+    handled = 0  # video's waarover de app klaar is (gelukt, of definitief niet gelukt)
 
     def attempt(st, a, c, lines):
-        nonlocal steps
-        steps += 1
         if progress:
-            progress(min(0.99, steps / total), f"{c['filename']} ({'lijnen' if lines else 'omgeving'})")
+            progress(min(0.99, handled / total),
+                     f"{handled} van {total} video's · nu {c['filename']} ({'veldlijnen' if lines else 'omgeving'})")
         if st["id"] not in refs_of:
             refs_of[st["id"]] = references(store, st)
         try:
@@ -612,8 +612,72 @@ def run(store: Store, match_id: int, progress=None, worker=None) -> dict:
             if attempt(*item, lines=False):
                 pending.remove(item)
                 progress_made = True
+                handled += 1
     for item in pending:  # wat overblijft: veldlijnen zoeken
         if not attempt(*item, lines=True):
             summary["mislukt"] += 1
             analytics.invalidate(clip_id=item[2]["id"])
+        handled += 1
     return summary
+
+
+# --- hoe zeker is de kalibratie van een video? -------------------------------------------------
+# Een schatting uit wat de app weet, geen gemeten kans. Gemeten op handkalibraties: een voorstel via
+# de omgeving dat daarna op de veldlijnen is bijgesteld lag op kunstgras binnen 12 px van de hand;
+# zonder lijnen, of ver weggedraaid van het ijkmoment, ligt het vaker ernaast.
+
+def confidence(store: Store, clip: dict, kfs: list[dict] | None = None) -> dict:
+    """{"pct": 0-100 of None (geen kalibratie), "why": korte uitleg}."""
+    from .calibration import bad_px_limit, fit_calibration, mean_px, pixel_errors, camera_prior, kf_camera
+    kfs = store.keyframes(clip["id"]) if kfs is None else kfs
+    review = clip.get("calib_review")
+    if review in ("mislukt", "afgekeurd"):
+        return {"pct": None, "why": "niet gelukt" if review == "mislukt" else "afgekeurd"}
+    own = [k for k in kfs if not k.get("auto") and k.get("source") != "standplaats"]
+    prop = [k for k in kfs if k.get("source") == "standplaats"]
+    if not own and not prop:
+        return {"pct": None, "why": "nog niet gekalibreerd"}
+    why = []
+    if review == "goedgekeurd":
+        base = 97
+        why.append("door jou goedgekeurd")
+    elif own:
+        size = (int(clip.get("width") or 1920), int(clip.get("height") or 1080))
+        bad = 0
+        for k in own:
+            try:
+                K, _ = fit_calibration(k["points"], camera=kf_camera(camera_prior(clip), k))
+                e = mean_px(pixel_errors(K, k["points"], size))
+                bad += e is not None and e > bad_px_limit(size[0])
+            except (ValueError, np.linalg.LinAlgError):
+                bad += 1
+        base = 55 if bad else 95
+        why.append("je eigen ijkmoment past niet goed" if bad else "eigen ijkmoment")
+    else:
+        sc = [k["score"] if isinstance(k.get("score"), dict) else json.loads(k.get("score") or "{}") for k in prop]
+        best = max(sc, key=lambda x: (bool(x.get("lijnen")), -float(x.get("zwaai") or 0)))
+        if best.get("methode") == "lijnen":
+            base = 75
+            why.append("gevonden via de veldlijnen")
+        elif best.get("lijnen"):
+            base = 80 if best.get("draairichting_onzeker") else 90
+            why.append("via de omgeving, op de veldlijnen bijgesteld" + (" (draairichting niet te controleren)"
+                                                                         if best.get("draairichting_onzeker") else ""))
+        else:
+            base = 70
+            why.append("via de omgeving (geen veldlijnen om te controleren)")
+        turn = max([float(x.get("zwaai") or 0) for x in sc] or [0])
+        if turn > TRUST_DEG:
+            base -= 20
+            why.append(f"tot {turn:.0f}° weggedraaid van je ijkmoment")
+    # dekking: hoe groot deel van de video ligt dicht bij een ijkmoment (daartussen volgt de app de camera)
+    dur = float(clip.get("duration") or 0)
+    times = np.array([float(k["t"]) for k in kfs]) if kfs else np.zeros(0)
+    if dur > 0 and len(times):
+        grid = np.linspace(0, dur, 200)
+        cover = float((np.min(np.abs(grid[:, None] - times[None, :]), axis=1) <= 5.0).mean())
+    else:
+        cover = 1.0
+    if cover < 0.9:
+        why.append(f"{cover:.0%} van de video dicht bij een ijkmoment")
+    return {"pct": int(round(max(0, min(99, base * (0.6 + 0.4 * cover))))), "why": "; ".join(why)}

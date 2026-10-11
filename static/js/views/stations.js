@@ -14,7 +14,7 @@ const STATE = {
 // openClip(id): open die video in de kalibratie hieronder
 export function stationsPanel(match, openClip) {
   const box = h('div', { className: 'panel stations' });
-  let timer = null, open = match.clips.length > 3, stamp = Date.now();
+  let timer = null, open = false, stamp = Date.now();  // dicht: de statusbalk bovenaan vat het samen
 
   async function draw() {
     const data = await api(`/matches/${match.id}/stations`);
@@ -31,10 +31,7 @@ export function stationsPanel(match, openClip) {
     const noAnchor = data.stations.filter(s => !s.anchor && s.clips.some(c => c.state !== 'niet_geanalyseerd'));
     box.replaceChildren(head,
       h('div', { className: 'small muted' },
-        'Zie het als een fotograaf op een statief: vanaf dezelfde plek zijn positie, hoogte en zoom gelijk, alleen de kijkrichting ',
-        'verschilt. Kalibreer per standplaats één video zelf; de app legt de andere video\'s daarna als puzzelstukjes tegen de ',
-        'omgeving (bomen, huizen, borden) of zoekt de veldlijnen. Daarna loop je hieronder de plaatjes langs: liggen de gele ',
-        'lijnen op de witte lijnen? ✓ of ✗.'),
+        'Per standplaats één video zelf kalibreren; de rest doet de app. Liggen de gele lijnen op de witte? ✓ of ✗.'),
       h('div', { className: 'row', style: { margin: '10px 0' } },
         h('button', { className: 'primary', disabled: busy, onclick: async () => {
           await api(`/matches/${match.id}/stations/run`, { json: {} }); toast('Gestart'); draw();
@@ -92,6 +89,8 @@ export function stationsPanel(match, openClip) {
       h('div', { className: 'row small', style: { justifyContent: 'space-between', marginTop: '4px' } },
         h('span', { className: 'muted', title: c.filename, style: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: '150px' } }, c.filename),
         h('span', { className: `badge ${cls}` }, text)),
+      c.confidence?.pct != null ? h('div', { className: 'small', title: c.confidence.why },
+        h('span', { className: `badge ${c.confidence.pct >= 85 ? 'ok' : c.confidence.pct >= 65 ? 'busy' : 'err'}` }, `${c.confidence.pct}% zeker`)) : null,
       c.method && c.state === 'voorstel' ? h('div', { className: 'small muted' }, c.method === 'omgeving' ? 'via de omgeving' : 'via de veldlijnen') : null,
       c.uncertain && c.state === 'voorstel' ? h('div', { className: 'small warn', title: 'Het panorama is vanaf je ijkmoment ver doorgedraaid; kleine afwijkingen in de zoom tellen dan op.' },
         `Onzeker: tot ${c.turn_deg}° weggedraaid van je ijkmoment. Controleer goed, of kalibreer een video die die kant op kijkt zelf.`) : null,
@@ -107,5 +106,5 @@ export function stationsPanel(match, openClip) {
   }
 
   draw();
-  return { el: box, refresh: () => { stamp = Date.now(); draw(); }, cleanup: () => clearTimeout(timer) };
+  return { el: box, refresh: () => { stamp = Date.now(); draw(); }, cleanup: () => clearTimeout(timer), open: () => { open = true; draw(); } };
 }

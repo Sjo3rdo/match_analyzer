@@ -7,6 +7,7 @@ import { apply, inv, fitCalibration, calibrationInfo, calibrationError } from '.
 import { stationsPanel } from './stations.js';
 import { heightField } from './camheight.js';
 import { aerialPanel } from './aerial.js';
+import { jobBar } from './jobbar.js';
 
 export async function render(root, ctx) {
   const { match } = ctx;
@@ -42,10 +43,10 @@ export async function render(root, ctx) {
   const errLabel = h('span');
   const pairList = h('div', { className: 'list' });
   const fitWarn = h('div');
-  const camPanel = h('div', { className: 'panel' });
+  const camPanel = h('div');
   const kfList = h('div');
   const proposeBox = h('div');
-  const saveBtn = h('button', { className: 'primary', onclick: save }, 'Ijkmoment opslaan');
+  const saveBtn = h('button', { className: 'primary', onclick: save }, 'IJkmoment opslaan');
   const zoomLabel = h('span', { className: 'muted small' });
   const chooser = h('div', { className: 'small', style: { marginTop: '8px' } });  // keuze bij het doel / uit de lijst
   const clipSel = h('select', { onchange: e => { clip = clips.find(c => c.id === Number(e.target.value)); ctx.setParam('clip', clip.id); loadClip(); } },
@@ -56,50 +57,93 @@ export async function render(root, ctx) {
   // Begeleide modus (wizard): één video, een coach die zegt wat de volgende klik is, geen overzicht/uitleg.
   const wiz = ctx.wizard || null;
   const coach = h('div', { className: 'coach' });
-  const stations = wiz ? { el: null, refresh() {}, cleanup() {} } : stationsPanel(match, id => {
+  const openClipById = id => {
     clip = clips.find(c => c.id === id) || clip; clipSel.value = clip.id; ctx.setParam('clip', clip.id); loadClip();
-    clipSel.scrollIntoView({ behavior: 'smooth', block: 'start' });
-  });
+    window.scrollTo({ top: 0, behavior: 'smooth' });
+  };
+  const stations = wiz ? { el: null, refresh() {}, cleanup() {}, open() {} } : stationsPanel(match, openClipById);
+  const bar = jobBar(match, { wizard: !!wiz, openClip: openClipById,
+    openStations: () => { stations.open(); stations.el?.scrollIntoView({ behavior: 'smooth', block: 'start' }); },
+    onDone: () => { stations.refresh(); refreshConfidence(); refreshClip(); },
+    onDraw: () => { fitFrame(); if (Date.now() - confAt > 20000) refreshConfidence(); } });
+  let confAt = 0;
+
+  // uitleg alleen als je erom vraagt
+  const help = h('div', { className: 'hint calib-help', style: { display: 'none' } },
+    h('b', {}, 'Zo kalibreer je. '),
+    '1) Zet bij 📍 Plek waar je stond (luchtfoto of GPS); dan is 1 punt + 1 lijn genoeg. ',
+    '2) Kies met de schuif een moment. 3) Klik in het beeld op iets herkenbaars (hoek strafschopgebied, doelpaal, hoekvlag) of op een plek op een lijn. ',
+    '4) Klik hetzelfde punt of dezelfde lijn aan op de veldtekening rechts, of kies hem uit de lijst. ',
+    'Bij een doel kies je voet, bovenkant of lat. Liggen de witte lijnen op het veld? Sla op. ',
+    h('div', { className: 'muted', style: { marginTop: '6px' } },
+      'Zoomen: knijpen op het trackpad (of ⌥ + scrollen). Verschuiven: twee vingers, of Shift + slepen. Sleep een punt om het te verplaatsen; ',
+      'rechtsklik verwijdert het. Punten schuiven mee als je naar een ander moment gaat. Na opslaan kalibreert de app zelf de rest ',
+      'van deze video en de andere video\'s vanaf dezelfde plek; de balk bovenaan laat zien hoe ver hij is.'));
+  const helpBtn = h('button', { className: 'small', onclick: () => { help.style.display = help.style.display === 'none' ? '' : 'none'; } }, 'ⓘ Uitleg');
+  const resetBtn = wiz ? null : h('button', { className: 'small danger', title: 'Alle kalibraties van deze wedstrijd wissen en opnieuw beginnen',
+    onclick: async () => {
+      if (!confirm('Hele wedstrijd opnieuw kalibreren?\n\nWeg: alle ijkmomenten van alle video\'s (ook die van jou), waar je stond, ' +
+        'de veldmaten, de hoeken op de luchtfoto en wat de app voor deze plek onthouden had.\nDe video\'s en hun analyse blijven.\n\n' +
+        'Dit kan niet ongedaan worden.')) return;
+      if (!await api(`/matches/${match.id}/calibration/reset`, { json: {} }).catch(() => null)) return;  // melding staat al in beeld
+      toast('Kalibratie gewist. Begin opnieuw bij 📍 Plek.'); ctx.reload();
+    } }, '↺ Hele wedstrijd opnieuw');
+
+  // zijbalk met tabbladen: Punten · Plek · IJkmomenten
+  let tabNow = 'punten';
+  const pointsPane = h('div', {},
+    h('div', { className: 'row', style: { justifyContent: 'space-between' } }, h('h3', {}, 'Punten'), errLabel),
+    fitWarn, proposeBox, pairList,
+    h('div', { className: 'row', style: { marginTop: '10px' } },
+      saveBtn,
+      h('button', { className: 'small', onclick: usePredicted, title: 'Neem de gele voorspelling over als punten' }, 'Voorspelling overnemen'),
+      h('button', { className: 'small', onclick: () => { pairs = []; editingId = null; proposal = null; redraw(); } }, 'Leegmaken')));
+  const kfPane = h('div', {}, kfList);
+  const panes = { punten: pointsPane, plek: camPanel, ijk: kfPane };
+  const tabBar = h('div', { className: 'side-tabs' });
+  function drawTabs() {
+    const own = keyframes.filter(k => !k.auto).length;
+    const lbl = { punten: 'Punten', plek: hasCam() ? '📍 Plek' : '📍 Plek •', ijk: `IJkmomenten${keyframes.length ? ` (${own}${keyframes.length > own ? '+' + (keyframes.length - own) : ''})` : ''}` };
+    tabBar.replaceChildren(...Object.keys(panes).filter(k => !(wiz && k === 'ijk')).map(k => h('button', {
+      className: k === tabNow ? 'on' : '', title: k === 'plek' && !hasCam() ? 'Nog niet ingesteld waar je stond' : '',
+      onclick: () => showTab(k) }, lbl[k])));
+    for (const [k, el] of Object.entries(panes)) el.style.display = k === tabNow ? '' : 'none';
+  }
+  function showTab(k) { tabNow = k; drawTabs(); }
+
   root.append(...[
     wiz ? coach : null,
-    wiz ? null : h('div', { className: 'hint' },
-      'Tip: stel eerst in waar je stond (📍 hieronder, of via GPS als je video dat heeft). Dan is 1 punt + 1 lijn al genoeg. ' +
-      'Zo werkt het: 1) Kies met de schuif een moment. 2) Klik in het beeld op een herkenbaar punt (hoek strafschopgebied, ' +
-      'strafschopstip, doelpaal, hoekvlag...) of op een plek ergens op een veldlijn. 3) Klik hetzelfde punt of dezelfde lijn aan ' +
-      'in de veldtekening rechts (lijnen worden rood als je erop klikt), of kies het onder de tekening uit de lijst. Klik je bij een doel, ' +
-      'dan kies je of het de voet of de bovenkant van een paal is, of de lat. Een punt telt 2, een lijn telt mee met hoogstens 2 punten; ' +
-      'je hebt samen 8 nodig, bijv. 4 punten, of 1 punt + 3 lijnen (handig vanaf de zijlijn: zijlijn, 16-meterlijn, doellijn). ' +
-      'De witte lijnen laten zien of het klopt. Eén ijkmoment is genoeg: daarna legt de app het veld elke seconde zelf ' +
-      'opnieuw op de witte lijnen (🤖 hieronder). De gele lijnen tonen op elk moment hoe goed het past; past het ergens niet, ' +
-      'zet daar dan een extra ijkmoment.'),
-    stations.el,
-    wiz ? null : h('div', { className: 'row', style: { marginBottom: '12px' } }, 'Video:', clipSel),
-    h('div', { className: 'grid2' },
-      h('div', { className: 'panel' },
-        h('div', { className: 'row', style: { marginBottom: '8px' } }, slider, timeLabel),
+    bar.el,
+    wiz ? null : h('div', { className: 'row calib-toolbar' }, 'Video:', clipSel, h('span', { style: { flex: 1 } }), helpBtn, resetBtn),
+    wiz ? null : help,
+    h('div', { className: 'calib' },
+      h('div', { className: 'panel calib-main' },
         h('div', { className: 'frame-wrap' }, frameCanvas),
         h('div', { className: 'row small', style: { marginTop: '6px' } },
-          h('button', { title: 'Inzoomen', onclick: () => zoomBy(1.6) }, '🔍＋'),
-          h('button', { title: 'Uitzoomen', onclick: () => zoomBy(1 / 1.6) }, '🔍－'),
-          h('button', { onclick: () => { view = { s: 1, ox: 0, oy: 0 }; drawFrame(); } }, 'Passend'), zoomLabel,
-          h('span', { style: { flex: 1 } }), predToggle),
-        h('div', { className: 'small muted', style: { marginTop: '4px' } },
-          'Inzoomen: knijp op het trackpad (of ⌥ + scrollen). Verschuiven: met twee vingers vegen, of Shift + slepen. ' +
-          'Sleep een punt om het te verschuiven; rechtsklik verwijdert het. Punten die je zet schuiven mee met het veld als je ' +
-          'naar een ander moment gaat, zodat je bijv. de verre hoekvlag op een later moment kunt toevoegen.')),
-      h('div', {},
-        h('div', { className: 'panel' }, h('h3', {}, 'Veld (klik op een punt of lijn)'), pitchCanvas, chooser),
-        camPanel,
-        h('div', { className: 'panel' },
-          h('div', { className: 'row', style: { justifyContent: 'space-between' } }, h('h3', {}, 'Punten in dit ijkmoment'), errLabel),
-          fitWarn,
-          proposeBox,
-          pairList,
-          h('div', { className: 'row', style: { marginTop: '10px' } },
-            saveBtn,
-            h('button', { onclick: usePredicted }, 'Voorspelde punten overnemen'),
-            h('button', { onclick: () => { pairs = []; editingId = null; proposal = null; redraw(); } }, 'Leegmaken'))),
-        wiz ? null : h('div', { className: 'panel' }, h('h3', {}, 'Ijkmomenten van deze video'), kfList)))].filter(Boolean));
+          slider, timeLabel,
+          h('button', { className: 'small', title: 'Inzoomen', onclick: () => zoomBy(1.6) }, '🔍＋'),
+          h('button', { className: 'small', title: 'Uitzoomen', onclick: () => zoomBy(1 / 1.6) }, '🔍－'),
+          h('button', { className: 'small', onclick: () => { view = { s: 1, ox: 0, oy: 0 }; drawFrame(); } }, 'Passend'), zoomLabel,
+          predToggle)),
+      h('div', { className: 'calib-side' },
+        h('div', { className: 'panel tight' }, pitchCanvas, chooser),
+        tabBar,
+        h('div', { className: 'panel tight' }, pointsPane, camPanel, kfPane))),
+    stations.el].filter(Boolean));
+
+  // zekerheid per video in de keuzelijst
+  async function refreshConfidence() {
+    if (wiz) return;
+    confAt = Date.now();
+    const conf = await api(`/matches/${match.id}/confidence`).catch(() => null);
+    if (!conf) return;
+    for (const o of clipSel.options) {
+      const c = clips.find(x => x.id === Number(o.value)), k = conf[o.value];
+      o.textContent = `${c.filename}${k?.pct != null ? ` · ${k.pct}% zeker` : ' · nog niet gekalibreerd'}`;
+      o.title = k?.why || '';
+    }
+  }
+  refreshConfidence();
 
   const pv = new PitchView(pitchCanvas, { margin: 14 });  // ruimte om je eigen plek naast het veld aan te klikken
   requestAnimationFrame(() => { pv.resize(); drawPitch(); });
@@ -307,7 +351,7 @@ export async function render(root, ctx) {
         ...pitchInfo.elevated.map(l => opt(`u|${l.name}`, label(l.name))),
         ...pitchInfo.elevated_lines.map(l => opt(`ul|${l.name}`, `${l.name} (ergens op de lat)`))]));
     rows.push(h('div', { className: 'row' }, list,
-      h('span', { className: 'muted' }, 'Zie je alleen een zijlijn? Kies "Zijlijn onder" (de kant waar jij staat als je onderaan de tekening staat) en klik er een paar plekken op aan.')));
+      h('span', { className: 'muted', title: '"Zijlijn onder" is de zijlijn aan jouw kant. Klik er een paar plekken op aan.' }, 'Alleen een zijlijn? Kies "Zijlijn onder".')));
     chooser.replaceChildren(...rows);
   }
 
@@ -388,7 +432,7 @@ export async function render(root, ctx) {
   }
 
   function drawCamPanel() {
-    drawCoach();
+    drawCoach(); drawTabs();
     const hNow = clip.cam_h || 1.6;
     camPanel.replaceChildren(...[
       h('h3', {}, '📍 Waar stond je bij het filmen?'),
@@ -437,14 +481,13 @@ export async function render(root, ctx) {
             placingDir ? 'Klik nu op het veld waar het midden van je beeld is…' : '🧭 Geef kijkrichting aan'),
           clip.cam_yaw != null ? h('button', { onclick: () => setCamera({ yaw: null }) }, 'Wissen') : null,
           h('span', { className: 'small muted' }, clip.cam_yaw != null ? '✓ aangegeven (blauwe pijl)' : 'of sleep vanaf je blauwe stip')),
-        h('div', { className: 'small muted', style: { marginTop: '4px' } },
-          'Wordt bij het opslaan bewaard bij dit ijkmoment. Zwenk je later in de video, geef hem dan voor dat moment opnieuw aan.')) : null,
+        null) : null,
       h('div', { style: { marginTop: '10px' } }, h('div', { className: 'small', style: { marginBottom: '4px' } }, 'Hoe hoog hield je de telefoon?'),
         heightField(hNow, v => hasCam() ? setCamera({ h: v }) : (clip.cam_h = v), fit.cam ? fit.cam.h : null)),
       gpsError ? h('div', { className: 'hint warn-hint', style: { marginTop: '8px' } }, h('b', {}, 'Zoeken via GPS lukte niet. '), gpsError,
         h('div', {}, 'Klik dan zelf op "📍 Klik waar je stond" en daarna op de veldtekening.')) : null,
       clip.gps_lat != null && !hasCam() ? h('div', { className: 'small muted', style: { marginTop: '6px' } },
-        'Deze video bevat een GPS-positie. "Zoek via GPS" zoekt het veld op in OpenStreetMap (alleen de coördinaat wordt verstuurd).') : null,
+        'Tip: 🛰️ Luchtfoto is het nauwkeurigst (hoekvlaggen + je plek aanklikken).') : null,
       osmSize ? h('div', { className: 'hint', style: { marginTop: '8px' } },
         `Volgens OpenStreetMap is dit veld ${osmSize[0]} × ${osmSize[1]} m (de app rekent nu met ${pitchInfo.length} × ${pitchInfo.width} m). `,
         h('button', { className: 'primary', onclick: async () => {
@@ -468,13 +511,18 @@ export async function render(root, ctx) {
           toast('Veldmaten opgeslagen'); ctx.reload();
         } }, 'Opslaan')),
       h('div', { className: 'small muted', style: { marginTop: '4px' } },
-        'Standaard 105 × 68 m. Amateurvelden zijn vaak kleiner (bijv. 100 × 64); met de echte maten kloppen afstanden en posities beter. ',
-        'Het strafschopgebied en de middencirkel zijn altijd even groot.'));
+        'Via de luchtfoto vult de app dit zelf in. Amateurvelden zijn vaak kleiner dan 105 × 68 m.'));
   }
 
+  // het beeld zo groot als past, met de schuif eronder nog in beeld (wat erboven staat wisselt in hoogte)
+  function fitFrame() {
+    const top = frameCanvas.getBoundingClientRect().top + window.scrollY;
+    frameCanvas.style.maxHeight = `${Math.max(300, window.innerHeight - top - 62)}px`;
+  }
   function drawFrame() {
     const c = frameCanvas.getContext('2d');
     if (!img) return;
+    fitFrame();
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.fillStyle = '#000'; c.fillRect(0, 0, frameCanvas.width, frameCanvas.height);
     c.setTransform(view.s, 0, 0, view.s, -view.ox * view.s, -view.oy * view.s);
@@ -771,6 +819,7 @@ export async function render(root, ctx) {
     kfList.replaceChildren(...(rows.length ? rows : [h('div', { className: 'muted small' },
       'Nog geen ijkmomenten. Kalibreer er één; daarna stelt de app de rest van de video automatisch bij.')]), autoPanel(autos, manual),
       trainPanel(manual) || '');
+    drawTabs();
   }
 
   // Klopt alles? Dan mag de app van deze video leren (pas trainen als jij dat kiest, bij Trainen).
@@ -800,8 +849,7 @@ export async function render(root, ctx) {
     const jump = k => { t = k.t; slider.value = t; loadFrame({ warp: true }); loadKeyframes(); };
     const review = autos.length && !busy ? h('div', {},
       h('div', { className: 'small muted', style: { margin: '6px 0' } },
-        'Controleer ze gerust: klik op een tijd om dat moment te zien. De gele stippellijnen tonen hoe het veld daar ligt. ',
-        'Klopt het? Dan ✓. Klopt het niet? ✗ verwijdert hem, ✎ zet de punten klaar om zelf bij te stellen.'),
+        'Klik op een tijd om te kijken. ✓ klopt · ✎ zelf bijstellen · ✗ weg.'),
       h('div', { className: 'list', style: { maxHeight: '220px', overflowY: 'auto' } }, autos.map(k => h('div', {
         className: 'list-item', style: Math.abs(k.t - t) < 0.05 ? { outline: '2px solid var(--accent, #0a84ff)' } : {}, onclick: () => jump(k) },
         h('b', {}, fmtTime(k.t)),
@@ -830,7 +878,7 @@ export async function render(root, ctx) {
           busy ? `bezig ${Math.round(100 * (clip.calib_progress || 0))}%` : `${autos.length} ijkmomenten`)),
       h('div', { className: 'small muted', style: { margin: '4px 0' } },
         st === 'fout' ? clip.calib_message
-          : busy ? 'De app zoekt elke seconde de witte lijnen en legt het veld er opnieuw op.'
+          : busy ? 'De app legt het veld elke seconde opnieuw op de witte lijnen (op de achtergrond).'
           : clip.status !== 'klaar' ? 'Start na de analyse vanzelf.'
           : !manual.length ? 'Start vanzelf zodra je één ijkmoment hebt opgeslagen.'
           : (clip.calib_message || '') + (hasCam() ? '' : ' Tip: stel in waar je stond; dan werkt het bijstellen veel nauwkeuriger.')),
@@ -871,9 +919,12 @@ export async function render(root, ctx) {
     clip.cam_yaw = null;  // bewaard bij dit ijkmoment
     ctx.refreshSteps?.();
     t = res.t;
-    toast(`Ijkmoment opgeslagen (afwijking ${res.error_px != null ? res.error_px + ' px' : res.error_m + ' m'})${clip.status === 'klaar' ? ' – de app stelt nu de rest van de video automatisch bij' : ''}`);
+    toast(`IJkmoment opgeslagen (afwijking ${res.error_px != null ? res.error_px + ' px' : res.error_m + ' m'}). ` +
+      (clip.status !== 'klaar' ? 'Na de analyse stelt de app de rest van de video zelf bij.'
+        : `De app stelt nu de rest van deze video bij${res.others ? ` en kalibreert ${res.others} andere video('s) vanaf dezelfde plek` : ''}. ` +
+          'Dat gaat op de achtergrond (zie de balk bovenaan); je kunt gewoon doorgaan.'));
     setTimeout(refreshClip, 500);
-    await loadKeyframes(); stations.refresh();
+    await loadKeyframes(); stations.refresh(); bar.refresh(); refreshConfidence();
     if (wiz) return wiz.onSaved(clip);
     predicted = clip.status === 'klaar' ? await api(`/clips/${clip.id}/predict?t=${t}`) : [];
     drawFrame();
@@ -902,6 +953,7 @@ export async function render(root, ctx) {
     view = { s: 1, ox: 0, oy: 0 };
     await loadKeyframes();
     const manual = keyframes.filter(k => !k.auto);
+    showTab(!hasCam() && !manual.length ? 'plek' : 'punten');
     if (manual.length) { const kf = manual[0]; t = kf.t; slider.value = t; pairs = kf.points.map(p => ({ ...p })); editingId = kf.id; }
     await loadFrame();
     // nog niets gekalibreerd: de app doet zelf een voorstel (in de wizard is dat al geprobeerd)
@@ -925,7 +977,7 @@ export async function render(root, ctx) {
 
   function drawProposal() {
     drawCoach();
-    saveBtn.textContent = proposal && !proposal.failed ? '✓ Klopt – opslaan' : 'Ijkmoment opslaan';
+    saveBtn.textContent = proposal && !proposal.failed ? '✓ Klopt – opslaan' : 'IJkmoment opslaan';
     const manualCount = keyframes.filter(k => !k.auto).length;
     const btn = h('button', { disabled: proposing || !hasCam(), title: hasCam() ? '' : 'Stel eerst in waar je stond',
       onclick: runPropose }, proposing ? '⏳ Veld zoeken… (± 10 s)' : '🤖 Zoek het veld automatisch');
@@ -947,10 +999,10 @@ export async function render(root, ctx) {
       ...[h('div', { className: 'row' }, btn), body].filter(Boolean)));
   }
   await loadClip();
-  const onResize = () => { pv.resize(); drawPitch(); };
+  const onResize = () => { pv.resize(); drawPitch(); fitFrame(); };
   window.addEventListener('resize', onResize);
   return () => {
-    stations.cleanup(); closeAerial();
+    stations.cleanup(); bar.cleanup(); closeAerial();
     clearTimeout(calibTimer); window.removeEventListener('mouseup', onUp); window.removeEventListener('mousemove', onPan);
     window.removeEventListener('resize', onResize);
   };
