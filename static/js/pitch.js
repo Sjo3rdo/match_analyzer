@@ -7,18 +7,25 @@ export function setPitchSize(length, width) {
 }
 
 export class PitchView {
-  constructor(canvas, { margin = 4 } = {}) {
+  constructor(canvas, { margin = 4, maxHeight = null } = {}) {
     this.canvas = canvas;
     canvas.style.width = '100%';
     this.margin = margin;
+    this.maxHeight = maxHeight;  // te hoog? dan smaller maken, nooit platdrukken (anders kloppen klikken niet meer)
     this.ctx = canvas.getContext('2d');
     this.resize();
   }
   resize(width) {
-    const w = width || this.canvas.clientWidth || this.canvas.parentElement?.clientWidth || 600;
+    if (!width && this.maxHeight) this.canvas.style.width = '100%';  // eerst de volle breedte meten
+    let w = width || this.canvas.clientWidth || this.canvas.parentElement?.clientWidth || 600;
+    const ratio = (W + 2 * this.margin) / (L + 2 * this.margin);
+    if (this.maxHeight && w * ratio > this.maxHeight) {
+      w = this.maxHeight / ratio;
+      this.canvas.style.width = w + 'px';
+    }
     const dpr = window.devicePixelRatio || 1;
     this.cssW = w;
-    this.cssH = w * (W + 2 * this.margin) / (L + 2 * this.margin);
+    this.cssH = w * ratio;
     this.canvas.width = Math.round(this.cssW * dpr);
     this.canvas.height = Math.round(this.cssH * dpr);
     this.canvas.style.height = this.cssH + 'px';

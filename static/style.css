@@ -262,7 +262,7 @@ td.rust { color: var(--warn); padding: 6px 10px; }
 .calib-side { position: sticky; top: 76px; max-height: calc(100vh - 92px); overflow-y: auto; display: flex; flex-direction: column; gap: 8px; }
 .calib-side .panel { margin: 0; }
 .panel.tight { padding: 10px 12px; }
-.calib-side canvas { max-height: 230px; }
+.calib-side canvas { display: block; margin: 0 auto; }
 .side-tabs { display: flex; gap: 2px; background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 3px; }
 .side-tabs button { flex: 1; text-align: center; justify-content: center; border: 0; background: transparent; padding: 6px 8px; font-size: 12.5px; }
 .side-tabs button.on { background: var(--accent); color: var(--accent-ink); }

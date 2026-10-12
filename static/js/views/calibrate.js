@@ -145,7 +145,7 @@ export async function render(root, ctx) {
   }
   refreshConfidence();
 
-  const pv = new PitchView(pitchCanvas, { margin: 14 });  // ruimte om je eigen plek naast het veld aan te klikken
+  const pv = new PitchView(pitchCanvas, { margin: 14, maxHeight: 230 });  // ruimte om je eigen plek naast het veld aan te klikken
   requestAnimationFrame(() => { pv.resize(); drawPitch(); });
   drawChooser();
 
